@@ -2,7 +2,7 @@ import request from 'supertest';
 import { beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../server/app.js';
 
-const app = createApp();
+const app = await createApp();
 type Agent = ReturnType<typeof request.agent>;
 
 /** A signed-in browser: keeps the session cookie and sends the CSRF header. */
@@ -288,5 +288,45 @@ describe('login rate limits', () => {
     expect(statuses).toContain(429);
     // The real student is also blocked for a while: the account is protected, not the attacker's IP.
     expect((await request(app).post('/api/auth/login').set('x-ej', '1').send({ loginId: s.idCardNo, password: 'secret12' })).status).toBe(429);
+  });
+});
+
+describe('hosting-safe storage and concurrency', () => {
+  // 1x1 transparent PNG
+  const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==', 'base64');
+
+  it('keeps complaint photos in the database and shows them only to the owner and staff', async () => {
+    const owner = await newStudent();
+    const other = await newStudent();
+    const o = await order(owner.id);
+    const c = await owner.agent.post('/api/me/complaints').set('x-ej', '1')
+      .field('orderId', String(o.body.id)).field('category', 'Damaged clothes').field('description', 'Torn sleeve on the blue shirt')
+      .attach('photo', png, { filename: 'tear.png', contentType: 'image/png' });
+    expect(c.status, c.body.error).toBe(201);
+    const name = c.body.photo as string;
+    expect(name).toMatch(/^[0-9a-f]{32}\.png$/);
+    const mine = await owner.agent.get(`/api/files/${name}`);
+    expect(mine.status).toBe(200);
+    expect(Buffer.compare(mine.body as Buffer, png)).toBe(0);
+    expect((await other.agent.get(`/api/files/${name}`)).status).toBe(403);
+    expect((await staff.get(`/api/files/${name}`)).status).toBe(200);
+  });
+
+  it('two counters handing over the same slip at once: only one succeeds', async () => {
+    const s = await newStudent();
+    const o = await order(s.id, 3, 9);
+    await post(staff, '/api/ops/orders/status', { ids: [o.body.id], status: 'READY' });
+    const [a, b] = await Promise.all([
+      post(staff, `/api/ops/orders/${o.body.id}/deliver`, { returnedCount: 9 }),
+      post(admin, `/api/ops/orders/${o.body.id}/deliver`, { returnedCount: 9 }),
+    ]);
+    expect([a.status, b.status].sort()).toEqual([200, 409]);
+  });
+
+  it('parallel orders for one student still respect the in-progress limit', async () => {
+    const s = await newStudent();
+    const results = await Promise.all([1, 2, 3, 4].map(() => order(s.id, 2, 5)));
+    const ok = results.filter(r => r.status === 201).length;
+    expect(ok).toBe(2);   // max_active_orders = 2
   });
 });

@@ -1,8 +1,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import express from 'express';
-import { migrate } from './db.js';
-import { appCors, csrf, session } from './auth.js';
+import { db, migrate } from './db.js';
+import { appCors, csrf, initAuthSecret, session } from './auth.js';
 import { serveFile } from './files.js';
 import { ensureAdmin, seedDemo } from './seed.js';
 import { HttpError, errorHandler } from './util.js';
@@ -11,10 +11,13 @@ import { router as studentRoutes } from './routes/student.js';
 import { router as opsRoutes } from './routes/ops.js';
 import { router as adminRoutes } from './routes/admin.js';
 
-export function createApp({ demo = false } = {}) {
-  migrate();
-  ensureAdmin(demo);
-  if (demo) seedDemo();
+/** Open the database (SQLite or Postgres), create tables, load the signing secret, and seed. */
+export async function createApp({ demo = false } = {}) {
+  await db.open();
+  await migrate();
+  await initAuthSecret();
+  await ensureAdmin(demo);
+  if (demo) await seedDemo();
 
   const app = express();
   app.disable('x-powered-by');

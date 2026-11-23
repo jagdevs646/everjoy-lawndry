@@ -30,26 +30,51 @@ To start fresh, stop the server and delete `data/lawndry.db*`.
 
 ```bash
 npm run dev     # website + API with demo data, auto-reload
-npm test        # API tests (uses an in-memory database)
+npm test        # API tests, run on both SQLite and Postgres (in-memory)
 npm run build   # type-check + build the website into dist/
 npm start       # production: one server for website + API (no demo data)
 npm run demo    # build, then run the production server with demo data
 ```
 
-## Going live (one server)
+## Database: SQLite or Postgres
 
-The whole app is **one Node.js process and one database file**. That is enough for thousands of students: SQLite in WAL mode handles many readers at once, and each order is a few-millisecond write.
+The server works with either engine, chosen by one setting:
 
-1. Get a small server with a disk: any VPS (₹400–800/month), Render or Railway with a persistent disk, or a PC at the college.
-2. Set these environment variables:
-   - `JWT_SECRET`: a long random string (required in production).
-   - `NODE_ENV=production`
-   - `ADMIN_PASSWORD`: first admin password (you'll be asked to change it on first sign-in).
-   - Optional: `PORT` (default 3001), `DB_PATH` (default `data/lawndry.db`), `UPLOAD_DIR` (default `uploads/`), `APP_TZ` (default `Asia/Kolkata`).
-3. Run `npm ci && npm run build && npm start`.
-4. Put it behind **HTTPS** (Caddy or Nginx with Let's Encrypt, or the host's built-in HTTPS). HTTPS is required for phone cameras and secure cookies.
+| Setting | Engine | Use it for |
+|---|---|---|
+| `DATABASE_URL=postgres://…` | Postgres | Hosting on Render (free) with a free Neon database |
+| *(not set)* | SQLite file `data/lawndry.db` (or `DB_PATH`) | This laptop, a college PC, any server with a real disk |
+
+Complaint photos and the session signing key are stored in the database too, so nothing is lost when a host wipes its disk.
+
+## Going live for free: Render + Neon
+
+**Render** runs the server (website + API) for free. Its free disk is wiped on every restart, so the data lives in a free **Neon** Postgres database.
+
+**One-time setup**
+1. **Neon:** sign up at [neon.tech](https://neon.tech) (free), create a project (region: Singapore is closest to India), and copy its **connection string** (`postgresql://…sslmode=require`).
+2. **Render:** open the `everjoy-lawndry` service → **Environment** → add `DATABASE_URL` = that connection string → **Save, rebuild and deploy**. You paste it yourself so the password never passes through anyone else.
+3. Open the Render service URL. The first admin password is printed in Render → **Logs** ("First admin account → …"). Sign in as `ADMIN` and change it.
+
+**Render settings** (already configured on the service):
+- Build: `npm ci --include=dev && npm run build`
+- Start: `npm start`
+- Environment: `NODE_ENV=production`, `TRUST_PROXY=1`, `APP_TZ=Asia/Kolkata`, `DEMO=1` while testing
+- To start with a clean database for real use, set `DEMO=0`, then in the Neon console run `DROP SCHEMA public CASCADE; CREATE SCHEMA public;` and redeploy.
+
+**Good to know about free tiers**
+- Render's free server **sleeps after 15 minutes without visitors**. The next visit takes about a minute while it wakes. To keep it awake during counter hours, add a free monitor (e.g. UptimeRobot) that opens `https://<your-service>.onrender.com/api/health` every 10 minutes.
+- Neon free gives 0.5 GB, enough for years of orders. Photos are shrunk on the phone before upload.
+- Pushing to the `main` branch on GitHub redeploys Render automatically.
+
+## Going live on your own server
+
+1. Any machine with a disk: a VPS, or a PC at the college. SQLite needs nothing else. Set `DATABASE_URL` to use Postgres instead.
+2. Environment: `NODE_ENV=production`. Optional: `ADMIN_PASSWORD` (first admin password, otherwise a random one is printed once), `JWT_SECRET` (otherwise a random key is generated and kept in the database), `PORT` (default 3001), `DB_PATH`, `APP_TZ` (default `Asia/Kolkata`), `TRUST_PROXY` (set when behind a proxy other than one on the same machine).
+3. Run `npm ci --include=dev && npm run build && npm start`.
+4. Put it behind **HTTPS** (Caddy or Nginx with Let's Encrypt). HTTPS is required for phone cameras and secure cookies.
 5. Sign in as `ADMIN` and follow the setup checklist on the Overview page: add hostels, create staff, review rules.
-6. **Backups**: Admin → Reports → *Download backup* (weekly), or copy `data/lawndry.db` from the server. Also keep `uploads/` (complaint photos).
+6. **Backups**: Admin → Reports → *Download backup* weekly (a `.db` file on SQLite, a `.json` file on Postgres).
 
 ## Android and iPhone apps
 

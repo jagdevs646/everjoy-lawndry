@@ -1,7 +1,5 @@
 import type { NextFunction, Request, Response } from 'express';
 import crypto from 'node:crypto';
-import fs from 'node:fs';
-import path from 'node:path';
 import jwt from 'jsonwebtoken';
 import { db } from './db.js';
 import { HttpError } from './util.js';
@@ -12,28 +10,35 @@ export type AuthedRequest = Request & { user: AuthUser };
 
 /**
  * Signing secret for sessions. Use JWT_SECRET if set; otherwise generate a random secret once
- * and keep it next to the database (data/.jwt-secret), so a forgotten setting never falls back
- * to a value anyone could read in the source code.
+ * and keep it in the database (app_secrets, key 'jwt'), so a forgotten setting never falls back
+ * to a value anyone could read in the source code, and every server sharing the database
+ * (e.g. several hosted instances, or a restart on a fresh disk) signs with the same secret.
  */
-function loadSecret() {
-  if (process.env.JWT_SECRET) return process.env.JWT_SECRET;
-  const dbPath = process.env.DB_PATH || path.resolve('data', 'lawndry.db');
-  if (dbPath === ':memory:') return crypto.randomBytes(32).toString('hex');
-  const file = path.join(path.dirname(dbPath), '.jwt-secret');
-  try {
-    const saved = fs.readFileSync(file, 'utf8').trim();
-    if (saved.length >= 32) return saved;
-  } catch { /* first start */ }
-  const fresh = crypto.randomBytes(48).toString('hex');
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.writeFileSync(file, fresh, { mode: 0o600 });
-  return fresh;
+let SECRET: string | null = null;
+
+/** Load (or create once) the signing secret. Call after db.open() and migrate(), before serving requests. */
+export async function initAuthSecret() {
+  if (process.env.JWT_SECRET) { SECRET = process.env.JWT_SECRET; return; }
+  const read = async () => (await db.get<{ value: string }>('SELECT value FROM app_secrets WHERE key = ?', ['jwt']))?.value;
+  let saved = await read();
+  if (!saved) {
+    // Two servers starting at once may both get here: DO NOTHING keeps the first, and re-reading makes them agree.
+    await db.run('INSERT INTO app_secrets (key, value) VALUES (?, ?) ON CONFLICT(key) DO NOTHING', ['jwt', crypto.randomBytes(48).toString('hex')]);
+    saved = await read();
+  }
+  if (!saved) throw new Error('Could not load or create the session signing secret.');
+  SECRET = saved;
 }
-const SECRET = loadSecret();
+
+function secret() {
+  if (!SECRET) throw new Error('Session signing secret not loaded yet. Call initAuthSecret() at startup.');
+  return SECRET;
+}
+
 const COOKIE = 'ej_session';
 const MAX_AGE_DAYS = 30;  // students stay signed in on their own phone
 
-const issueToken = (userId: number, tokenVersion: number) => jwt.sign({ sub: userId, v: tokenVersion }, SECRET, { expiresIn: `${MAX_AGE_DAYS}d` });
+const issueToken = (userId: number, tokenVersion: number) => jwt.sign({ sub: userId, v: tokenVersion }, secret(), { expiresIn: `${MAX_AGE_DAYS}d` });
 
 export function setSessionCookie(res: Response, userId: number, tokenVersion: number) {
   res.cookie(COOKIE, issueToken(userId, tokenVersion), {
@@ -90,23 +95,24 @@ function readCookie(req: Request, name: string) {
   return null;
 }
 
-export function loadUser(id: number, version?: number): AuthUser | null {
-  const u = db.prepare(`SELECT u.id, u.role, u.name, u.login_id, u.active, u.must_change_password, u.token_version, s.status AS student_status
-    FROM users u LEFT JOIN students s ON s.user_id = u.id WHERE u.id = ?`).get(id) as
-    { id: number; role: Role; name: string; login_id: string; active: number; must_change_password: number; token_version: number; student_status: string | null } | undefined;
+export async function loadUser(id: number, version?: number): Promise<AuthUser | null> {
+  const u = await db.get<{ id: number; role: Role; name: string; login_id: string; active: number; must_change_password: number; token_version: number; student_status: string | null }>(
+    `SELECT u.id, u.role, u.name, u.login_id, u.active, u.must_change_password, u.token_version, s.status AS student_status
+    FROM users u LEFT JOIN students s ON s.user_id = u.id WHERE u.id = ?`, [id]);
   if (!u || !u.active) return null;
   if (version !== undefined && version !== u.token_version) return null;  // password changed / reset → old sessions die
   return { id: u.id, role: u.role, name: u.name, login_id: u.login_id, must_change_password: !!u.must_change_password, ...(u.student_status ? { student_status: u.student_status } : {}) };
 }
 
 /** Attach req.user when a valid bearer token (app) or session cookie (website) is present. */
-export function session(req: Request, _res: Response, next: NextFunction) {
+export async function session(req: Request, _res: Response, next: NextFunction) {
   const bearer = /^Bearer\s+(\S+)$/i.exec(req.headers.authorization || '')?.[1];
   const token = bearer || readCookie(req, COOKIE);
   if (token) {
+    const key = secret();  // outside the try: a missing initAuthSecret() is a startup bug, not a signed-out user
     try {
-      const p = jwt.verify(token, SECRET) as unknown as { sub: number; v: number };
-      const user = loadUser(Number(p.sub), p.v);
+      const p = jwt.verify(token, key) as unknown as { sub: number; v: number };
+      const user = await loadUser(Number(p.sub), p.v);
       if (user) (req as AuthedRequest).user = user;
     } catch { /* expired or tampered: treat as signed out */ }
   }

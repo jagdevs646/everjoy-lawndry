@@ -311,6 +311,26 @@ function ComplaintCard({ c }: { c: Complaint }) {
   );
 }
 
+/**
+ * Shrink a camera photo before upload (longest side 1600 px, JPEG): faster on campus data and
+ * keeps the database small. Falls back to the original if the browser can't decode it (e.g. HEIC).
+ */
+async function shrinkPhoto(file: File): Promise<Blob> {
+  try {
+    const bitmap = await createImageBitmap(file);
+    const scale = Math.min(1, 1600 / Math.max(bitmap.width, bitmap.height));
+    if (scale === 1 && file.size < 900_000) return file;
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.round(bitmap.width * scale);
+    canvas.height = Math.round(bitmap.height * scale);
+    canvas.getContext('2d')!.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+    const blob = await new Promise<Blob | null>(r => canvas.toBlob(r, 'image/jpeg', 0.82));
+    return blob && blob.size < file.size ? blob : file;
+  } catch {
+    return file;
+  }
+}
+
 function NewComplaint({ categories, orderId, close, onDone }: { categories: string[]; orderId?: string; close: () => void; onDone: () => void }) {
   const orders = useLoad(() => api<{ rows: Order[] }>('/me/orders?limit=20'), []);
   const [f, setF] = useState({ orderId: orderId ?? '', category: '', description: '' });
@@ -320,7 +340,7 @@ function NewComplaint({ categories, orderId, close, onDone }: { categories: stri
     e.preventDefault();
     const form = new FormData();
     Object.entries(f).forEach(([k, v]) => form.append(k, v));
-    if (photo) form.append('photo', photo);
+    if (photo) { const small = await shrinkPhoto(photo); form.append('photo', small, small === photo ? photo.name : 'photo.jpg'); }
     if (await submit(() => api('/me/complaints', { form }), 'Complaint sent. You will get a reply here.')) onDone();
   };
   return (
