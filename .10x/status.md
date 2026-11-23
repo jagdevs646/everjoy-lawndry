@@ -1,6 +1,6 @@
 # Project status
 
-Phase: **live on Render (free); apps built; waiting for the Neon database**
+Phase: **live on Render (free) with Neon Postgres; data persists across restarts**
 
 | Task | Owner | Status |
 |---|---|---|
@@ -10,6 +10,6 @@ Phase: **live on Render (free); apps built; waiting for the Neon database**
 | SQLite + Postgres db layer, 52 tests on both | senior-engineer | Done |
 | Private GitHub repo jagdevs646/everjoy-lawndry | senior-engineer | Done |
 | Render web service everjoy-lawndry (free, Singapore) | senior-engineer | Live: https://everjoy-lawndry.onrender.com |
-| Create Neon DB, set DATABASE_URL on Render | owner | Not started |
+| Create Neon DB, set DATABASE_URL on Render | owner | Done (verified: Postgres in logs, no re-seed after restart) |
 | Sign in on the live site, check each role | owner | Not started |
 | Switch DEMO=0 and reset the DB before real use | owner | Later |

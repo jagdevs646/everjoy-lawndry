@@ -29,7 +29,7 @@ Date: 2026-11-23/24. The owner asked for (1) an Android APK and an iOS app that 
 - Known gap: PGlite serialises every query, so the race tests can't prove the Postgres row locks. They are correct by design, but untested against a real multi-connection Postgres.
 
 ## Open items
-- The owner must create the Neon database and paste `DATABASE_URL` into Render. Until then the live server uses a temporary SQLite file, which resets on every restart or sleep.
+- Neon connected (2026-11-24): startup logs show Postgres, and a redeploy did not re-seed, so the data persists. Neon's sslmode=require is rewritten to verify-full in pgDriver.
 - Live sign-in has not been exercised by Claude, by policy: it is a production host. The owner should sign in once with the demo accounts.
 - The camera could not be tested on the emulator (Google Play Services crashes on that image), so it needs a real phone.
 - iOS needs a Mac with Xcode and a $99/year Apple Developer account.
