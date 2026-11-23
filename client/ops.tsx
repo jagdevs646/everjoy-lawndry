@@ -1,0 +1,389 @@
+/* Building blocks shared by the staff counter and the admin office. */
+import { FormEvent, useState } from 'react';
+import { api, Complaint, Hostel, Order, Student, Usage } from './api';
+import { eventLabel } from './student';
+import { ago, kg, plural, rupees, toast, useAction, useFormAction, useLoad, when } from './lib';
+import { Button, Empty, ErrorNote, Field, Icon, Loading, PayPill, Photo, Segmented, Sheet, StatusPill, Stepper } from './ui';
+
+export type OpsSettings = { max_kg_per_order: number; express_enabled: boolean; express_fee: number; pay_before_pickup: boolean; monthly_kg_limit: number; monthly_order_limit: number; max_active_orders: number; regular_rate_per_kg: number; extra_rate_per_kg: number; upi_id: string };
+export type CounterStudent = Student & { usage: Usage; open: Order[]; orders?: Order[] };
+
+const isOpen = (o: Order) => ['RECEIVED', 'WASHING', 'READY'].includes(o.status);
+
+/* ------------------------------------------------------------ order sheet */
+
+export function OrderSheet({ id, close, onChanged, isAdmin, payFirst }: { id: number; close: () => void; onChanged?: () => void; isAdmin: boolean; payFirst: boolean }) {
+  const d = useLoad(() => api<Order>(`/ops/orders/${id}`), [id]);
+  const [mode, setMode] = useState<'view' | 'handover' | 'fix' | 'cancel' | 'pay' | 'waive'>('view');
+  const { busy, run } = useAction();
+  const changed = (o: Order) => { d.set(o); setMode('view'); onChanged?.(); };
+  const setStatus = async (status: string) => {
+    if (await run(() => api('/ops/orders/status', { body: { ids: [id], status } }), `Marked ${status === 'READY' ? 'ready' : status.toLowerCase()}`)) { await d.reload(); onChanged?.(); }
+  };
+  const o = d.data;
+  return (
+    <Sheet title={o ? o.order_no : 'Order'} onClose={close} size="md" className="order-sheet">
+      {!o ? (d.error ? <ErrorNote error={d.error} retry={d.reload} /> : <Loading />) : mode === 'handover' ? (
+        <HandOver o={o} payFirst={payFirst} onDone={changed} onCancel={() => setMode('view')} />
+      ) : mode === 'fix' ? (
+        <FixOrder o={o} onDone={changed} onCancel={() => setMode('view')} />
+      ) : mode === 'cancel' || mode === 'waive' ? (
+        <ReasonForm o={o} kind={mode} onDone={changed} onCancel={() => setMode('view')} />
+      ) : mode === 'pay' ? (
+        <PayForm o={o} onDone={changed} onCancel={() => setMode('view')} />
+      ) : (
+        <div className="stack">
+          <div className="os-head">
+            <StatusPill status={o.status} late={o.late} />
+            <PayPill o={o} />
+            {o.service === 'EXPRESS' && <span className="pill express">Express</span>}
+          </div>
+          <StudentLine o={o} />
+          <dl className="facts">
+            <div><dt>Clothes</dt><dd className="big">{o.clothes_count}{o.returned_count != null ? <small> / {o.returned_count} returned</small> : null}</dd></div>
+            <div><dt>Weight</dt><dd className="big">{kg(o.weight_kg)}</dd></div>
+            <div><dt>Received</dt><dd>{when(o.received_at, 'short')}<small>{o.received_by_name}</small></dd></div>
+            <div><dt>{o.ready_at ? 'Ready' : 'Expected'}</dt><dd>{when(o.ready_at || o.expected_at, 'short')}</dd></div>
+            {o.delivered_at && <div><dt>Handed over</dt><dd>{when(o.delivered_at, 'short')}<small>{o.delivered_by_name}</small></dd></div>}
+            {o.amount > 0 && <div><dt>Amount</dt><dd>{rupees(o.amount)}<small>{o.extra_kg ? `${kg(o.extra_kg)} over limit` : ''}{o.paid_ref ? ` Ref ${o.paid_ref}` : ''}</small></dd></div>}
+          </dl>
+          {o.note && <p className="note-line"><Icon name="tag" size={16} />{o.note}</p>}
+          {o.cancel_reason && <p className="note-line bad"><Icon name="x" size={16} />{o.cancel_reason}</p>}
+          {isOpen(o) && (
+            <>
+              <div className="status-row" role="group" aria-label="Change status">
+                {(['RECEIVED', 'WASHING', 'READY'] as const).map(s => (
+                  <button key={s} className={o.status === s ? 'on' : ''} disabled={busy || o.status === s} onClick={() => setStatus(s)}>{s === 'READY' ? 'Ready' : s[0] + s.slice(1).toLowerCase()}</button>
+                ))}
+              </div>
+              <Button tone="primary" size="lg" block icon="check" onClick={() => setMode('handover')}>Hand over to student</Button>
+              <div className="minor-actions">
+                {o.payment_status === 'DUE' && <Button size="sm" icon="rupee" onClick={() => setMode('pay')}>Record payment</Button>}
+                {(isAdmin || o.status === 'RECEIVED') && <Button size="sm" icon="edit" onClick={() => setMode('fix')}>Correct weight or count</Button>}
+                {(isAdmin || o.status === 'RECEIVED') && <Button size="sm" tone="danger" icon="x" onClick={() => setMode('cancel')}>Cancel order</Button>}
+                {isAdmin && o.payment_status === 'DUE' && <Button size="sm" onClick={() => setMode('waive')}>Waive payment</Button>}
+              </div>
+            </>
+          )}
+          <h3 className="sub">Timeline</h3>
+          <ol className="timeline">
+            {o.events?.map((e, i) => <li key={i}><b>{eventLabel(e.type)}</b>{e.note && <span>{e.note}</span>}<small>{when(e.at, 'short')}{e.by_name ? `, ${e.by_name}` : ''}</small></li>)}
+          </ol>
+        </div>
+      )}
+    </Sheet>
+  );
+}
+
+export function StudentLine({ o }: { o: Pick<Order, 'student_name' | 'id_card_no' | 'hostel_name' | 'room_no' | 'mobile'> }) {
+  return (
+    <div className="student-line">
+      <span className="avatar" aria-hidden="true">{(o.student_name || '?').split(' ').map(x => x[0]).slice(0, 2).join('')}</span>
+      <span><b>{o.student_name}</b><small>ID {o.id_card_no}, {o.hostel_name}, room {o.room_no}</small></span>
+      {o.mobile && <a className="icon-btn" href={`tel:${o.mobile}`} aria-label={`Call ${o.student_name}`}><Icon name="phone" /></a>}
+    </div>
+  );
+}
+
+/** The handover step: count clothes back, settle any payment, then release. */
+export function HandOver({ o, payFirst, onDone, onCancel }: { o: Order; payFirst: boolean; onDone: (o: Order) => void; onCancel?: () => void }) {
+  const [count, setCount] = useState(String(o.clothes_count));
+  const [note, setNote] = useState('');
+  const [method, setMethod] = useState<'CASH' | 'UPI'>('CASH');
+  const [ref, setRef] = useState('');
+  const { busy, error, submit } = useFormAction();
+  const mismatch = Number(count) !== o.clothes_count;
+  const needsPay = o.payment_status === 'DUE';
+  const go = async (e: FormEvent) => {
+    e.preventDefault();
+    const r = await submit(() => api<Order>(`/ops/orders/${o.id}/deliver`, { body: { returnedCount: Number(count), note, ...(needsPay ? { payMethod: method, payRef: ref } : {}) } }), `${o.order_no} handed over`);
+    if (r) onDone(r);
+  };
+  return (
+    <form className="handover stack" onSubmit={go}>
+      {o.status !== 'READY' && <p className="warn-line"><Icon name="alert" size={18} />This order is still marked “{o.status.toLowerCase()}”. Only hand over if the clothes are really done.</p>}
+      <div className="count-check">
+        <span>Given at drop-off</span>
+        <b>{o.clothes_count}</b>
+        <span>Count now</span>
+        <Stepper value={count} onChange={setCount} min={0} max={300} label="clothes returned" />
+      </div>
+      {mismatch && (
+        <Field label="Why is the count different?" error={!note.trim() ? 'Required when the count does not match' : null}>
+          <input value={note} onChange={e => setNote(e.target.value)} placeholder="e.g. 1 shirt still drying, student informed" />
+        </Field>
+      )}
+      {needsPay && (
+        <div className="pay-box">
+          <b>Collect {rupees(o.amount)}{payFirst ? ' before handing over' : ''}</b>
+          <Segmented label="Payment method" value={method} onChange={setMethod} options={[{ value: 'CASH', label: 'Cash' }, { value: 'UPI', label: 'UPI' }]} />
+          {method === 'UPI' && <input value={ref} onChange={e => setRef(e.target.value)} placeholder="UPI ref / last 4 digits (optional)" aria-label="UPI reference" />}
+        </div>
+      )}
+      {error && <ErrorNote error={error} />}
+      <Button tone="primary" size="lg" block busy={busy} icon="check" disabled={mismatch && !note.trim()}>
+        Hand over {plural(Number(count) || 0, 'piece')}{needsPay ? `, ${rupees(o.amount)} received` : ''}
+      </Button>
+      {onCancel && <Button tone="plain" block type="button" onClick={onCancel}>Back</Button>}
+    </form>
+  );
+}
+
+function FixOrder({ o, onDone, onCancel }: { o: Order; onDone: (o: Order) => void; onCancel: () => void }) {
+  const [w, setW] = useState(String(o.weight_kg));
+  const [c, setC] = useState(String(o.clothes_count));
+  const [reason, setReason] = useState('');
+  const { busy, error, submit } = useFormAction();
+  const save = async (e: FormEvent) => {
+    e.preventDefault();
+    const r = await submit(() => api<Order>(`/ops/orders/${o.id}`, { method: 'PATCH', body: { weightKg: Number(w), clothesCount: Number(c), reason } }), 'Order corrected. The student was told.');
+    if (r) onDone(r);
+  };
+  return (
+    <form className="stack" onSubmit={save}>
+      <div className="field-row">
+        <Field label="Weight (kg)"><Stepper value={w} onChange={setW} step={0.1} decimals={1} min={0.1} max={50} label="weight" /></Field>
+        <Field label="Clothes"><Stepper value={c} onChange={setC} min={1} max={300} label="clothes" /></Field>
+      </div>
+      <Field label="Reason"><input value={reason} onChange={e => setReason(e.target.value)} placeholder="e.g. Re-weighed, scale was not zeroed" /></Field>
+      {error && <ErrorNote error={error} />}
+      <Button tone="primary" block busy={busy} disabled={reason.trim().length < 3}>Save correction</Button>
+      <Button tone="plain" block type="button" onClick={onCancel}>Back</Button>
+    </form>
+  );
+}
+
+function ReasonForm({ o, kind, onDone, onCancel }: { o: Order; kind: 'cancel' | 'waive'; onDone: (o: Order) => void; onCancel: () => void }) {
+  const [reason, setReason] = useState('');
+  const { busy, error, submit } = useFormAction();
+  const save = async (e: FormEvent) => {
+    e.preventDefault();
+    const r = await submit(() => api<Order>(`/ops/orders/${o.id}/${kind}`, { body: { reason } }), kind === 'cancel' ? `${o.order_no} cancelled` : 'Payment waived');
+    if (r) onDone(r);
+  };
+  return (
+    <form className="stack" onSubmit={save}>
+      <p>{kind === 'cancel' ? `Cancel ${o.order_no}? The student is notified and the order no longer counts toward their monthly limit.` : `Waive ${rupees(o.amount)} for ${o.order_no}? This is recorded in the activity log.`}</p>
+      <Field label="Reason"><input value={reason} onChange={e => setReason(e.target.value)} autoFocus /></Field>
+      {error && <ErrorNote error={error} />}
+      <Button tone={kind === 'cancel' ? 'danger' : 'primary'} block busy={busy} disabled={reason.trim().length < 3}>{kind === 'cancel' ? 'Cancel order' : 'Waive payment'}</Button>
+      <Button tone="plain" block type="button" onClick={onCancel}>Back</Button>
+    </form>
+  );
+}
+
+function PayForm({ o, onDone, onCancel }: { o: Order; onDone: (o: Order) => void; onCancel: () => void }) {
+  const [method, setMethod] = useState<'CASH' | 'UPI'>('CASH');
+  const [ref, setRef] = useState('');
+  const { busy, error, submit } = useFormAction();
+  const save = async (e: FormEvent) => {
+    e.preventDefault();
+    const r = await submit(() => api<Order>(`/ops/orders/${o.id}/pay`, { body: { method, ref } }), `${rupees(o.amount)} recorded`);
+    if (r) onDone(r);
+  };
+  return (
+    <form className="stack" onSubmit={save}>
+      <p className="big-amount">{rupees(o.amount)}</p>
+      <Segmented label="Payment method" value={method} onChange={setMethod} options={[{ value: 'CASH', label: 'Cash' }, { value: 'UPI', label: 'UPI' }]} />
+      {method === 'UPI' && <Field label="UPI reference (optional)"><input value={ref} onChange={e => setRef(e.target.value)} /></Field>}
+      {error && <ErrorNote error={error} />}
+      <Button tone="primary" block busy={busy}>Mark as paid</Button>
+      <Button tone="plain" block type="button" onClick={onCancel}>Back</Button>
+    </form>
+  );
+}
+
+/* ---------------------------------------------------------- student sheet */
+
+export function StudentSheet({ id, close, onChanged, isAdmin, onOpenOrder }: { id: number; close: () => void; onChanged?: () => void; isAdmin: boolean; onOpenOrder: (id: number) => void }) {
+  const d = useLoad(() => api<CounterStudent>(`/ops/students/${id}`), [id]);
+  const [mode, setMode] = useState<'view' | 'edit' | 'reject' | 'suspend'>('view');
+  const [temp, setTemp] = useState('');
+  const { busy, run } = useAction();
+  const done = (s?: CounterStudent) => { if (s) d.set({ ...d.data!, ...s }); setMode('view'); onChanged?.(); };
+  const approve = async () => done(await run(() => api<CounterStudent>(`/ops/students/${id}/review`, { body: { decision: 'APPROVE' } }), 'Student approved'));
+  const reactivate = async () => done(await run(() => api<CounterStudent>(`/ops/students/${id}/status`, { body: { status: 'ACTIVE' } }), 'Account active again'));
+  const reset = async () => {
+    if (!window.confirm('Give this student a new temporary password? Their old password stops working.')) return;
+    const r = await run(() => api<{ tempPassword: string }>(`/ops/students/${id}/reset-password`, { method: 'POST' }));
+    if (r) setTemp(r.tempPassword);
+  };
+  const s = d.data;
+  return (
+    <Sheet title={s ? s.name : 'Student'} onClose={close} size="md">
+      {!s ? (d.error ? <ErrorNote error={d.error} retry={d.reload} /> : <Loading />) : mode === 'edit' ? (
+        <EditStudent s={s} onDone={done} onCancel={() => setMode('view')} />
+      ) : mode === 'reject' || mode === 'suspend' ? (
+        <StudentReason s={s} kind={mode} onDone={done} onCancel={() => setMode('view')} />
+      ) : (
+        <div className="stack">
+          <StudentFacts s={s} />
+          {s.status === 'PENDING' && (
+            <div className="approve-box">
+              <p>Check this ID card no. and name on the university portal, and look at the student’s physical ID card.</p>
+              <div className="btn-pair">
+                <Button tone="good" size="lg" icon="check" busy={busy} onClick={approve}>Approve</Button>
+                <Button tone="danger" size="lg" icon="x" onClick={() => setMode('reject')}>Reject</Button>
+              </div>
+            </div>
+          )}
+          {s.review_note && s.status !== 'ACTIVE' && <p className="note-line bad"><Icon name="alert" size={16} />{s.review_note}</p>}
+          {temp && (
+            <div className="temp-pass" role="status">
+              <span>Temporary password</span>
+              <b>{temp}</b>
+              <small>Tell the student. They will choose a new one after signing in. It is shown only once.</small>
+            </div>
+          )}
+          <div className="minor-actions">
+            <Button size="sm" icon="edit" onClick={() => setMode('edit')}>Edit details</Button>
+            <Button size="sm" icon="lock" busy={busy} onClick={reset}>Reset password</Button>
+            {isAdmin && s.status === 'ACTIVE' && <Button size="sm" tone="danger" onClick={() => setMode('suspend')}>Put on hold</Button>}
+            {isAdmin && (s.status === 'SUSPENDED' || s.status === 'REJECTED') && <Button size="sm" onClick={reactivate}>Make active</Button>}
+          </div>
+          <h3 className="sub">Orders</h3>
+          {s.orders?.length ? (
+            <ul className="mini-orders">
+              {s.orders.map(o => (
+                <li key={o.id}><button onClick={() => onOpenOrder(o.id)}>
+                  <b>{o.order_no}</b><span>{when(o.received_at, 'date')}, {o.clothes_count} clothes, {kg(o.weight_kg)}</span><StatusPill status={o.status} late={o.late} />
+                </button></li>
+              ))}
+            </ul>
+          ) : <p className="muted">No orders yet.</p>}
+        </div>
+      )}
+    </Sheet>
+  );
+}
+
+export function StudentFacts({ s }: { s: CounterStudent }) {
+  const label: Record<string, string> = { ACTIVE: 'Approved', PENDING: 'Waiting for approval', REJECTED: 'Rejected', SUSPENDED: 'On hold' };
+  return (
+    <dl className="facts">
+      <div><dt>ID card no.</dt><dd className="big">{s.id_card_no}</dd></div>
+      <div><dt>Account</dt><dd><span className={`pill acc-${s.status.toLowerCase()}`}>{label[s.status]}</span></dd></div>
+      <div><dt>Hostel</dt><dd>{s.hostel_name}, room {s.room_no}</dd></div>
+      <div><dt>Mobile</dt><dd><a href={`tel:${s.mobile}`}>{s.mobile}</a></dd></div>
+      <div><dt>This month</dt><dd>{plural(s.usage.orders, 'order')}, {kg(s.usage.kg)}{s.usage.kg_limit ? <small>{kg(s.usage.kg_left)} left of {kg(s.usage.kg_limit)}</small> : null}</dd></div>
+      <div><dt>Registered</dt><dd>{when(s.created_at, 'date')}{s.reviewed_by_name ? <small>Checked by {s.reviewed_by_name}</small> : null}</dd></div>
+    </dl>
+  );
+}
+
+function EditStudent({ s, onDone, onCancel }: { s: CounterStudent; onDone: (s: CounterStudent) => void; onCancel: () => void }) {
+  const hostels = useLoad(() => api<{ hostels: Hostel[] }>('/public/info'), []);
+  const [f, setF] = useState({ name: s.name, idCardNo: s.id_card_no, mobile: s.mobile, hostelId: String(s.hostel_id), roomNo: s.room_no });
+  const { busy, error, submit } = useFormAction();
+  const save = async (e: FormEvent) => {
+    e.preventDefault();
+    const r = await submit(() => api<CounterStudent>(`/ops/students/${s.id}`, { method: 'PATCH', body: f }), 'Details saved');
+    if (r) onDone(r);
+  };
+  return (
+    <form className="stack" onSubmit={save}>
+      <Field label="Full name"><input value={f.name} onChange={e => setF({ ...f, name: e.target.value })} /></Field>
+      <Field label="ID card no."><input value={f.idCardNo} onChange={e => setF({ ...f, idCardNo: e.target.value })} autoCapitalize="characters" /></Field>
+      <Field label="Mobile"><input value={f.mobile} onChange={e => setF({ ...f, mobile: e.target.value })} inputMode="tel" /></Field>
+      <div className="field-row">
+        <Field label="Hostel">
+          <select value={f.hostelId} onChange={e => setF({ ...f, hostelId: e.target.value })}>
+            {(hostels.data?.hostels ?? [{ id: s.hostel_id, name: s.hostel_name }]).map(h => <option key={h.id} value={h.id}>{h.name}</option>)}
+          </select>
+        </Field>
+        <Field label="Room no."><input value={f.roomNo} onChange={e => setF({ ...f, roomNo: e.target.value })} /></Field>
+      </div>
+      {error && <ErrorNote error={error} />}
+      <Button tone="primary" block busy={busy}>Save details</Button>
+      <Button tone="plain" block type="button" onClick={onCancel}>Back</Button>
+    </form>
+  );
+}
+
+function StudentReason({ s, kind, onDone, onCancel }: { s: CounterStudent; kind: 'reject' | 'suspend'; onDone: (s: CounterStudent) => void; onCancel: () => void }) {
+  const [note, setNote] = useState('');
+  const { busy, error, submit } = useFormAction();
+  const save = async (e: FormEvent) => {
+    e.preventDefault();
+    const r = await submit(() => kind === 'reject'
+      ? api<CounterStudent>(`/ops/students/${s.id}/review`, { body: { decision: 'REJECT', note } })
+      : api<CounterStudent>(`/ops/students/${s.id}/status`, { body: { status: 'SUSPENDED', note } }), kind === 'reject' ? 'Registration rejected. The student can fix and resubmit.' : 'Account put on hold');
+    if (r) onDone(r);
+  };
+  return (
+    <form className="stack" onSubmit={save}>
+      <Field label={kind === 'reject' ? 'What is wrong?' : 'Reason for hold'} hint="The student sees this message">
+        <input value={note} onChange={e => setNote(e.target.value)} placeholder={kind === 'reject' ? 'e.g. ID no. not found on the portal' : 'e.g. Unpaid dues'} autoFocus />
+      </Field>
+      {error && <ErrorNote error={error} />}
+      <Button tone="danger" block busy={busy} disabled={!note.trim()}>{kind === 'reject' ? 'Reject registration' : 'Put on hold'}</Button>
+      <Button tone="plain" block type="button" onClick={onCancel}>Back</Button>
+    </form>
+  );
+}
+
+/* ------------------------------------------------------------- complaints */
+
+export function ComplaintsBoard({ onOpenOrder }: { onOpenOrder: (id: number) => void }) {
+  const [filter, setFilter] = useState<'OPEN' | 'RESOLVED'>('OPEN');
+  const [openId, setOpenId] = useState<number | null>(null);
+  const list = useLoad(() => api<{ rows: Complaint[] }>(`/ops/complaints?status=${filter}`), [filter], { every: 60_000 });
+  return (
+    <div className="stack">
+      <Segmented label="Show" value={filter} onChange={setFilter} options={[{ value: 'OPEN', label: 'Open' }, { value: 'RESOLVED', label: 'Resolved' }]} />
+      {!list.data ? (list.error ? <ErrorNote error={list.error} retry={list.reload} /> : <Loading />) : !list.data.rows.length
+        ? <Empty icon="check" title={filter === 'OPEN' ? 'No open complaints' : 'Nothing resolved yet'}>{filter === 'OPEN' ? 'When a student reports a problem it shows up here.' : ''}</Empty>
+        : (
+          <ul className="complaint-list">
+            {list.data.rows.map(c => (
+              <li key={c.id}><button onClick={() => setOpenId(c.id)}>
+                <span className="cl-top"><b>{c.category}</b><span className={`pill cs-${c.status.toLowerCase()}`}>{c.status === 'IN_PROGRESS' ? 'Checking' : c.status === 'OPEN' ? 'New' : 'Resolved'}</span></span>
+                <span className="cl-desc">{c.description}</span>
+                <small>{c.student_name}, room {c.room_no}{c.order_no ? `, ${c.order_no}` : ''}, {ago(c.updated_at)}</small>
+              </button></li>
+            ))}
+          </ul>
+        )}
+      {openId && <ComplaintSheet id={openId} close={() => setOpenId(null)} onChanged={list.reload} onOpenOrder={onOpenOrder} />}
+    </div>
+  );
+}
+
+function ComplaintSheet({ id, close, onChanged, onOpenOrder }: { id: number; close: () => void; onChanged: () => void; onOpenOrder: (id: number) => void }) {
+  const d = useLoad(() => api<Complaint>(`/ops/complaints/${id}`), [id]);
+  const [message, setMessage] = useState('');
+  const [status, setStatus] = useState<Complaint['status'] | ''>('');
+  const { busy, error, submit } = useFormAction();
+  const send = async (e: FormEvent) => {
+    e.preventDefault();
+    const r = await submit(() => api<Complaint>(`/ops/complaints/${id}/update`, { body: { message, ...(status ? { status } : {}) } }), 'Reply sent to the student');
+    if (r) { d.set(r); setMessage(''); setStatus(''); onChanged(); }
+  };
+  const c = d.data;
+  return (
+    <Sheet title={c ? c.category : 'Complaint'} onClose={close}>
+      {!c ? <Loading /> : (
+        <div className="stack">
+          <div className="student-line"><span className="avatar" aria-hidden="true">{c.student_name.split(' ').map(x => x[0]).slice(0, 2).join('')}</span>
+            <span><b>{c.student_name}</b><small>ID {c.id_card_no}, {c.hostel_name}, room {c.room_no}</small></span>
+            {c.mobile && <a className="icon-btn" href={`tel:${c.mobile}`} aria-label="Call student"><Icon name="phone" /></a>}
+          </div>
+          <p className="complaint-text">{c.description}</p>
+          {c.order_id && <Button size="sm" icon="tag" onClick={() => onOpenOrder(c.order_id!)}>Open {c.order_no}</Button>}
+          {c.photo && <Photo name={c.photo} alt="Photo from the student" />}
+          <ol className="timeline">
+            {c.updates?.map((u, i) => <li key={i}><b>{u.by_role === 'STUDENT' ? (u.status === 'OPEN' ? 'Raised by student' : 'Student') : u.by_name}</b>{u.message && <span>{u.message}</span>}{u.status && u.by_role !== 'STUDENT' && <span>Status: {u.status.replace('_', ' ').toLowerCase()}</span>}<small>{when(u.at, 'short')}</small></li>)}
+          </ol>
+          <form className="stack reply" onSubmit={send}>
+            <Field label="Reply to student"><textarea rows={3} value={message} onChange={e => setMessage(e.target.value)} placeholder="e.g. We found the shirt. Collect it from the counter." /></Field>
+            <Segmented label="Status" value={(status || c.status) as Complaint['status']} onChange={setStatus} options={[{ value: 'OPEN', label: 'New' }, { value: 'IN_PROGRESS', label: 'Checking' }, { value: 'RESOLVED', label: 'Resolved' }]} />
+            {error && <ErrorNote error={error} />}
+            <Button tone="primary" block busy={busy} disabled={!message.trim() && (!status || status === c.status)}>Send</Button>
+          </form>
+        </div>
+      )}
+    </Sheet>
+  );
+}
+
+export const copyText = async (t: string) => { try { await navigator.clipboard.writeText(t); toast('Copied'); } catch { /* clipboard blocked */ } };

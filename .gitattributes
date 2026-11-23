@@ -1,0 +1,13 @@
+# Keep Unix line endings in the repo (needed for gradlew, shell scripts and the Linux build on Render).
+* text=auto eol=lf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.png binary
+*.jpg binary
+*.webp binary
+*.jar binary
+*.docx binary
+*.db binary
+*.db-wal binary
+*.db-shm binary
+*.xlsx binary
