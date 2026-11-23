@@ -119,8 +119,11 @@ async function pgDriver(url: string): Promise<Driver> {
   pg.types.setTypeParser(20, v => parseInt(v, 10));
   pg.types.setTypeParser(1700, v => parseFloat(v));
   const local = /@(localhost|127\.0\.0\.1)[:/]/.test(url);
+  // Neon URLs say sslmode=require. pg 8 already treats that as full certificate checking but will weaken it
+  // in pg 9 (libpq semantics). Ask for verify-full explicitly so the connection stays fully verified.
+  const connectionString = url.replace(/([?&]sslmode=)(require|prefer|verify-ca)\b/, '$1verify-full');
   const pool = new pg.Pool({
-    connectionString: url,
+    connectionString,
     max: Number(process.env.DB_POOL_MAX || 5),
     // sslmode in the URL (Neon adds sslmode=require) is honoured by pg itself; otherwise require verified TLS off-machine.
     ssl: local || /sslmode=/.test(url) ? undefined : { rejectUnauthorized: true },
