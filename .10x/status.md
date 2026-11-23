@@ -1,15 +1,15 @@
 # Project status
 
-Phase: **v2 built, local testing done, ready for owner review → deployment**
+Phase: **live on Render (free); apps built; waiting for the Neon database**
 
 | Task | Owner | Status |
 |---|---|---|
-| Archive v1 code + DB to `archive/v1/` | senior-engineer | Done |
-| New schema, rules engine, API | senior-engineer | Done |
-| API tests (17) | senior-engineer | Passing |
-| Student / staff / admin themed UIs | senior-engineer | Done |
-| Browser pass (mobile + desktop) | senior-engineer | Done (camera scan blocked in preview; manual code path verified) |
-| FEATURES.md + README | senior-engineer | Done |
-| Pick host, HTTPS, set JWT_SECRET/ADMIN_PASSWORD | owner / devops | Not started |
-| Real-device camera test (ID barcode + slip QR) over HTTPS | owner / QA | Not started |
-| Initialise git repository | owner | Not started (folder is not a git repo) |
+| v2 website, 3 themes | senior-engineer | Done |
+| Android APK (Capacitor), emulator-tested | senior-engineer | Done (camera needs a real phone) |
+| iOS project | senior-engineer | Prepared; needs a Mac + Apple Developer account |
+| SQLite + Postgres db layer, 52 tests on both | senior-engineer | Done |
+| Private GitHub repo jagdevs646/everjoy-lawndry | senior-engineer | Done |
+| Render web service everjoy-lawndry (free, Singapore) | senior-engineer | Live: https://everjoy-lawndry.onrender.com |
+| Create Neon DB, set DATABASE_URL on Render | owner | Not started |
+| Sign in on the live site, check each role | owner | Not started |
+| Switch DEMO=0 and reset the DB before real use | owner | Later |

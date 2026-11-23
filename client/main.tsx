@@ -66,7 +66,9 @@ function App() {
     api<{ user: User | null }>('/auth/me')
       .then(r => { setUnreachable(false); setUser(r?.user ?? null); })
       .catch(e => {
-        if (!(e instanceof ApiError) || e.status !== 0) { setUnreachable(false); setUserState(null); return; }
+        // Only a definite answer (e.g. not signed in) means signed out; no network or a server error (5xx) means "try again".
+        const temporary = e instanceof ApiError && (e.status === 0 || e.status >= 500);
+        if (!temporary) { setUnreachable(false); setUserState(null); return; }
         const last = lastUser();
         // Students keep their saved slips: show them from the offline copy.
         if (last?.role === 'STUDENT') { setUnreachable(false); setUserState(last); return; }

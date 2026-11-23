@@ -1,5 +1,5 @@
 import { db } from './db.js';
-import { HttpError, dayKey, nowIso } from './util.js';
+import { dayKey, HttpError, likeContains, nowIso } from './util.js';
 
 /* Columns safe to show staff/admin. qr_token and request_id are never listed.
    The late flag takes one `?` (the current time), bound before any WHERE params. */
@@ -31,8 +31,8 @@ function orderWhere(f: OrderFilters, now: string) {
   if (f.q) {
     const q = f.q.trim();
     const digits = q.replace(/^EJ-?/i, '');
-    const like = `%${q}%`;
-    where.push(`(o.order_no = ? OR LOWER(st.id_card_no) LIKE LOWER(?) OR LOWER(u.name) LIKE LOWER(?) OR o.room_no = ? OR LOWER(o.mobile) LIKE LOWER(?))`);
+    const like = likeContains(q);
+    where.push(`(o.order_no = ? OR LOWER(st.id_card_no) LIKE LOWER(?) ESCAPE '\\' OR LOWER(u.name) LIKE LOWER(?) ESCAPE '\\' OR o.room_no = ? OR LOWER(o.mobile) LIKE LOWER(?) ESCAPE '\\')`);
     p.push(`EJ-${digits}`, like, like, q, like);
   }
   return { sql: where.length ? `WHERE ${where.join(' AND ')}` : '', p };
@@ -41,8 +41,8 @@ function orderWhere(f: OrderFilters, now: string) {
 export async function listOrders(f: OrderFilters) {
   const now = nowIso();
   const { sql, p } = orderWhere(f, now);
-  const limit = Math.min(Math.max(Number(f.limit) || 50, 1), 5000);
-  const offset = Math.max(Number(f.offset) || 0, 0);
+  const limit = Math.min(Math.max(Math.trunc(Number(f.limit)) || 50, 1), 5000);
+  const offset = Math.max(Math.trunc(Number(f.offset)) || 0, 0);
   const rows = await db.all(`SELECT ${ORDER_COLS} ${ORDER_FROM} ${sql} ORDER BY o.id DESC LIMIT ${limit} OFFSET ${offset}`, [now, ...p]);
   const total = (await db.get<{ c: number }>(`SELECT COUNT(*) AS c ${ORDER_FROM} ${sql}`, p))!.c;
   return { rows, total };
@@ -87,13 +87,13 @@ export async function listStudents(f: { q?: string; status?: string; hostelId?: 
   if (f.hostelId) { where.push('st.hostel_id = ?'); p.push(f.hostelId); }
   if (f.q) {
     const q = f.q.trim();
-    const like = `%${q}%`;
-    where.push('(LOWER(st.id_card_no) LIKE LOWER(?) OR LOWER(u.name) LIKE LOWER(?) OR LOWER(u.mobile) LIKE LOWER(?) OR st.room_no = ?)');
+    const like = likeContains(q);
+    where.push("(LOWER(st.id_card_no) LIKE LOWER(?) ESCAPE '\\' OR LOWER(u.name) LIKE LOWER(?) ESCAPE '\\' OR LOWER(u.mobile) LIKE LOWER(?) ESCAPE '\\' OR st.room_no = ?)");
     p.push(like, like, like, q);
   }
   const sql = where.length ? `WHERE ${where.join(' AND ')}` : '';
-  const limit = Math.min(Math.max(Number(f.limit) || 50, 1), 500);
-  const offset = Math.max(Number(f.offset) || 0, 0);
+  const limit = Math.min(Math.max(Math.trunc(Number(f.limit)) || 50, 1), 500);
+  const offset = Math.max(Math.trunc(Number(f.offset)) || 0, 0);
   // The two month subqueries come before the WHERE, so the month is bound twice ahead of the filter params.
   const rows = await db.all(`SELECT ${STUDENT_COLS},
       (SELECT COUNT(*) FROM orders o WHERE o.student_id = u.id AND o.month_key = ? AND o.status != 'CANCELLED') AS month_orders,

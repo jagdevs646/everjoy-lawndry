@@ -4,9 +4,11 @@ One website that replaces the laundry register and the paper slip. Students regi
 
 See **[FEATURES.md](FEATURES.md)** for everything each role can do.
 
+**Live:** https://everjoy-lawndry.onrender.com (Render, free plan). Android app: `release/everjoy-lawndry-<version>-debug.apk`, built against that address.
+
 ## Try it on your computer
 
-Needs Node.js 20 or newer.
+Needs Node.js 24.
 
 ```bash
 npm install
@@ -80,7 +82,7 @@ Complaint photos and the session signing key are stored in the database too, so 
 
 The apps are the same screens as the website, packaged with [Capacitor](https://capacitorjs.com) 8, so anything that works on the website works in the apps. They talk to the same Everjoy server. Students and staff can use either the website or the app.
 
-**Which server the app uses.** It is set in `.env.app` (`VITE_API_BASE`). The first test build points at this laptop: `http://10.2.25.194:3001`. Anyone can change it on the app's sign-in screen (**Laundry server → Change**), so one APK works for testing now and for the real domain later.
+**Which server the app uses.** It is set in `.env.app` (`VITE_API_BASE`), currently `https://everjoy-lawndry.onrender.com`. With an `https://` address the app is **locked** to that server, so nobody can point a phone at a fake server to collect passwords. For testing against this laptop, set `http://<laptop Wi-Fi IP>:3001`: such test builds show **Laundry server → Change** on the sign-in screen. Rebuild the APK after changing it.
 
 ### Build the Android APK (Windows, no Android Studio)
 

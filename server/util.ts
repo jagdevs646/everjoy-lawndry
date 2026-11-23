@@ -50,9 +50,28 @@ export function errorHandler(err: unknown, _req: Request, res: Response, _next: 
   const e = err as { code?: string; message?: string; type?: string };
   if (e?.code === 'LIMIT_FILE_SIZE') return res.status(400).json({ error: 'Photo must be smaller than 5 MB.' });
   if (e?.type === 'entity.parse.failed') return res.status(400).json({ error: 'Invalid request body.' });
+  // Database constraint and input errors are the caller's problem, not a server crash.
+  // Postgres: 23505 unique_violation, class 22 data exceptions (bad number, NUL byte, out of range).
+  // SQLite: SQLITE_CONSTRAINT_UNIQUE, SQLITE_MISMATCH.
+  if (e?.code === '23505' || e?.code === 'SQLITE_CONSTRAINT_UNIQUE' || e?.code === 'SQLITE_CONSTRAINT_PRIMARYKEY') {
+    return res.status(409).json({ error: 'That already exists. Refresh and check, then try again.' });
+  }
+  if ((typeof e?.code === 'string' && /^22[0-9A-Z]{3}$/.test(e.code)) || e?.code === 'SQLITE_MISMATCH') {
+    return res.status(400).json({ error: 'Some of the information sent is not valid.' });
+  }
+  // Database unreachable (Neon waking up, network blip): ask the client to retry instead of signing out.
+  if (['ECONNREFUSED', 'ECONNRESET', 'ETIMEDOUT', '57P01', '57P03', '08006', '08001', '08003'].includes(String(e?.code)) || /timeout exceeded|Connection terminated/i.test(String(e?.message))) {
+    console.error(err);
+    return res.status(503).json({ error: 'The laundry server is busy. Please try again in a moment.' });
+  }
   console.error(err);
   res.status(500).json({ error: 'Something went wrong on the server. Please try again.' });
 }
 
 export const zText = (min: number, max: number) => z.string().trim().min(min, `must be at least ${min} characters`).max(max, `must be at most ${max} characters`);
-export const zId = z.coerce.number().int().positive();
+/** Database ids are 32-bit integers on Postgres; anything larger can't exist. */
+export const MAX_ID = 2_147_483_647;
+export const zId = z.coerce.number().int().positive().max(MAX_ID);
+
+/** A LIKE pattern for "contains q" that treats %, _ and \ in user input literally (use with ESCAPE '\'). */
+export const likeContains = (q: string) => `%${q.replace(/[\\%_]/g, m => `\\${m}`)}%`;

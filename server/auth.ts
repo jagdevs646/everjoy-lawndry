@@ -110,11 +110,19 @@ export async function session(req: Request, _res: Response, next: NextFunction) 
   const token = bearer || readCookie(req, COOKIE);
   if (token) {
     const key = secret();  // outside the try: a missing initAuthSecret() is a startup bug, not a signed-out user
+    let p: { sub: number; v: number };
     try {
-      const p = jwt.verify(token, key) as unknown as { sub: number; v: number };
+      p = jwt.verify(token, key) as unknown as { sub: number; v: number };
+    } catch {
+      return next();   // expired or tampered token: treat as signed out
+    }
+    // A database error here is NOT "signed out": let it become a 500/503 so apps keep their token and retry.
+    try {
       const user = await loadUser(Number(p.sub), p.v);
       if (user) (req as AuthedRequest).user = user;
-    } catch { /* expired or tampered: treat as signed out */ }
+    } catch (e) {
+      return next(e);
+    }
   }
   next();
 }

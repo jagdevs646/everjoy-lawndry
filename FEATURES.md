@@ -110,7 +110,8 @@ The apps have exactly the same screens and features as the website, for all thre
 - **Excel and backup files** (admin) open the phone's share sheet: save to Files or Drive, or send on WhatsApp.
 - **Complaint photos** can be taken with the camera or picked from the gallery.
 - **The status bar colour** follows the role's theme (light for students, dark for staff).
-- **Laundry server setting** on the sign-in screen: the same app can point at a test laptop or the real server address.
+- **Locked to the official server**: the live app only talks to the Everjoy server it was built for (https). Test builds that point at a laptop show a **Laundry server** setting instead.
+- **Survives weak Wi-Fi**: if the server can't be reached when the app opens, staff see "Can't reach the laundry server" and it reconnects by itself. Students still see their saved slips.
 
 ## Safety built in
 

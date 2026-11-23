@@ -122,9 +122,15 @@ async function pgDriver(url: string): Promise<Driver> {
   const pool = new pg.Pool({
     connectionString: url,
     max: Number(process.env.DB_POOL_MAX || 5),
-    ssl: local || /sslmode=disable/.test(url) ? undefined : { rejectUnauthorized: true },
+    // sslmode in the URL (Neon adds sslmode=require) is honoured by pg itself; otherwise require verified TLS off-machine.
+    ssl: local || /sslmode=/.test(url) ? undefined : { rejectUnauthorized: true },
     idleTimeoutMillis: 30_000,
+    connectionTimeoutMillis: 15_000,   // Neon's free compute can take a few seconds to wake; don't wait forever
+    query_timeout: 20_000,             // client-side cap per query (works through Neon's pooler)
+    keepAlive: true,
   });
+  // Neon restarts or suspends idle compute: a dropped idle connection must not crash the server.
+  pool.on('error', err => console.error('Postgres idle connection error (will reconnect):', err.message));
   const wrap = (client: { query: (t: string, p: unknown[]) => Promise<{ rows: Row[]; rowCount: number | null }> }): Query =>
     async (sql, params) => { const r = await client.query(toPgPlaceholders(sql), params); return { rows: r.rows, changes: r.rowCount ?? 0 }; };
   return {
@@ -132,8 +138,16 @@ async function pgDriver(url: string): Promise<Driver> {
     query: wrap(pool),
     async transaction(fn) {
       const client = await pool.connect();
+      // A connection that dies while checked out emits 'error' on the client: record it instead of crashing,
+      // and destroy that connection on release so the pool doesn't hand it out again.
+      let broken: Error | undefined;
+      const onError = (e: Error) => { broken = e; };
+      client.on('error', onError);
       try {
         await client.query('BEGIN');
+        // Per-transaction limits (SET LOCAL ends with the transaction, safe behind a connection pooler):
+        // a stuck request can't hold row locks, e.g. on the order-number counter, for long.
+        await client.query("SET LOCAL lock_timeout = '10s'; SET LOCAL statement_timeout = '15s'; SET LOCAL idle_in_transaction_session_timeout = '30s'");
         try {
           const result = await fn(wrap(client));
           await client.query('COMMIT');
@@ -142,7 +156,10 @@ async function pgDriver(url: string): Promise<Driver> {
           await client.query('ROLLBACK').catch(() => {});
           throw e;
         }
-      } finally { client.release(); }
+      } finally {
+        client.off('error', onError);
+        client.release(broken);
+      }
     },
     async script(sql) { await pool.query(sql); },
     async close() { await pool.end(); },
@@ -229,7 +246,10 @@ class Db {
    * (e.g. two counters handing over the same slip). SQLite already runs one transaction at a time.
    */
   async lockRow(table: 'users' | 'orders' | 'complaints', id: number) {
-    if (this.dialect === 'postgres') await this.run(`SELECT id FROM ${table} WHERE id = ? FOR UPDATE`, [id]);
+    // FOR NO KEY UPDATE: excludes other lockRow callers on the same row, but (unlike FOR UPDATE) does not
+    // block the FOR KEY SHARE locks Postgres takes for foreign-key checks, so inserting a complaint,
+    // notification or event that references this row from another transaction can't deadlock with it.
+    if (this.dialect === 'postgres') await this.run(`SELECT id FROM ${table} WHERE id = ? FOR NO KEY UPDATE`, [id]);
   }
 
   async backupFile(dest: string) {

@@ -6,7 +6,7 @@ import { db, logActivity, notify } from '../db.js';
 import { AuthedRequest, requireRole } from '../auth.js';
 import { cancelOrder, correctOrder, createOrder, deliverOrder, getOrderRow, getSettings, monthUsage, orderInput, quote, recordPayment, setStatus } from '../rules.js';
 import { announcementsFor, complaintDetail, findOrderByCode, listComplaints, listOrders, listStudents, orderDetail, studentProfile } from '../queries.js';
-import { HttpError, dayKey, handle, nowIso, parse, startOfLocalDayIso, zId, zText } from '../util.js';
+import { dayKey, handle, HttpError, MAX_ID, nowIso, parse, startOfLocalDayIso, zId, zText } from '../util.js';
 import { normaliseLogin, zIdCard, zMobile, zRoom } from './public.js';
 
 export const router = Router();
@@ -65,7 +65,7 @@ async function pickSettings() {
 /* ---------------------------------------------------------------- students */
 
 router.get('/ops/students', handle(async (req, res) => {
-  const q = parse(z.object({ q: z.string().optional(), status: z.enum(['PENDING', 'ACTIVE', 'REJECTED', 'SUSPENDED']).optional().or(z.literal('')), hostelId: z.coerce.number().optional(), limit: z.coerce.number().optional(), offset: z.coerce.number().optional() }), req.query);
+  const q = parse(z.object({ q: z.string().optional(), status: z.enum(['PENDING', 'ACTIVE', 'REJECTED', 'SUSPENDED']).optional().or(z.literal('')), hostelId: z.coerce.number().int().positive().max(MAX_ID).optional(), limit: z.coerce.number().int().optional(), offset: z.coerce.number().int().min(0).optional() }), req.query);
   res.json(await listStudents({ ...q, status: q.status || undefined }));
 }));
 
@@ -158,7 +158,7 @@ router.post('/ops/orders', handle(async (req, res) => {
 
 const orderFilters = z.object({
   status: z.string().optional(), q: z.string().optional(), from: z.string().optional(), to: z.string().optional(),
-  hostel: z.string().optional(), payment: z.string().optional(), limit: z.coerce.number().optional(), offset: z.coerce.number().optional(),
+  hostel: z.string().optional(), payment: z.string().optional(), limit: z.coerce.number().int().optional(), offset: z.coerce.number().int().min(0).optional(),
 });
 router.get('/ops/orders', handle(async (req, res) => {
   const f = parse(orderFilters, req.query);

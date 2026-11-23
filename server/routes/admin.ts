@@ -9,7 +9,7 @@ import { TABLES, db, insertId, logActivity, type Row } from '../db.js';
 import { AuthedRequest, requireRole } from '../auth.js';
 import { getSettings, saveSettings } from '../rules.js';
 import { announcementsFor, listOrders } from '../queries.js';
-import { HttpError, dayKey, handle, nowIso, parse, startOfLocalDayIso, zId, zText } from '../util.js';
+import { dayKey, handle, HttpError, likeContains, nowIso, parse, startOfLocalDayIso, zId, zText } from '../util.js';
 import { normaliseLogin, zMobile, zPassword } from './public.js';
 import { tempPassword } from './ops.js';
 
@@ -291,8 +291,8 @@ router.get('/admin/export', handle(async (req, res) => {
 
 router.get('/admin/activity', handle(async (req, res) => {
   const q = parse(z.object({ q: z.string().optional(), limit: z.coerce.number().int().min(1).max(200).default(100), offset: z.coerce.number().int().min(0).default(0) }), req.query);
-  const like = `%${q.q ?? ''}%`;
-  const where = q.q ? `WHERE LOWER(a.action) LIKE LOWER(?) OR LOWER(a.entity_id) LIKE LOWER(?) OR LOWER(a.detail) LIKE LOWER(?) OR LOWER(u.name) LIKE LOWER(?)` : '';
+  const like = likeContains(q.q ?? '');
+  const where = q.q ? `WHERE LOWER(a.action) LIKE LOWER(?) ESCAPE '\\' OR LOWER(a.entity_id) LIKE LOWER(?) ESCAPE '\\' OR LOWER(a.detail) LIKE LOWER(?) ESCAPE '\\' OR LOWER(u.name) LIKE LOWER(?) ESCAPE '\\'` : '';
   // limit and offset are integers checked by zod above, so they are safe to put in the SQL.
   res.json({ rows: await db.all(`SELECT a.id, a.action, a.entity, a.entity_id, a.detail, a.created_at, u.name AS actor_name, u.role AS actor_role
     FROM activity a LEFT JOIN users u ON u.id = a.actor_id ${where} ORDER BY a.id DESC LIMIT ${q.limit} OFFSET ${q.offset}`, q.q ? [like, like, like, like] : []) });

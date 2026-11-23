@@ -330,3 +330,30 @@ describe('hosting-safe storage and concurrency', () => {
     expect(ok).toBe(2);   // max_active_orders = 2
   });
 });
+
+describe('odd input behaves the same on SQLite and Postgres', () => {
+  it('search treats % and backslash literally and never errors', async () => {
+    const all = await staff.get('/api/ops/orders?limit=500');
+    expect(all.body.total).toBeGreaterThan(0);
+    const pct = await staff.get(`/api/ops/orders?q=${encodeURIComponent('%')}`);
+    expect(pct.status).toBe(200);
+    expect(pct.body.total).toBe(0);
+    expect((await staff.get(`/api/ops/orders?q=${encodeURIComponent('a\b')}`)).status).toBe(200);
+    expect((await staff.get(`/api/ops/students?q=${encodeURIComponent('_')}`)).body.total).toBe(0);
+    expect((await admin.get(`/api/admin/activity?q=${encodeURIComponent('%')}`)).status).toBe(200);
+  });
+
+  it('rejects impossible ids, decimals and NUL characters with 4xx, not 500', async () => {
+    expect((await staff.get('/api/ops/orders/3000000000')).status).toBe(400);
+    expect((await staff.get('/api/ops/students?hostelId=1.5')).status).toBe(400);
+    expect((await staff.get('/api/ops/orders?limit=2.5')).status).toBe(400);
+    const nul = await request(app).post('/api/auth/login').set('x-ej', '1').send({ loginId: 'ADMIN\u0000', password: 'x' });
+    expect(nul.status).toBeGreaterThanOrEqual(400);
+    expect(nul.status).toBeLessThan(500);
+  });
+
+  it('a duplicate hostel name (any case) is a 409', async () => {
+    expect((await post(admin, '/api/admin/hostels', { name: 'Ruby Block' })).status).toBe(201);
+    expect((await post(admin, '/api/admin/hostels', { name: 'ruby block' })).status).toBe(409);
+  });
+});
