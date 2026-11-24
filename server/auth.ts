@@ -157,3 +157,35 @@ export function limited(key: string, max: number, windowMs: number) {
   return h.n > max;
 }
 export const clearLimit = (key: string) => hits.delete(key);
+/** True when `key` already had `max` hits in its window (does not count this call). */
+export function overLimit(key: string, max: number) {
+  const h = hits.get(key);
+  return !!h && h.until >= Date.now() && h.n >= max;
+}
+/** Take back one hit (an attempt that turned out to be a correct password). */
+export function unhit(key: string) {
+  const h = hits.get(key);
+  if (h && h.n > 0) h.n--;
+}
+/** Count one hit (e.g. one failed password) against `key`. */
+export function hit(key: string, windowMs: number) {
+  const now = Date.now();
+  const h = hits.get(key);
+  if (!h || h.until < now) hits.set(key, { n: 1, until: now + windowMs });
+  else h.n++;
+  if (hits.size > 10_000) for (const [k, v] of hits) if (v.until < now) hits.delete(k);
+}
+
+/**
+ * A temporary password (reset by staff, first admin sign-in) only lets the person choose a new one.
+ * Everything else waits until they have, so a temporary password handed over at the counter can't be
+ * used to work in the account.
+ */
+const OPEN_WHILE_CHANGING = new Set(['/auth/me', '/auth/password', '/auth/logout', '/public/info', '/health']);
+export function mustChangePassword(req: Request, _res: Response, next: NextFunction) {
+  const user = (req as AuthedRequest).user;
+  if (user?.must_change_password && !OPEN_WHILE_CHANGING.has(req.path)) {
+    return next(new HttpError(403, 'Choose a new password first.', { code: 'MUST_CHANGE_PASSWORD' }));
+  }
+  next();
+}

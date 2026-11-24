@@ -1,7 +1,7 @@
 import { ButtonHTMLAttributes, ReactNode, Ref, useEffect, useId, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import QRCode from 'qrcode';
-import { fileObjectUrl, type Order, type OrderStatus } from './api';
+import { api, blobUrl, fileObjectUrl, type Order, type OrderStatus, type PaymentInfo } from './api';
 import { isApp } from './platform';
 import { useToasts } from './lib';
 
@@ -283,6 +283,56 @@ export function Scanner({ onResult, hint }: { onResult: (text: string) => void; 
     <div className="scanner">
       <div id={id} className={`scanner-view${error ? ' failed' : ''}`} />
       <p className={error ? 'scanner-error' : 'scanner-hint'}>{error || hint}</p>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------- UPI */
+
+let payInfo: { p: Promise<PaymentInfo>; at: number } | null = null;
+/** Forget the cached UPI details (after the admin uploads or removes the QR). */
+export const invalidatePaymentInfo = () => { payInfo = null; };
+/** UPI details change rarely: share one copy between components for up to a minute. */
+export function usePaymentInfo() {
+  const [info, setInfo] = useState<PaymentInfo | null>(null);
+  useEffect(() => {
+    let live = true;
+    if (!payInfo || Date.now() - payInfo.at > 60_000) {
+      const p = api<PaymentInfo>('/payment-info');
+      payInfo = { p, at: Date.now() };
+      p.catch(() => { if (payInfo?.p === p) payInfo = null; });
+    }
+    payInfo.p.then(i => live && setInfo(i)).catch(() => {});
+    return () => { live = false; };
+  }, []);
+  return info;
+}
+
+/**
+ * The QR a student scans with GPay / PhonePe / Paytm. The admin's uploaded QR image is shown if there
+ * is one; otherwise a QR is drawn from the UPI ID with the amount filled in.
+ */
+export function UpiQr({ amount, note, size = 200, showButton, hint }: { amount: number; note?: string; size?: number; showButton?: boolean; hint?: string }) {
+  const info = usePaymentInfo();
+  const [img, setImg] = useState('');
+  useEffect(() => {
+    if (!info?.has_upi_qr) return;
+    let url = '';
+    let live = true;
+    blobUrl('/upi-qr').then(u => { url = u; if (live) setImg(u); else URL.revokeObjectURL(u); }).catch(() => {});
+    return () => { live = false; if (url) URL.revokeObjectURL(url); };
+  }, [info?.has_upi_qr]);
+  if (!info) return null;
+  if (!info.has_upi_qr && !info.upi_id) return <p className="muted small">UPI is not set up yet. Take cash, or ask the admin to add the UPI QR.</p>;
+  const link = info.upi_id ? `upi://pay?pa=${encodeURIComponent(info.upi_id)}&pn=${encodeURIComponent(info.upi_name || 'Everjoy Lawndry')}&am=${amount}&cu=INR${note ? `&tn=${encodeURIComponent(note)}` : ''}` : '';
+  return (
+    <div className="upi-qr">
+      {info.has_upi_qr
+        ? (img ? <img className="qr-img" src={img} width={size} height={size} alt="UPI QR code of the laundry" /> : <div className="qr-img" style={{ width: size, height: size }} />)
+        : <QrImage text={link} size={size} dark="#111111" />}
+      <p><b>Pay ₹{amount}</b>{info.upi_id ? <> to {info.upi_id}</> : null}{info.has_upi_qr ? <small>Enter the amount in your UPI app</small> : null}</p>
+      {showButton && link && <a className="btn btn-primary btn-md" href={link}><Icon name="rupee" size={18} /><span>Open UPI app</span></a>}
+      {hint && <small className="upi-hint">{hint}</small>}
     </div>
   );
 }

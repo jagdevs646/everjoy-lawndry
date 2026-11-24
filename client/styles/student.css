@@ -200,3 +200,15 @@ html[data-theme='student'], html[data-theme='public'] {
 .inbox .unread button { background: var(--accent-soft); }
 .inbox p { color: var(--ink-2); }
 .inbox small { color: var(--muted); }
+
+.plan-chip { display: inline-block; margin-top: 6px; padding: 3px 10px; border-radius: 999px; background: var(--good-soft); color: var(--ink-2); font-size: .8125rem; font-weight: 600; }
+.plan-chip.ended { background: var(--warn-soft); color: var(--warn); }
+.ready-banner.pending { background: var(--surface); color: var(--ink-2); font-weight: 600; }
+.pay-card .upi-qr { justify-self: center; }
+.price-list { width: 100%; border-collapse: collapse; border-radius: var(--radius); overflow: hidden; background: var(--surface); }
+.price-list th, .price-list td { padding: 10px 16px; text-align: left; border-bottom: 1px solid var(--line); }
+.price-list th { color: var(--muted); font-weight: 600; font-size: .875rem; }
+.price-list tr:last-child td { border-bottom: 0; }
+.price-list .num { text-align: right; white-space: nowrap; font-weight: 700; }
+.price-list td small { display: block; color: var(--muted); font-weight: 400; }
+.profile-card dd small { display: block; color: var(--warn); font-size: .8125rem; }

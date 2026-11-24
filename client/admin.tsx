@@ -1,9 +1,9 @@
 import { FormEvent, ReactNode, useEffect, useRef, useState } from 'react';
-import { Announcement, api, download, Hostel, Order, Student, User } from './api';
+import { Announcement, api, ApiError, blobUrl, download, Hostel, Order, Service, Student, User } from './api';
 import { ChangePassword } from './auth';
 import { ago, kg, plural, rupees, shiftDay, toast, todayKey, useAction, useFormAction, useLoad, useRoute, useScrollTop, when } from './lib';
 import { ComplaintsBoard, OrderSheet, StudentSheet } from './ops';
-import { Brand, Button, Empty, ErrorNote, Field, Icon, IconButton, IconName, Loading, PayPill, Segmented, Sheet, StatusPill, Switch } from './ui';
+import { Brand, Button, Empty, ErrorNote, Field, Icon, IconButton, IconName, invalidatePaymentInfo, Loading, PayPill, Segmented, Sheet, StatusPill, Switch } from './ui';
 
 type Overview = {
   today: { orders: number; kg: number; delivered: number };
@@ -219,6 +219,8 @@ export function actionText(a: string) {
     PASSWORD_RESET: 'reset password for', PASSWORD_CHANGED: 'changed password', SETTINGS_CHANGED: 'changed rules', HOSTEL_ADDED: 'added hostel', HOSTEL_UPDATED: 'updated hostel',
     STAFF_CREATED: 'created staff', STAFF_DEACTIVATED: 'switched off', STAFF_REACTIVATED: 'switched on', STAFF_UPDATED: 'updated staff', ANNOUNCEMENT_POSTED: 'posted notice',
     ANNOUNCEMENT_REMOVED: 'removed notice', COMPLAINT_RAISED: 'raised complaint', COMPLAINT_UPDATED: 'replied to complaint', EXPORTED: 'exported register', BACKUP_DOWNLOADED: 'downloaded backup', DEMO_SEEDED: 'loaded demo data',
+    ROOM_CHANGE_REQUESTED: 'asked to change room:', ROOM_CHANGE_APPROVED: 'approved room change for', ROOM_CHANGE_REJECTED: 'turned down room change for', WALKIN_ADDED: 'served walk-in',
+    SERVICE_ADDED: 'added service', SERVICE_UPDATED: 'changed service', PLAN_DATES_SET: 'set hostel plan dates', STUDENTS_IMPORTED: 'imported students', STAFF_IMPORTED: 'imported staff', STUDENT_CLAIMED: 'set up imported account',
   } as Record<string, string>)[a] ?? a.toLowerCase().replace(/_/g, ' ');
 }
 
@@ -263,7 +265,7 @@ function Register({ open }: { open: Openers }) {
           <p className="muted small">{list.data.total} {list.data.total === 1 ? 'order' : 'orders'}{f.from ? ` from ${when(`${f.from}T12:00:00`, 'date')}` : ''}{f.to ? ` to ${when(`${f.to}T12:00:00`, 'date')}` : ''}</p>
           <div className="ledger-wrap">
             <table className="ledger">
-              <thead><tr><th>Order</th><th>Date in</th><th>Student</th><th>Room</th><th className="num">Clothes</th><th className="num">Kg</th><th>Status</th><th>Payment</th><th>Handed over</th></tr></thead>
+              <thead><tr><th>Order</th><th>Date in</th><th>Student</th><th>Room</th><th>Service</th><th className="num">Clothes</th><th className="num">Kg</th><th>Status</th><th>Payment</th><th>Handed over</th></tr></thead>
               <tbody>
                 {list.data.rows.map(o => (
                   <tr key={o.id} onClick={() => open.order(o.id)} tabIndex={0} onKeyDown={e => e.key === 'Enter' && open.order(o.id)}>
@@ -271,6 +273,7 @@ function Register({ open }: { open: Openers }) {
                     <td>{when(o.received_at)}</td>
                     <td><b>{o.student_name}</b><small>{o.id_card_no}</small></td>
                     <td>{o.room_no}<small>{o.hostel_name}</small></td>
+                    <td>{o.service_name || 'Wash & fold'}{o.charge_note ? <small>{o.charge_note}</small> : null}</td>
                     <td className="num">{o.clothes_count}{o.returned_count != null && o.returned_count !== o.clothes_count && <small className="bad">{o.returned_count} back</small>}</td>
                     <td className="num">{Number(o.weight_kg).toFixed(1)}</td>
                     <td><StatusPill status={o.status} late={o.late} /></td>
@@ -291,10 +294,12 @@ function Register({ open }: { open: Openers }) {
 /* --------------------------------------------------------------- students */
 
 function Students({ open }: { open: Openers }) {
-  const [f, setF] = useState({ q: '', status: '', hostelId: '' });
+  const [f, setF] = useState({ q: '', status: '', hostelId: '', plan: '' });
+  const [sheet, setSheet] = useState<'import' | 'plan' | null>(null);
   const hostels = useLoad(() => api<{ hostels: Hostel[] }>('/public/info'), []);
   const qs = new URLSearchParams(Object.entries({ ...f, limit: '300' }).filter(([, v]) => v)).toString();
   const list = useLoad(() => api<{ rows: Student[]; total: number }>(`/ops/students?${qs}`), [qs]);
+  const today = todayKey();
   const set = (k: keyof typeof f) => (e: { target: { value: string } }) => setF({ ...f, [k]: e.target.value });
   const label: Record<string, string> = { ACTIVE: 'Approved', PENDING: 'Waiting', REJECTED: 'Rejected', SUSPENDED: 'On hold' };
   return (
@@ -303,21 +308,27 @@ function Students({ open }: { open: Openers }) {
         <input className="grow" value={f.q} onChange={set('q')} placeholder="Search name, ID card, mobile or room" aria-label="Search students" />
         <select value={f.status} onChange={set('status')} aria-label="Account status"><option value="">Everyone</option><option value="PENDING">Waiting for approval</option><option value="ACTIVE">Approved</option><option value="REJECTED">Rejected</option><option value="SUSPENDED">On hold</option></select>
         <select value={f.hostelId} onChange={set('hostelId')} aria-label="Hostel"><option value="">All hostels</option>{hostels.data?.hostels.map(h => <option key={h.id} value={h.id}>{h.name}</option>)}</select>
+        <select value={f.plan} onChange={set('plan')} aria-label="Hostel plan"><option value="">Any plan</option><option value="VALID">Plan valid</option><option value="EXPIRED">Plan ended</option><option value="WALKIN">Walk-ins</option></select>
+        <Button icon="clock" onClick={() => setSheet('plan')}>Plan dates</Button>
+        <Button tone="primary" icon="plus" onClick={() => setSheet('import')}>Add from Excel</Button>
       </div>
+      {sheet === 'import' && <ImportSheet type="students" close={() => setSheet(null)} onDone={() => void list.reload()} />}
+      {sheet === 'plan' && <PlanDates hostels={hostels.data?.hostels ?? []} close={() => setSheet(null)} onDone={() => { setSheet(null); void list.reload(); }} />}
       {!list.data ? <Loading /> : !list.data.rows.length ? <Empty icon="users" title="No students found">Students appear here after they register on the website.</Empty> : (
         <>
           <p className="muted small">{plural(list.data.total, 'student')}</p>
           <div className="ledger-wrap">
             <table className="ledger">
-              <thead><tr><th>Name</th><th>ID card no.</th><th>Hostel, room</th><th>Mobile</th><th>Account</th><th className="num">This month</th><th className="num">In progress</th></tr></thead>
+              <thead><tr><th>Name</th><th>ID card no.</th><th>Hostel, room</th><th>Mobile</th><th>Account</th><th>Plan till</th><th className="num">This month</th><th className="num">In progress</th></tr></thead>
               <tbody>
                 {list.data.rows.map(s => (
                   <tr key={s.id} onClick={() => open.student(s.id)} tabIndex={0} onKeyDown={e => e.key === 'Enter' && open.student(s.id)}>
                     <td><b>{s.name}</b><small>Joined {when(s.created_at, 'date')}</small></td>
                     <td className="ord">{s.id_card_no}</td>
-                    <td>{s.hostel_name}, {s.room_no}</td>
+                    <td>{s.kind === 'WALKIN' ? <span className="muted">Walk-in</span> : <>{s.hostel_name}, {s.room_no}</>}{s.pending_hostel_id ? <small className="bad">Moving to {s.pending_hostel_name} {s.pending_room_no}</small> : null}</td>
                     <td>{s.mobile}</td>
-                    <td><span className={`pill acc-${s.status.toLowerCase()}`}>{label[s.status]}</span></td>
+                    <td><span className={`pill acc-${s.status.toLowerCase()}`}>{label[s.status]}</span>{s.claimable ? <small>Not signed in yet</small> : null}</td>
+                    <td>{s.kind === 'WALKIN' ? <span className="muted">–</span> : s.valid_until ? <span className={s.valid_until < today ? 'bad' : ''}>{when(`${s.valid_until}T12:00:00`, 'date')}</span> : <span className="muted">No end</span>}</td>
                     <td className="num">{s.month_orders}<small>{kg(s.month_kg)}</small></td>
                     <td className="num">{s.open_orders || <span className="muted">–</span>}</td>
                   </tr>
@@ -333,11 +344,13 @@ function Students({ open }: { open: Openers }) {
 
 /* ------------------------------------------------------------------ staff */
 
-type StaffRow = { id: number; name: string; login_id: string; mobile: string | null; role: 'STAFF' | 'ADMIN'; active: number; created_at: string; month_received: number; month_delivered: number };
+type StaffRow = { id: number; name: string; login_id: string; mobile: string | null; role: 'STAFF' | 'ADMIN'; active: number; created_at: string; month_received: number; month_delivered: number; month_collected: number; last_active: string | null };
 
 function Staff({ me }: { me: User }) {
   const list = useLoad(() => api<{ rows: StaffRow[] }>('/admin/staff'), []);
   const [adding, setAdding] = useState(false);
+  const [importing, setImporting] = useState(false);
+  const [work, setWork] = useState<StaffRow | null>(null);
   const [temp, setTemp] = useState<{ name: string; pass: string } | null>(null);
   const { busy, run } = useAction();
   const toggle = async (s: StaffRow) => {
@@ -351,23 +364,25 @@ function Staff({ me }: { me: User }) {
   };
   return (
     <div className="stack ad-narrow">
-      <div className="row-between"><p className="muted">People who can sign in to the counter or this office. Switch someone off when they leave; their history stays.</p><Button tone="primary" icon="plus" onClick={() => setAdding(true)}>Add staff</Button></div>
+      <div className="row-between"><p className="muted">People who can sign in to the counter or this office. Switch someone off when they leave; their history stays.</p><div className="btn-pair"><Button icon="download" onClick={() => setImporting(true)}>Add from Excel</Button><Button tone="primary" icon="plus" onClick={() => setAdding(true)}>Add staff</Button></div></div>
       {temp && <div className="temp-pass" role="status"><span>Temporary password for {temp.name}</span><b>{temp.pass}</b><small>They will choose a new one after signing in.</small></div>}
       {!list.data ? <Loading /> : (
         <div className="ledger-wrap">
           <table className="ledger">
-            <thead><tr><th>Name</th><th>Username</th><th>Role</th><th>Mobile</th><th className="num">Taken this month</th><th className="num">Handed over</th><th>Account</th><th /></tr></thead>
+            <thead><tr><th>Name</th><th>Username</th><th>Role</th><th className="num">Taken this month</th><th className="num">Handed over</th><th className="num">Collected</th><th>Last active</th><th>Account</th><th /></tr></thead>
             <tbody>
               {list.data.rows.map(s => (
                 <tr key={s.id} className={s.active ? '' : 'off'}>
                   <td><b>{s.name}</b>{s.id === me.id && <small>You</small>}</td>
                   <td className="ord">{s.login_id}</td>
-                  <td>{s.role === 'ADMIN' ? 'Admin' : 'Counter staff'}</td>
-                  <td>{s.mobile ?? <span className="muted">–</span>}</td>
+                  <td>{s.role === 'ADMIN' ? 'Admin' : 'Counter staff'}{s.mobile ? <small>{s.mobile}</small> : null}</td>
                   <td className="num">{s.month_received}</td>
                   <td className="num">{s.month_delivered}</td>
+                  <td className="num">{rupees(s.month_collected)}</td>
+                  <td>{s.last_active ? ago(s.last_active) : <span className="muted">Never</span>}</td>
                   <td><span className={`pill ${s.active ? 'acc-active' : 'acc-suspended'}`}>{s.active ? 'Active' : 'Switched off'}</span></td>
                   <td className="row-actions">
+                    <Button size="sm" icon="chart" onClick={() => setWork(s)}>Work</Button>
                     <Button size="sm" busy={busy} onClick={() => reset(s)}>Reset password</Button>
                     {s.id !== me.id && <Button size="sm" tone={s.active ? 'danger' : 'quiet'} onClick={() => toggle(s)}>{s.active ? 'Switch off' : 'Switch on'}</Button>}
                   </td>
@@ -378,6 +393,8 @@ function Staff({ me }: { me: User }) {
         </div>
       )}
       {adding && <AddStaff close={() => setAdding(false)} onDone={() => { setAdding(false); void list.reload(); }} />}
+      {importing && <ImportSheet type="staff" close={() => setImporting(false)} onDone={() => void list.reload()} />}
+      {work && <StaffWork id={work.id} name={work.name} close={() => setWork(null)} />}
     </div>
   );
 }
@@ -454,6 +471,7 @@ type Report = {
   totals: { orders: number; kg: number; clothes: number; delivered: number; cancelled: number; students: number; mismatches: number; extra_kg: number; express: number };
   money: { collected: number; cash: number; upi: number; due: number; waived: number };
   byHostel: { name: string; orders: number; kg: number; clothes: number }[];
+  byService?: { name: string; orders: number; kg: number; clothes: number; collected: number }[];
   byStaff: { name: string; received: number; delivered: number }[];
   topStudents: { name: string; id_card_no: string; orders: number; kg: number }[];
 };
@@ -490,12 +508,18 @@ function Reports() {
             <ReportBlock title="Money">
               <Row k="Collected" v={rupees(t.money.collected)} /><Row k="Cash" v={rupees(t.money.cash)} /><Row k="UPI" v={rupees(t.money.upi)} />
               <Row k="Still due" v={rupees(t.money.due)} warn={t.money.due > 0} /><Row k="Waived" v={rupees(t.money.waived)} />
-              <Row k="Weight over monthly limit" v={kg(t.totals.extra_kg)} /><Row k="Express orders" v={t.totals.express} />
+              <Row k="Weight charged over the free limit" v={kg(t.totals.extra_kg)} /><Row k="Express orders" v={t.totals.express} />
             </ReportBlock>
             <ReportBlock title="Staff">
               {t.byStaff.length ? t.byStaff.map(s => <Row key={s.name} k={s.name} v={`${s.received} taken, ${s.delivered} handed over`} />) : <p className="muted">No activity.</p>}
             </ReportBlock>
           </div>
+          {!!t.byService?.length && (
+            <ReportBlock title="By service">
+              <table className="mini-table"><thead><tr><th>Service</th><th className="num">Orders</th><th className="num">Clothes</th><th className="num">Kg</th><th className="num">Collected</th></tr></thead>
+                <tbody>{t.byService.map(x => <tr key={x.name}><td>{x.name}</td><td className="num">{x.orders}</td><td className="num">{x.clothes}</td><td className="num">{x.kg}</td><td className="num">{rupees(x.collected)}</td></tr>)}</tbody></table>
+            </ReportBlock>
+          )}
           <div className="ad-grid">
             <ReportBlock title="By hostel">
               {t.byHostel.length ? <table className="mini-table"><thead><tr><th>Hostel</th><th className="num">Orders</th><th className="num">Clothes</th><th className="num">Kg</th></tr></thead><tbody>{t.byHostel.map(h => <tr key={h.name}><td>{h.name}</td><td className="num">{h.orders}</td><td className="num">{h.clothes}</td><td className="num">{h.kg}</td></tr>)}</tbody></table> : <p className="muted">No orders.</p>}
@@ -519,16 +543,16 @@ const Row = ({ k, v, warn }: { k: string; v: ReactNode; warn?: boolean }) => <di
 /* --------------------------------------------------------------- settings */
 
 type Settings = {
-  max_kg_per_order: number; max_active_orders: number; monthly_order_limit: number; monthly_kg_limit: number; over_limit_action: 'BLOCK' | 'CHARGE';
-  regular_rate_per_kg: number; extra_rate_per_kg: number; express_enabled: boolean; express_fee: number; regular_turnaround_hours: number; express_turnaround_hours: number;
-  pay_before_pickup: boolean; upi_id: string; upi_name: string; counter_hours: string;
+  max_kg_per_order: number; max_active_orders: number; monthly_order_limit: number; monthly_kg_limit: number; allow_paid_extra: boolean;
+  extra_rate_per_kg: number; express_enabled: boolean; express_fee: number; regular_turnaround_hours: number; express_turnaround_hours: number;
+  pay_before_pickup: boolean; upi_id: string; upi_name: string; upi_qr_file?: string; semester_end: string; counter_hours: string;
 };
 
 function Settings() {
   const s = useLoad(() => api<Settings>('/admin/settings'), []);
   const [draft, setDraft] = useState<Settings | null>(null);
   const { busy, error, submit } = useFormAction();
-  useEffect(() => { if (s.data) setDraft(s.data); }, [s.data]);
+  useEffect(() => { if (s.data) setDraft(d => d && JSON.stringify(d) !== JSON.stringify(s.data) && d.upi_qr_file !== s.data!.upi_qr_file ? { ...d, upi_qr_file: s.data!.upi_qr_file } : s.data!); }, [s.data]);
   if (!draft) return <Loading />;
   const num = (k: keyof Settings) => (e: { target: { value: string } }) => setDraft({ ...draft, [k]: e.target.value as unknown as number });
   const dirty = JSON.stringify(draft) !== JSON.stringify(s.data);
@@ -543,27 +567,28 @@ function Settings() {
         <section className="ad-card settings-group">
           <h2>Each order</h2>
           <div className="field-grid">
-            <Field label="Weight limit per order (kg)" hint="The counter blocks anything heavier"><input type="number" step="0.5" min="0.5" value={draft.max_kg_per_order} onChange={num('max_kg_per_order')} /></Field>
+            <Field label="Free kg per order" hint="For hostelers with a valid plan"><input type="number" step="0.5" min="0.5" value={draft.max_kg_per_order} onChange={num('max_kg_per_order')} /></Field>
             <Field label="Orders a student can have in progress" hint="0 = no limit"><input type="number" min="0" value={draft.max_active_orders} onChange={num('max_active_orders')} /></Field>
             <Field label="Regular ready time (hours)"><input type="number" min="1" value={draft.regular_turnaround_hours} onChange={num('regular_turnaround_hours')} /></Field>
           </div>
         </section>
         <section className="ad-card settings-group">
-          <h2>Monthly limit per student</h2>
+          <h2>Free washing per student, each month</h2>
           <div className="field-grid">
-            <Field label="Kg per month" hint="0 = no monthly limit"><input type="number" step="0.5" min="0" value={draft.monthly_kg_limit} onChange={num('monthly_kg_limit')} /></Field>
-            <Field label="Orders per month" hint="0 = no limit"><input type="number" min="0" value={draft.monthly_order_limit} onChange={num('monthly_order_limit')} /></Field>
+            <Field label="Free kg per month" hint="0 = no monthly limit"><input type="number" step="0.5" min="0" value={draft.monthly_kg_limit} onChange={num('monthly_kg_limit')} /></Field>
+            <Field label="Free orders per month" hint="0 = no limit"><input type="number" min="0" value={draft.monthly_order_limit} onChange={num('monthly_order_limit')} /></Field>
           </div>
-          <Field label="When a student goes over the kg limit">
-            <Segmented label="Over limit" value={draft.over_limit_action} onChange={v => setDraft({ ...draft, over_limit_action: v })} options={[{ value: 'BLOCK', label: 'Do not accept' }, { value: 'CHARGE', label: 'Accept and charge extra' }]} />
-          </Field>
-          {draft.over_limit_action === 'CHARGE' && <Field label="Extra charge per kg (₹)"><input type="number" min="0" value={draft.extra_rate_per_kg} onChange={num('extra_rate_per_kg')} /></Field>}
+          <Switch checked={draft.allow_paid_extra} onChange={v => setDraft({ ...draft, allow_paid_extra: v })} label="Let students pay for extra kg" hint="Over a free limit the counter offers two choices: take clothes back, or charge for the extra kg. Off = only take clothes back." />
+          {draft.allow_paid_extra && <Field label="Price per extra kg (₹)"><input type="number" min="0" value={draft.extra_rate_per_kg} onChange={num('extra_rate_per_kg')} /></Field>}
         </section>
         <section className="ad-card settings-group">
-          <h2>Pricing</h2>
-          <div className="field-grid">
-            <Field label="Regular wash, per kg (₹)" hint="0 if laundry is included in hostel fees"><input type="number" min="0" value={draft.regular_rate_per_kg} onChange={num('regular_rate_per_kg')} /></Field>
-          </div>
+          <h2>Hostel plan</h2>
+          <Field label="Current semester ends" hint="Given to students approved from now on. After their date they pay normal prices. Set dates for existing students from Students → Plan dates.">
+            <input type="date" value={draft.semester_end} onChange={e => setDraft({ ...draft, semester_end: e.target.value })} />
+          </Field>
+        </section>
+        <section className="ad-card settings-group">
+          <h2>Express</h2>
           <Switch checked={draft.express_enabled} onChange={v => setDraft({ ...draft, express_enabled: v })} label="Offer express service" hint="Faster turnaround for a fixed fee" />
           {draft.express_enabled && (
             <div className="field-grid">
@@ -576,7 +601,7 @@ function Settings() {
           <h2>Payments</h2>
           <Switch checked={draft.pay_before_pickup} onChange={v => setDraft({ ...draft, pay_before_pickup: v })} label="Payment needed before pickup" hint="Staff cannot hand over clothes while money is due" />
           <div className="field-grid">
-            <Field label="UPI ID for students" hint="Adds a “Pay with UPI” button on the student’s phone"><input value={draft.upi_id} onChange={e => setDraft({ ...draft, upi_id: e.target.value })} placeholder="e.g. everjoylaundry@okaxis" /></Field>
+            <Field label="UPI ID" hint="Used for the “Open UPI app” button, and for a QR if no image is uploaded"><input value={draft.upi_id} onChange={e => setDraft({ ...draft, upi_id: e.target.value })} placeholder="e.g. everjoylaundry@okaxis" /></Field>
             <Field label="Name shown in UPI apps"><input value={draft.upi_name} onChange={e => setDraft({ ...draft, upi_name: e.target.value })} /></Field>
           </div>
         </section>
@@ -584,6 +609,7 @@ function Settings() {
           <h2>Counter</h2>
           <Field label="Counter timings" hint="Shown on the sign-in page and in student Help"><input value={draft.counter_hours} onChange={e => setDraft({ ...draft, counter_hours: e.target.value })} /></Field>
         </section>
+        <section className="ad-card settings-group"><UpiQrSetting onChanged={() => void s.reload()} /></section>
         <div className={`save-bar${dirty ? ' dirty' : ''}`}>
           {error && <ErrorNote error={error} />}
           <span>{dirty ? 'You have unsaved changes.' : 'All changes saved.'}</span>
@@ -591,6 +617,7 @@ function Settings() {
           <Button tone="primary" busy={busy} disabled={!dirty}>Save rules</Button>
         </div>
       </form>
+      <Services />
       <Hostels />
     </div>
   );
@@ -660,3 +687,270 @@ function Activity() {
   );
 }
 
+/* ------------------------------------------------------- services & prices */
+
+function Services() {
+  const list = useLoad(() => api<{ rows: Service[] }>('/admin/services'), []);
+  const [edit, setEdit] = useState<Service | 'new' | null>(null);
+  return (
+    <section className="ad-card settings-group">
+      <div className="row-between"><h2>Services and prices</h2><Button size="sm" icon="plus" onClick={() => setEdit('new')}>Add service</Button></div>
+      <p className="muted small">Each service gets its own slip. “Hosteler price” is for students with a valid hostel plan; everyone else (plan ended, walk-ins) pays the normal price. Services marked “uses the free kg” are free for hostelers up to the kg limits above.</p>
+      {!list.data ? <Loading /> : (
+        <table className="mini-table services-table">
+          <thead><tr><th>Service</th><th className="num">Hosteler price</th><th className="num">Normal price</th><th /></tr></thead>
+          <tbody>
+            {list.data.rows.map(x => (
+              <tr key={x.id} className={x.active ? '' : 'off'}>
+                <td><b>{x.name}</b><small>{x.uses_allowance ? 'Uses the free kg' : x.unit === 'KG' ? 'Per kg' : 'Per piece'}{x.active ? '' : ', hidden'}</small></td>
+                <td className="num">{x.uses_allowance && !x.hosteler_rate ? 'Free' : `${rupees(x.hosteler_rate)}/${x.unit === 'KG' ? 'kg' : 'pc'}`}</td>
+                <td className="num">{rupees(x.rate)}/{x.unit === 'KG' ? 'kg' : 'pc'}</td>
+                <td className="row-actions"><Button size="sm" tone="plain" icon="edit" onClick={() => setEdit(x)} aria-label={`Edit ${x.name}`} /></td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+      {edit && <ServiceForm s={edit === 'new' ? null : edit} close={() => setEdit(null)} onDone={() => { setEdit(null); void list.reload(); }} />}
+    </section>
+  );
+}
+
+function ServiceForm({ s, close, onDone }: { s: Service | null; close: () => void; onDone: () => void }) {
+  const [f, setF] = useState({ name: s?.name ?? '', unit: s?.unit ?? 'PIECE' as 'KG' | 'PIECE', rate: String(s?.rate ?? ''), hosteler_rate: String(s?.hosteler_rate ?? ''), uses_allowance: !!s?.uses_allowance, active: s ? !!s.active : true, sort: String(s?.sort ?? 10) });
+  const { busy, error, submit } = useFormAction();
+  const save = async (e: FormEvent) => {
+    e.preventDefault();
+    const body = { ...f, rate: Number(f.rate || 0), hosteler_rate: Number(f.hosteler_rate || 0), sort: Number(f.sort || 0) };
+    if (await submit(() => s ? api(`/admin/services/${s.id}`, { method: 'PATCH', body }) : api('/admin/services', { body }), s ? 'Service saved' : `${f.name} added`) !== undefined) onDone();
+  };
+  return (
+    <Sheet title={s ? `Edit ${s.name}` : 'Add a service'} onClose={close} size="sm">
+      <form className="stack" onSubmit={save}>
+        <Field label="Name" hint="Shown on the slip, e.g. Dry cleaning, Blanket wash"><input value={f.name} onChange={e => setF({ ...f, name: e.target.value })} maxLength={40} /></Field>
+        <Segmented label="Charged" value={f.unit} onChange={unit => setF({ ...f, unit })} options={[{ value: 'KG', label: 'Per kg' }, { value: 'PIECE', label: 'Per piece' }]} />
+        <div className="field-row">
+          <Field label="Hosteler price (₹)"><input type="number" min="0" step="0.5" value={f.hosteler_rate} onChange={e => setF({ ...f, hosteler_rate: e.target.value })} /></Field>
+          <Field label="Normal price (₹)"><input type="number" min="0" step="0.5" value={f.rate} onChange={e => setF({ ...f, rate: e.target.value })} /></Field>
+        </div>
+        <Switch checked={f.uses_allowance} onChange={v => setF({ ...f, uses_allowance: v })} label="Uses the free kg" hint="Weight counts toward the per-order and monthly free kg for hostelers" />
+        <Switch checked={f.active} onChange={v => setF({ ...f, active: v })} label="Offered at the counter" hint="Hide a service instead of deleting it; old slips keep its name" />
+        <Field label="Order in the list" hint="Smaller numbers come first"><input type="number" min="0" max="999" value={f.sort} onChange={e => setF({ ...f, sort: e.target.value })} /></Field>
+        {error && <ErrorNote error={error} />}
+        <Button tone="primary" block busy={busy} disabled={f.name.trim().length < 2}>{s ? 'Save' : 'Add service'}</Button>
+      </form>
+    </Sheet>
+  );
+}
+
+/* ----------------------------------------------------------------- UPI QR */
+
+function UpiQrSetting({ onChanged }: { onChanged: () => void }) {
+  const info = useLoad(() => api<{ upi_id: string; upi_name: string; has_upi_qr: boolean }>('/payment-info'), []);
+  const [preview, setPreview] = useState('');
+  const { busy, run } = useAction();
+  const file = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    if (!info.data?.has_upi_qr) { setPreview(''); return; }
+    let url = '';
+    let live = true;
+    blobUrl('/upi-qr').then(u => { url = u; if (live) setPreview(u); else URL.revokeObjectURL(u); }).catch(() => {});
+    return () => { live = false; if (url) URL.revokeObjectURL(url); };
+  }, [info.data?.has_upi_qr, info.data]);
+  const upload = async (f: File) => {
+    const form = new FormData();
+    form.append('qr', f);
+    if (await run(() => api('/admin/upi-qr', { form }), 'UPI QR saved. Students and the counter see it now.') !== undefined) { invalidatePaymentInfo(); await info.reload(); onChanged(); }
+  };
+  const remove = async () => {
+    if (!window.confirm('Remove the UPI QR? The counter will show a QR made from the UPI ID instead (if set).')) return;
+    if (await run(() => api('/admin/upi-qr', { method: 'DELETE' }), 'UPI QR removed') !== undefined) { invalidatePaymentInfo(); await info.reload(); onChanged(); }
+  };
+  return (
+    <div className="upi-setting">
+      {preview ? <img src={preview} alt="Current UPI QR" className="qr-img" width={140} height={140} /> : <div className="qr-empty"><Icon name="qr" size={34} /></div>}
+      <div className="stack">
+        <b>UPI QR code</b>
+        <p className="muted small">Upload the QR from your GPay / PhonePe / Paytm business app (a screenshot or photo is fine). Students see it when they choose UPI; staff mark the order paid after checking the payment.</p>
+        <input ref={file} type="file" accept="image/png,image/jpeg,image/webp" hidden onChange={e => { const f = e.target.files?.[0]; e.target.value = ''; if (f) void upload(f); }} />
+        <div className="btn-pair">
+          <Button size="sm" icon="camera" busy={busy} type="button" onClick={() => file.current?.click()}>{preview ? 'Replace QR' : 'Upload QR'}</Button>
+          {preview && <Button size="sm" tone="plain" type="button" onClick={remove}>Remove</Button>}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------ Excel import */
+
+type ImportResult = { created: number; updated?: number; newHostels?: string[]; codes?: { idCardNo: string; name: string; code: string }[]; accounts?: { name: string; username: string; role: string; tempPassword: string }[] };
+
+/** Claim codes as tab-separated text: pastes straight into Excel or a message. */
+async function copyCodes(codes: { idCardNo: string; name: string; code: string }[]) {
+  const text = ['ID card no.\tName\tClaim code', ...codes.map(c => `${c.idCardNo}\t${c.name}\t${c.code}`)].join('\n');
+  try { await navigator.clipboard.writeText(text); toast('Claim codes copied'); } catch { toast('Could not copy. Use Print instead.', 'bad'); }
+}
+
+function ImportSheet({ type, close, onDone }: { type: 'students' | 'staff'; close: () => void; onDone: () => void }) {
+  const [file, setFile] = useState<File | null>(null);
+  const [errors, setErrors] = useState<{ row: number; message: string }[]>([]);
+  const [result, setResult] = useState<ImportResult | null>(null);
+  const tpl = useAction();
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const send = async (e: FormEvent) => {
+    e.preventDefault();
+    if (!file) return;
+    setErrors([]); setError(''); setBusy(true);
+    const form = new FormData();
+    form.append('file', file);
+    try {
+      const r = await api<ImportResult>(`/admin/import/${type}`, { form });
+      setResult(r);
+      onDone();
+    } catch (err) {
+      const ae = err as ApiError;
+      setError(ae.message);
+      setErrors(ae.details?.errors ?? []);
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <Sheet title={type === 'students' ? 'Add students from Excel' : 'Add staff from Excel'} onClose={close} size="md">
+      {result ? (
+        <div className="stack">
+          <p className="import-done"><Icon name="check" size={20} />
+            {type === 'students'
+              ? `${plural(result.created, 'student')} added${result.updated ? `, ${result.updated} updated` : ''}.${result.newHostels?.length ? ` New hostels: ${result.newHostels.join(', ')}.` : ''}`
+              : `${plural(result.created, 'account')} created.`}
+          </p>
+          {type === 'students' && <p className="muted">Each student <b>Registers</b> with the same ID card no. and mobile number from the sheet plus their <b>claim code</b>, and chooses a password. Give each student their own code privately (print this list or send it one by one). The codes are shown only now and work for 30 days. Lost a code? Upload the student again for a new one, or reset their password at the counter.</p>}
+          {!!result.codes?.length && (
+            <>
+              <div className="ledger-wrap claim-codes">
+                <table className="mini-table"><thead><tr><th>ID card no.</th><th>Name</th><th>Claim code</th></tr></thead>
+                  <tbody>{result.codes.map(c => <tr key={c.idCardNo}><td className="ord">{c.idCardNo}</td><td>{c.name}</td><td className="ord">{c.code}</td></tr>)}</tbody>
+                </table>
+              </div>
+              <div className="btn-pair">
+                <Button type="button" icon="download" onClick={() => void copyCodes(result.codes!)}>Copy list</Button>
+                <Button type="button" onClick={() => window.print()}>Print</Button>
+              </div>
+            </>
+          )}
+          {result.accounts && result.accounts.length > 0 && (
+            <>
+              <p className="muted">Temporary passwords. Share each one privately; it is shown only now. They choose their own at first sign-in.</p>
+              <table className="mini-table"><thead><tr><th>Name</th><th>Username</th><th>Role</th><th>Temporary password</th></tr></thead>
+                <tbody>{result.accounts.map(a => <tr key={a.username}><td>{a.name}</td><td className="ord">{a.username}</td><td>{a.role === 'ADMIN' ? 'Admin' : 'Staff'}</td><td className="ord">{a.tempPassword}</td></tr>)}</tbody>
+              </table>
+            </>
+          )}
+          <Button tone="primary" block onClick={close}>Done</Button>
+        </div>
+      ) : (
+        <form className="stack" onSubmit={send}>
+          <ol className="how">
+            <li>Download the template. Keep the header row as it is.</li>
+            <li>Fill one {type === 'students' ? 'student' : 'person'} per row{type === 'students' ? ' (Valid Until = last day of the hostel plan, e.g. 2027-05-31)' : ' (Role = STAFF or ADMIN)'}.</li>
+            <li>Upload it here. If any row has a problem, nothing is added and each problem is listed.</li>
+          </ol>
+          <Button type="button" icon="download" busy={tpl.busy} onClick={() => tpl.run(() => download(`/admin/import/template/${type}`, `everjoy-${type}-import-template.xlsx`), 'Template downloaded')}>Download template</Button>
+          <Field label="Filled-in file" hint=".xlsx from Excel or Google Sheets (File → Download → .xlsx)">
+            <input type="file" accept=".xlsx,.csv" onChange={e => { setFile(e.target.files?.[0] ?? null); setErrors([]); setError(''); }} />
+          </Field>
+          {error && <ErrorNote error={error} />}
+          {errors.length > 0 && (
+            <ul className="import-errors">
+              {errors.map((x, i) => <li key={i}><b>Row {x.row}</b>{x.message}</li>)}
+            </ul>
+          )}
+          <Button tone="primary" block busy={busy} disabled={!file}>Import</Button>
+        </form>
+      )}
+    </Sheet>
+  );
+}
+
+/* --------------------------------------------------------- hostel plan dates */
+
+function PlanDates({ close, onDone, hostels }: { close: () => void; onDone: () => void; hostels: Hostel[] }) {
+  const [f, setF] = useState({ scope: 'ALL' as 'ALL' | 'HOSTEL', hostelId: '', validUntil: '' });
+  const { busy, error, submit } = useFormAction();
+  const save = async (e: FormEvent) => {
+    e.preventDefault();
+    const body = { scope: f.scope, validUntil: f.validUntil, ...(f.scope === 'HOSTEL' ? { hostelId: Number(f.hostelId) } : {}) };
+    const r = await submit(() => api<{ changed: number }>('/admin/students/validity', { body }));
+    if (r) { toast(`Plan date set for ${plural(r.changed, 'student')}`); onDone(); }
+  };
+  return (
+    <Sheet title="Set hostel plan dates" onClose={close} size="sm">
+      <form className="stack" onSubmit={save}>
+        <p className="muted small">For a new semester. After this date students pay normal prices until you set a new date. To give one student a different date, open the student and edit.</p>
+        <Segmented label="Who" value={f.scope} onChange={scope => setF({ ...f, scope })} options={[{ value: 'ALL', label: 'All approved students' }, { value: 'HOSTEL', label: 'One hostel' }]} />
+        {f.scope === 'HOSTEL' && <Field label="Hostel"><select value={f.hostelId} onChange={e => setF({ ...f, hostelId: e.target.value })}><option value="">Choose</option>{hostels.map(h => <option key={h.id} value={h.id}>{h.name}</option>)}</select></Field>}
+        <Field label="Plan valid till" hint="Leave empty to remove the end date"><input type="date" value={f.validUntil} onChange={e => setF({ ...f, validUntil: e.target.value })} /></Field>
+        {error && <ErrorNote error={error} />}
+        <Button tone="primary" block busy={busy} disabled={f.scope === 'HOSTEL' && !f.hostelId}>Save plan date</Button>
+      </form>
+    </Sheet>
+  );
+}
+
+/* ---------------------------------------------------------- staff work */
+
+type StaffReport = {
+  person: { id: number; name: string; login_id: string; role: string };
+  taken: { orders: number; clothes: number; kg: number };
+  delivered: { orders: number; clothes: number; mismatches: number };
+  money: { cash: number; upi: number; payments: number };
+  approvals: { approved: number; rejected: number; walkins: number; resets: number };
+  complaints: { handled: number; resolved: number };
+  room_changes: number; last_active: string | null;
+  by_day: { day: string; orders: number; kg: number }[];
+};
+
+function StaffWork({ id, name, close }: { id: number; name: string; close: () => void }) {
+  const today = todayKey();
+  const presets = [
+    { key: 'today', label: 'Today', from: today, to: today },
+    { key: 'week', label: '7 days', from: shiftDay(today, -6), to: today },
+    { key: 'month', label: 'This month', from: `${today.slice(0, 7)}-01`, to: today },
+  ];
+  const [r, setR] = useState({ from: presets[2].from, to: presets[2].to });
+  const d = useLoad(() => api<StaffReport>(`/admin/staff/${id}/report?from=${r.from}&to=${r.to}`), [id, r.from, r.to]);
+  const t = d.data;
+  return (
+    <Sheet title={`${name}: work`} onClose={close} size="md">
+      <div className="stack">
+        <Segmented label="Period" value={presets.find(p => p.from === r.from && p.to === r.to)?.key ?? ''} onChange={k => { const p = presets.find(x => x.key === k)!; setR({ from: p.from, to: p.to }); }} options={presets.map(p => ({ value: p.key, label: p.label }))} />
+        <div className="field-row">
+          <label className="mini-date">From <input type="date" value={r.from} max={r.to} onChange={e => setR({ ...r, from: e.target.value })} /></label>
+          <label className="mini-date">To <input type="date" value={r.to} min={r.from} onChange={e => setR({ ...r, to: e.target.value })} /></label>
+        </div>
+        {!t ? (d.error ? <ErrorNote error={d.error} retry={d.reload} /> : <Loading />) : (
+          <>
+            <p className="muted small">Last active {t.last_active ? `${ago(t.last_active)} (${when(t.last_active)})` : 'never'}.</p>
+            <div className="work-grid">
+              <div><span>Orders taken</span><b>{t.taken.orders}</b><small>{t.taken.clothes} clothes, {kg(t.taken.kg)}</small></div>
+              <div><span>Handed over</span><b>{t.delivered.orders}</b><small>{t.delivered.mismatches ? `${t.delivered.mismatches} with a count mismatch` : 'No count mismatches'}</small></div>
+              <div><span>Money collected</span><b>{rupees(Number(t.money.cash) + Number(t.money.upi))}</b><small>Cash {rupees(t.money.cash)}, UPI {rupees(t.money.upi)}</small></div>
+              <div><span>Complaints handled</span><b>{t.complaints.handled}</b><small>{t.complaints.resolved} marked resolved</small></div>
+              <div><span>Students approved</span><b>{t.approvals.approved}</b><small>{t.approvals.rejected} rejected, {t.room_changes} room changes</small></div>
+              <div><span>Walk-ins and resets</span><b>{t.approvals.walkins}</b><small>{plural(Number(t.approvals.resets), 'password reset')}</small></div>
+            </div>
+            {t.by_day.length > 0 && (
+              <table className="mini-table">
+                <caption>Orders taken per day</caption>
+                <thead><tr><th>Day</th><th className="num">Orders</th><th className="num">Kg</th></tr></thead>
+                <tbody>{t.by_day.map(x => <tr key={x.day}><td>{when(`${x.day}T12:00:00`, 'date')}</td><td className="num">{x.orders}</td><td className="num">{x.kg}</td></tr>)}</tbody>
+              </table>
+            )}
+          </>
+        )}
+      </div>
+    </Sheet>
+  );
+}

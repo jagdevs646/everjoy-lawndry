@@ -1,0 +1,20 @@
+{
+  "$schema": "https://github.com/garrytan/gstack/docs/pregate.md#pregate-v1",
+  "runner": "npx vitest run {files}",
+  "dependencies": {
+    "client/api.ts": ["tests/api.test.ts"],
+    "client/admin.tsx": [],
+    "client/auth.tsx": [],
+    "client/ops.tsx": [],
+    "client/staff.tsx": [],
+    "client/student.tsx": [],
+    "client/ui.tsx": [],
+    "client/lib.ts": [],
+    "client/main.tsx": [],
+    "client/platform.ts": [],
+    "client/styles/admin.css": [],
+    "client/styles/base.css": [],
+    "client/styles/staff.css": [],
+    "client/styles/student.css": []
+  }
+}

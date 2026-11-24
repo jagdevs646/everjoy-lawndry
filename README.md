@@ -61,8 +61,9 @@ Complaint photos and the session signing key are stored in the database too, so 
 **Render settings** (already configured on the service):
 - Build: `npm ci --include=dev && npm run build`
 - Start: `npm start`
-- Environment: `NODE_ENV=production`, `TRUST_PROXY=1`, `APP_TZ=Asia/Kolkata`, `DEMO=1` while testing
-- To start with a clean database for real use, set `DEMO=0`, then in the Neon console run `DROP SCHEMA public CASCADE; CREATE SCHEMA public;` and redeploy.
+- Environment: `NODE_ENV=production`, `TRUST_PROXY=1`, `APP_TZ=Asia/Kolkata`. Do not set `DEMO` on Render: with `NODE_ENV=production` the server ignores it (demo accounts share a published password).
+- To start with a clean database for real use, in the Neon console run `DROP SCHEMA public CASCADE; CREATE SCHEMA public;` and redeploy.
+- Open security tasks that need the Render or Neon dashboards are listed in [SECURITY-TODO.md](SECURITY-TODO.md).
 
 **Good to know about free tiers**
 - Render's free server **sleeps after 15 minutes without visitors**. The next visit takes about a minute while it wakes. To keep it awake during counter hours, add a free monitor (e.g. UptimeRobot) that opens `https://<your-service>.onrender.com/api/health` every 10 minutes.

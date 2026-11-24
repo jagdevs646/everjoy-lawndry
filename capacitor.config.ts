@@ -29,6 +29,11 @@ const config: CapacitorConfig = {
   },
   android: {
     allowMixedContent: httpTestServer,
+    // Chrome remote debugging of the app's screens only for laptop test builds, never for builds given to people.
+    webContentsDebuggingEnabled: httpTestServer,
+  },
+  ios: {
+    webContentsDebuggingEnabled: httpTestServer,
   },
   plugins: {
     SplashScreen: {

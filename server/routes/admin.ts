@@ -1,17 +1,21 @@
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { Router } from 'express';
 import bcrypt from 'bcryptjs';
-import XLSX from 'xlsx';
+import multer from 'multer';
 import { z } from 'zod';
 import { TABLES, db, insertId, logActivity, type Row } from '../db.js';
 import { AuthedRequest, requireRole } from '../auth.js';
-import { getSettings, saveSettings } from '../rules.js';
+import { getSettings, listServices, saveSettings, serviceSchema } from '../rules.js';
+import { photoUpload, savePhoto } from '../files.js';
+import { readUpload, writeXlsx, XLSX_TYPE } from '../sheets.js';
 import { announcementsFor, listOrders } from '../queries.js';
-import { dayKey, handle, HttpError, likeContains, nowIso, parse, startOfLocalDayIso, zId, zText } from '../util.js';
-import { normaliseLogin, zMobile, zPassword } from './public.js';
-import { tempPassword } from './ops.js';
+import { dayKey, handle, HttpError, likeContains, nowIso, parse, startOfLocalDayIso, zDate, zId, zText } from '../util.js';
+import { normaliseLogin, zIdCard, zMobile, zPassword, zRoom } from './public.js';
+import { tempPassword, tempPasswordExpiry } from './ops.js';
+import { claimHash } from './public.js';
 
 export const router = Router();
 router.use('/admin', requireRole('ADMIN'));
@@ -103,7 +107,11 @@ router.get('/admin/overview', handle(async (_req, res) => {
 /* ---------------------------------------------------------------- settings */
 
 router.get('/admin/settings', handle(async (_req, res) => res.json(await getSettings())));
-router.put('/admin/settings', handle(async (req, res) => res.json(await saveSettings(actor(req).id, req.body))));
+router.put('/admin/settings', handle(async (req, res) => {
+  // The UPI QR image is set only by uploading it.
+  const { upi_qr_file: _ignored, ...rest } = (req.body ?? {}) as Record<string, unknown>;
+  res.json(await saveSettings(actor(req).id, rest));
+}));
 
 /* ----------------------------------------------------------------- hostels */
 
@@ -132,8 +140,10 @@ router.get('/admin/staff', handle(async (_req, res) => {
   const month = dayKey().slice(0, 7);
   res.json({ rows: await db.all(`SELECT u.id, u.name, u.login_id, u.mobile, u.role, u.active, u.created_at,
       (SELECT COUNT(*) FROM orders o WHERE o.received_by = u.id AND o.month_key = ?) AS month_received,
-      (SELECT COUNT(*) FROM orders o WHERE o.delivered_by = u.id AND substr(o.delivered_at,1,7) = ?) AS month_delivered
-    FROM users u WHERE u.role IN ('STAFF','ADMIN') ORDER BY u.active DESC, u.role, u.name`, [month, month]) });
+      (SELECT COUNT(*) FROM orders o WHERE o.delivered_by = u.id AND substr(o.delivered_at,1,7) = ?) AS month_delivered,
+      (SELECT COALESCE(SUM(o.amount),0) FROM orders o WHERE o.paid_by = u.id AND o.payment_status = 'PAID' AND substr(o.paid_at,1,7) = ?) AS month_collected,
+      (SELECT MAX(a.created_at) FROM activity a WHERE a.actor_id = u.id) AS last_active
+    FROM users u WHERE u.role IN ('STAFF','ADMIN') ORDER BY u.active DESC, u.role, u.name`, [month, month, month]) });
 }));
 router.post('/admin/staff', handle(async (req, res) => {
   const b = parse(z.object({
@@ -172,8 +182,8 @@ router.post('/admin/staff/:id/reset-password', handle(async (req, res) => {
   const id = parse(zId, req.params.id);
   const u = await db.get<{ login_id: string }>(`SELECT login_id FROM users WHERE id = ? AND role IN ('STAFF','ADMIN')`, [id]);
   if (!u) throw new HttpError(404, 'Staff account not found.');
-  const pass = `${tempPassword()}${Math.floor(Math.random() * 10)}`;   // ≥ 8 chars for staff
-  await db.run('UPDATE users SET password_hash = ?, must_change_password = 1, token_version = token_version + 1 WHERE id = ?', [bcrypt.hashSync(pass, 10), id]);
+  const pass = tempPassword();
+  await db.run('UPDATE users SET password_hash = ?, must_change_password = 1, password_expires_at = ?, token_version = token_version + 1 WHERE id = ?', [await bcrypt.hash(pass, 10), tempPasswordExpiry(), id]);
   await logActivity(actor(req).id, 'PASSWORD_RESET', 'user', u.login_id);
   res.json({ tempPassword: pass });
 }));
@@ -238,6 +248,9 @@ router.get('/admin/report', handle(async (req, res) => {
         COALESCE(SUM(CASE WHEN payment_status = 'DUE' AND status != 'CANCELLED' THEN amount END), 0) AS due,
         COALESCE(SUM(CASE WHEN payment_status = 'WAIVED' THEN amount END), 0) AS waived
       FROM orders WHERE ${w}`, p),
+    byService: db.all(`SELECT COALESCE(service_name, 'Wash & fold') AS name, COUNT(*) AS orders, SUM(clothes_count) AS clothes, ROUND(CAST(SUM(weight_kg) AS NUMERIC), 1) AS kg,
+        COALESCE(SUM(CASE WHEN payment_status = 'PAID' THEN amount END), 0) AS collected
+      FROM orders WHERE ${w} AND status != 'CANCELLED' GROUP BY COALESCE(service_name, 'Wash & fold') ORDER BY orders DESC`, p),
     byHostel: db.all(`SELECT hostel_name AS name, COUNT(*) AS orders, ROUND(CAST(SUM(weight_kg) AS NUMERIC), 1) AS kg, SUM(clothes_count) AS clothes FROM orders WHERE ${w} AND status != 'CANCELLED' GROUP BY hostel_name ORDER BY orders DESC`, p),
     byStaff: db.all(`SELECT u.name, SUM(CASE WHEN o.received_by = u.id THEN 1 ELSE 0 END) AS received, SUM(CASE WHEN o.delivered_by = u.id THEN 1 ELSE 0 END) AS delivered
       FROM users u JOIN orders o ON (o.received_by = u.id OR o.delivered_by = u.id)
@@ -263,7 +276,8 @@ router.get('/admin/export', handle(async (req, res) => {
     'Room': o.room_no,
     'Clothes Given': o.clothes_count,
     'Weight (kg)': o.weight_kg,
-    'Service': o.service,
+    'Service': o.service_name ?? 'Wash & fold',
+    'Express': o.service === 'EXPRESS' ? 'Yes' : '',
     'Status': o.status,
     'Received By': o.received_by_name,
     'Ready At': t(o.ready_at),
@@ -276,13 +290,10 @@ router.get('/admin/export', handle(async (req, res) => {
     'Paid Via': o.paid_method ?? '',
     'Note': [o.note, o.cancel_reason].filter(Boolean).join(' · '),
   }));
-  const wb = XLSX.utils.book_new();
-  const ws = XLSX.utils.json_to_sheet(sheet);
-  ws['!cols'] = Object.keys(sheet[0]).map(k => ({ wch: Math.max(10, k.length + 2) }));
-  XLSX.utils.book_append_sheet(wb, ws, 'Register');
-  const buf = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' }) as Buffer;
+  const header = Object.keys(sheet[0]);
+  const buf = await writeXlsx([{ name: 'Register', header, rows: sheet.map(o => header.map(k => (o as Record<string, unknown>)[k])) }]);
   await logActivity(actor(req).id, 'EXPORTED', 'report', null, `${r.from} → ${r.to} · ${rows.length} orders`);
-  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  res.setHeader('Content-Type', XLSX_TYPE);
   res.setHeader('Content-Disposition', `attachment; filename="everjoy-register-${r.from}-to-${r.to}.xlsx"`);
   res.send(buf);
 }));
@@ -306,6 +317,10 @@ router.get('/admin/backup', handle(async (req, res) => {
     // SQLite on disk: a consistent copy of the database file.
     const file = path.join(os.tmpdir(), `everjoy-backup-${Date.now()}.db`);
     await db.backupFile(file);
+    // The session signing secret stays on the server: anyone holding a backup must not be able to sign in as admin.
+    const { default: Sqlite } = await import('better-sqlite3');
+    const copy = new Sqlite(file);
+    try { copy.exec("DELETE FROM app_secrets; VACUUM;"); } finally { copy.close(); }
     await logActivity(actor(req).id, 'BACKUP_DOWNLOADED', 'system', null);
     res.download(file, `everjoy-lawndry-backup-${dayKey()}.db`, () => fs.rm(file, { force: true }, () => {}));
     return;
@@ -323,3 +338,287 @@ router.get('/admin/backup', handle(async (req, res) => {
   res.setHeader('Content-Disposition', `attachment; filename="everjoy-lawndry-backup-${dayKey()}.json"`);
   res.send(backup);
 }));
+
+/* ---------------------------------------------------------------- services */
+
+// Everyone signed in can see the services and prices (students see them in Help).
+router.get('/services', handle(async (req, res) => {
+  if (!(req as AuthedRequest).user) throw new HttpError(401, 'Please sign in.');
+  res.json({ rows: await listServices() });
+}));
+router.get('/admin/services', handle(async (_req, res) => res.json({ rows: await listServices(true) })));
+router.post('/admin/services', handle(async (req, res) => {
+  const b = parse(serviceSchema, req.body);
+  if (await db.get('SELECT 1 AS ok FROM services WHERE lower(name) = lower(?)', [b.name])) throw new HttpError(409, 'A service with this name already exists.');
+  const id = await insertId('INSERT INTO services (name, unit, rate, hosteler_rate, uses_allowance, active, sort, created_at) VALUES (?,?,?,?,?,?,?,?)',
+    [b.name, b.unit, b.rate, b.hosteler_rate, b.uses_allowance ? 1 : 0, b.active ? 1 : 0, b.sort, nowIso()]);
+  await logActivity(actor(req).id, 'SERVICE_ADDED', 'service', id, `${b.name}: ₹${b.rate}/${b.unit === 'KG' ? 'kg' : 'piece'}, hostelers ₹${b.hosteler_rate}`);
+  res.status(201).json({ id });
+}));
+router.patch('/admin/services/:id', handle(async (req, res) => {
+  const id = parse(zId, req.params.id);
+  const before = await db.get<Row>('SELECT * FROM services WHERE id = ?', [id]);
+  if (!before) throw new HttpError(404, 'Service not found.');
+  const b = parse(serviceSchema, { ...before, uses_allowance: !!before.uses_allowance, active: !!before.active, ...(req.body as object) });
+  if (await db.get('SELECT 1 AS ok FROM services WHERE lower(name) = lower(?) AND id != ?', [b.name, id])) throw new HttpError(409, 'A service with this name already exists.');
+  if (!b.active && before.active && Number((await db.get<{ c: number }>('SELECT COUNT(*) AS c FROM services WHERE active = 1'))!.c) <= 1) throw new HttpError(400, 'Keep at least one service offered.');
+  await db.run('UPDATE services SET name = ?, unit = ?, rate = ?, hosteler_rate = ?, uses_allowance = ?, active = ?, sort = ? WHERE id = ?',
+    [b.name, b.unit, b.rate, b.hosteler_rate, b.uses_allowance ? 1 : 0, b.active ? 1 : 0, b.sort, id]);
+  await logActivity(actor(req).id, 'SERVICE_UPDATED', 'service', id,
+    `${before.name} → ${b.name}: ₹${before.rate}→₹${b.rate}, hostelers ₹${before.hosteler_rate}→₹${b.hosteler_rate}${b.active ? '' : ', hidden'}`);
+  res.json({ ok: true });
+}));
+
+/* ------------------------------------------------------------------ UPI QR */
+
+/** The UPI QR image (e.g. from GPay/PhonePe Business) shown to students and at the counter. */
+router.get('/upi-qr', handle(async (req, res) => {
+  if (!(req as AuthedRequest).user) throw new HttpError(401, 'Please sign in.');
+  const { upi_qr_file: name } = await getSettings();
+  const row = name ? await db.get<{ mime: string; data: Buffer | Uint8Array }>('SELECT mime, data FROM files WHERE name = ?', [name]) : undefined;
+  if (!row) throw new HttpError(404, 'No UPI QR has been uploaded.');
+  res.type(row.mime).send(Buffer.from(row.data));
+}));
+/** What the pay screens need: UPI ID, name and whether a QR image was uploaded. */
+router.get('/payment-info', handle(async (req, res) => {
+  if (!(req as AuthedRequest).user) throw new HttpError(401, 'Please sign in.');
+  const s = await getSettings();
+  res.json({ upi_id: s.upi_id, upi_name: s.upi_name, has_upi_qr: !!s.upi_qr_file });
+}));
+router.post('/admin/upi-qr', photoUpload.single('qr'), handle(async (req, res) => {
+  if (!req.file) throw new HttpError(400, 'Choose the UPI QR image.');
+  const name = await savePhoto(req.file);
+  const before = (await getSettings()).upi_qr_file;
+  await saveSettings(actor(req).id, { upi_qr_file: name });
+  if (before) await db.run('DELETE FROM files WHERE name = ?', [before]);
+  res.status(201).json({ ok: true });
+}));
+router.delete('/admin/upi-qr', handle(async (req, res) => {
+  const before = (await getSettings()).upi_qr_file;
+  await saveSettings(actor(req).id, { upi_qr_file: '' });
+  if (before) await db.run('DELETE FROM files WHERE name = ?', [before]);
+  res.status(204).end();
+}));
+
+/* ---------------------------------------------------------- hostel plans */
+
+/**
+ * Set the hostel plan end date for many students at once (e.g. new semester).
+ * scope ALL = every hosteler, HOSTEL = one hostel, IDS = chosen students.
+ */
+router.post('/admin/students/validity', handle(async (req, res) => {
+  const b = parse(z.object({
+    validUntil: z.union([z.literal(''), zDate]),
+    scope: z.enum(['ALL', 'HOSTEL', 'IDS']),
+    hostelId: zId.optional(),
+    ids: z.array(zId).max(5000).optional(),
+  }), req.body);
+  const where: string[] = ["kind = 'HOSTELER'", "status = 'ACTIVE'"];
+  const p: unknown[] = [b.validUntil || null];
+  if (b.scope === 'HOSTEL') {
+    if (!b.hostelId) throw new HttpError(400, 'Choose a hostel.');
+    where.push('hostel_id = ?'); p.push(b.hostelId);
+  }
+  if (b.scope === 'IDS') {
+    if (!b.ids?.length) throw new HttpError(400, 'Choose at least one student.');
+    where.push(`user_id IN (${b.ids.map(() => '?').join(',')})`); p.push(...b.ids);
+  }
+  const r = await db.run(`UPDATE students SET valid_until = ? WHERE ${where.join(' AND ')}`, p);
+  await logActivity(actor(req).id, 'PLAN_DATES_SET', 'student', null, `${r.changes} students → ${b.validUntil || 'no end date'} (${b.scope})`);
+  res.json({ changed: r.changes });
+}));
+
+/* ------------------------------------------------------------ Excel import */
+
+const IMPORT_COLUMNS = {
+  students: ['ID Card No', 'Full Name', 'Mobile', 'Hostel', 'Room', 'Valid Until'],
+  staff: ['Full Name', 'Username', 'Mobile', 'Role'],
+} as const;
+type ImportType = keyof typeof IMPORT_COLUMNS;
+
+/** A ready-made Excel file with the right headers, an example row and instructions. */
+router.get('/admin/import/template/:type', handle(async (req, res) => {
+  const type = parse(z.enum(['students', 'staff']), req.params.type) as ImportType;
+  const example = type === 'students'
+    ? [{ 'ID Card No': 'EJ2026101', 'Full Name': 'Ananya Rao', 'Mobile': '9876543210', 'Hostel': 'Girls Hostel 1', 'Room': '204', 'Valid Until': '2027-05-31' }]
+    : [{ 'Full Name': 'Suresh Kumar', 'Username': 'SURESH', 'Mobile': '9811122233', 'Role': 'STAFF' }];
+  const help = type === 'students'
+    ? [['How to fill this sheet'], ['One student per row. Keep the header row exactly as it is and delete the example row.'],
+      ['ID Card No: as printed on the ID card. Students sign in with it.'], ['Mobile: 10 digits. Students use it to set their own password: Register with the same ID card no. and mobile.'],
+      ['Hostel: must match a hostel name (a new name creates that hostel).'], ['Valid Until: last day of the hostel plan, as YYYY-MM-DD (e.g. 2027-05-31). Leave empty for no end date.'],
+      ['A student who is already registered is updated (hostel, room, valid until), not added twice.']]
+    : [['How to fill this sheet'], ['One staff member per row. Keep the header row and delete the example row.'],
+      ['Username: letters and numbers, used to sign in.'], ['Role: STAFF (counter) or ADMIN.'],
+      ['After the upload you get a temporary password for each person; they choose their own at first sign-in.']];
+  const header = [...IMPORT_COLUMNS[type]];
+  const buf = await writeXlsx([
+    { name: type === 'students' ? 'Students' : 'Staff', header, rows: example.map(e => header.map(h => (e as Record<string, string>)[h])), widths: header.map(() => 18) },
+    { name: 'Instructions', rows: help, widths: [110] },
+  ]);
+  res.setHeader('Content-Type', XLSX_TYPE);
+  res.setHeader('Content-Disposition', `attachment; filename="everjoy-${type}-import-template.xlsx"`);
+  res.send(buf);
+}));
+
+const sheetUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 2 * 1024 * 1024, files: 1, fields: 5, fieldSize: 1024, fieldNameSize: 64, parts: 6, headerPairs: 50 },
+  fileFilter: (_req, file, cb) => (/\.(xlsx|csv)$/i.test(file.originalname) ? cb(null, true) : cb(new HttpError(400, 'Upload the Excel file (.xlsx) or a .csv file.'))),
+});
+
+/** Excel may turn 2027-05-31 into 5/31/27 or a serial number: normalise to YYYY-MM-DD. */
+function excelDate(v: string) {
+  if (!v) return '';
+  if (/^\d{4}-\d{2}-\d{2}$/.test(v)) return v;
+  if (/^\d{5}$/.test(v)) return new Date(Date.UTC(1899, 11, 30) + Number(v) * 86400_000).toISOString().slice(0, 10);   // Excel serial day
+  const m = /^(\d{1,2})[/.-](\d{1,2})[/.-](\d{2,4})$/.exec(v);   // day/month/year, as written in India
+  if (m) { const y = m[3].length === 2 ? `20${m[3]}` : m[3]; return `${y}-${m[2].padStart(2, '0')}-${m[1].padStart(2, '0')}`; }
+  return v;
+}
+
+/**
+ * Import students or staff from the template. All rows are checked first: if any row has a
+ * problem, nothing is imported and every problem is listed with its row number.
+ */
+router.post('/admin/import/:type', sheetUpload.single('file'), handle(async (req, res) => {
+  const type = parse(z.enum(['students', 'staff']), req.params.type) as ImportType;
+  if (!req.file) throw new HttpError(400, 'Choose the filled-in Excel file.');
+  const sheet = await readUpload(req.file.buffer, /\.csv$/i.test(req.file.originalname));
+  if (!sheet.length) throw new HttpError(400, 'The sheet has no rows under the header.');
+  const rows = sheet.map(r => r.cells);
+  const rowNo = (i: number) => sheet[i].row;
+  const missing = IMPORT_COLUMNS[type].filter(h => !(h.toLowerCase() in rows[0]));
+  if (missing.length) throw new HttpError(400, `Missing column(s): ${missing.join(', ')}. Use the template from this page.`);
+  const errors: { row: number; message: string }[] = [];
+  const col = (r: Record<string, string>, h: string) => r[h.toLowerCase()] ?? '';
+
+  if (type === 'students') {
+    const schema = z.object({ idCardNo: zIdCard, name: zText(2, 80), mobile: zMobile, hostel: zText(1, 40), roomNo: zRoom, validUntil: z.union([z.literal(''), zDate]) });
+    const parsed: (z.infer<typeof schema> & { row: number })[] = [];
+    const seen = new Set<string>();
+    rows.forEach((r, i) => {
+      const result = schema.safeParse({ idCardNo: col(r, 'ID Card No'), name: col(r, 'Full Name'), mobile: col(r, 'Mobile'), hostel: col(r, 'Hostel'), roomNo: col(r, 'Room'), validUntil: excelDate(col(r, 'Valid Until')) });
+      if (!result.success) { const iss = result.error.issues[0]; errors.push({ row: rowNo(i), message: `${String(iss.path[0] ?? '')}: ${iss.message}` }); return; }
+      if (seen.has(result.data.idCardNo)) { errors.push({ row: rowNo(i), message: `ID card ${result.data.idCardNo} appears twice in the sheet` }); return; }
+      seen.add(result.data.idCardNo);
+      parsed.push({ ...result.data, row: rowNo(i) });
+    });
+    for (const r of parsed) {
+      const clash = await db.get<{ role: string; kind: string | null }>('SELECT u.role, st.kind FROM users u LEFT JOIN students st ON st.user_id = u.id WHERE u.login_id = ?', [r.idCardNo]);
+      if (clash && clash.role !== 'STUDENT') errors.push({ row: r.row, message: `${r.idCardNo} is already a staff username` });
+      else if (clash && clash.kind === 'WALKIN') errors.push({ row: r.row, message: `${r.idCardNo} belongs to a walk-in customer` });
+    }
+    if (errors.length) return res.status(422).json({ error: `Nothing was imported. Fix ${errors.length} row(s) and upload again.`, details: { errors: errors.slice(0, 200) } });
+    const result = await db.tx(async () => {
+      let created = 0, updated = 0;
+      const newHostels: string[] = [];
+      // One-time claim codes for students who haven't set their password yet (shown once, stored hashed, 30 days).
+      const codes: { idCardNo: string; name: string; code: string }[] = [];
+      const claimExpires = new Date(Date.now() + 30 * 86400_000).toISOString();
+      const newCode = () => { const a = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789'; const c = Array.from({ length: 8 }, () => a[crypto.randomInt(a.length)]).join(''); return `${c.slice(0, 4)}-${c.slice(4)}`; };
+      const hostelId = async (name: string) => {
+        const h = await db.get<{ id: number }>('SELECT id FROM hostels WHERE lower(name) = lower(?)', [name]);
+        if (h) return h.id;
+        newHostels.push(name);
+        return insertId('INSERT INTO hostels (name) VALUES (?)', [name]);
+      };
+      for (const r of parsed) {
+        const hid = await hostelId(r.hostel);
+        const existing = await db.get<{ user_id: number; claimable: number }>('SELECT user_id, claimable FROM students WHERE id_card_no = ?', [r.idCardNo]);
+        if (existing) {
+          await db.run('UPDATE students SET hostel_id = ?, room_no = ?, valid_until = ?, kind = ? WHERE user_id = ?', [hid, r.roomNo, r.validUntil || null, 'HOSTELER', existing.user_id]);
+          if (existing.claimable) {
+            // Not claimed yet: a fresh code replaces the old one (it may have been lost).
+            const code = newCode();
+            await db.run('UPDATE students SET claim_hash = ?, claim_expires_at = ? WHERE user_id = ?', [claimHash(code), claimExpires, existing.user_id]);
+            codes.push({ idCardNo: r.idCardNo, name: r.name, code });
+          }
+          updated++;
+          continue;
+        }
+        // No usable password: the student claims the account by registering with this ID card no. and mobile.
+        const unusable = await bcrypt.hash(crypto.randomBytes(24).toString('hex'), 8);
+        const userId = await insertId(`INSERT INTO users (role, login_id, name, mobile, password_hash, created_at) VALUES ('STUDENT',?,?,?,?,?)`, [r.idCardNo, r.name, r.mobile, unusable, nowIso()]);
+        const code = newCode();
+        await db.run(`INSERT INTO students (user_id, id_card_no, hostel_id, room_no, status, kind, valid_until, claimable, claim_hash, claim_expires_at, reviewed_by, reviewed_at) VALUES (?,?,?,?,'ACTIVE','HOSTELER',?,1,?,?,?,?)`,
+          [userId, r.idCardNo, hid, r.roomNo, r.validUntil || null, claimHash(code), claimExpires, actor(req).id, nowIso()]);
+        codes.push({ idCardNo: r.idCardNo, name: r.name, code });
+        created++;
+      }
+      await logActivity(actor(req).id, 'STUDENTS_IMPORTED', 'student', null, `${created} added, ${updated} updated${newHostels.length ? `, new hostels: ${newHostels.join(', ')}` : ''}`);
+      return { created, updated, newHostels, codes };
+    });
+    return res.json(result);
+  }
+
+  // staff
+  const schema = z.object({
+    name: zText(2, 80),
+    loginId: z.string().transform(normaliseLogin).pipe(z.string().min(3, 'Username must be at least 3 characters').max(30).regex(/^[A-Z0-9._-]+$/, 'Username can only have letters, numbers, . _ -')),
+    mobile: zMobile.or(z.literal('')),
+    role: z.string().transform(v => v.trim().toUpperCase() || 'STAFF').pipe(z.enum(['STAFF', 'ADMIN'], { error: 'Role must be STAFF or ADMIN' })),
+  });
+  const parsed: (z.infer<typeof schema> & { row: number })[] = [];
+  const seen = new Set<string>();
+  rows.forEach((r, i) => {
+    const result = schema.safeParse({ name: col(r, 'Full Name'), loginId: col(r, 'Username'), mobile: col(r, 'Mobile'), role: col(r, 'Role') });
+    if (!result.success) { const iss = result.error.issues[0]; errors.push({ row: rowNo(i), message: `${String(iss.path[0] ?? '')}: ${iss.message}` }); return; }
+    if (seen.has(result.data.loginId)) { errors.push({ row: rowNo(i), message: `Username ${result.data.loginId} appears twice in the sheet` }); return; }
+    seen.add(result.data.loginId);
+    parsed.push({ ...result.data, row: rowNo(i) });
+  });
+  for (const r of parsed) {
+    if (await db.get('SELECT 1 AS ok FROM users WHERE login_id = ?', [r.loginId])) errors.push({ row: r.row, message: `Username ${r.loginId} is already taken` });
+  }
+  if (errors.length) return res.status(422).json({ error: `Nothing was imported. Fix ${errors.length} row(s) and upload again.`, details: { errors: errors.slice(0, 200) } });
+  const accounts = await db.tx(async () => {
+    const out: { name: string; username: string; role: string; tempPassword: string }[] = [];
+    for (const r of parsed) {
+      const pass = tempPassword();
+      await insertId('INSERT INTO users (role, login_id, name, mobile, password_hash, must_change_password, password_expires_at, created_at) VALUES (?,?,?,?,?,1,?,?)',
+        [r.role, r.loginId, r.name, r.mobile || null, await bcrypt.hash(pass, 10), tempPasswordExpiry(), nowIso()]);
+      out.push({ name: r.name, username: r.loginId, role: r.role, tempPassword: pass });
+    }
+    await logActivity(actor(req).id, 'STAFF_IMPORTED', 'user', null, `${out.length} accounts`);
+    return out;
+  });
+  res.json({ created: accounts.length, accounts });
+}));
+
+/* -------------------------------------------------------- staff work report */
+
+/** What one staff member did in a period: orders, handovers, money, approvals, complaints. */
+router.get('/admin/staff/:id/report', handle(async (req, res) => {
+  const id = parse(zId, req.params.id);
+  const r = parse(z.object({ from: zDate, to: zDate }).refine(x => x.from <= x.to, 'Start date must be before end date'), req.query);
+  const person = await db.get<Row>(`SELECT id, name, login_id, mobile, role, active, created_at FROM users WHERE id = ? AND role IN ('STAFF','ADMIN')`, [id]);
+  if (!person) throw new HttpError(404, 'Staff account not found.');
+  // Timestamps are UTC ISO strings; compare whole days with a small margin and filter by campus day in JS where it matters.
+  const fromIso = `${shiftDayKey(r.from, -1)}T18:30:00.000Z`;
+  const toIso = `${r.to}T18:30:00.000Z`;
+  const [taken, delivered, money, approvals, complaints, roomChanges, lastActive, byDay] = await Promise.all([
+    db.get<Row>(`SELECT COUNT(*) AS orders, COALESCE(SUM(clothes_count),0) AS clothes, COALESCE(ROUND(CAST(SUM(weight_kg) AS NUMERIC), 1),0) AS kg
+      FROM orders WHERE received_by = ? AND day_key BETWEEN ? AND ? AND status != 'CANCELLED'`, [id, r.from, r.to]),
+    db.get<Row>(`SELECT COUNT(*) AS orders, COALESCE(SUM(returned_count),0) AS clothes,
+        COALESCE(SUM(CASE WHEN returned_count IS NOT NULL AND returned_count != clothes_count THEN 1 ELSE 0 END),0) AS mismatches
+      FROM orders WHERE delivered_by = ? AND delivered_at >= ? AND delivered_at < ?`, [id, fromIso, toIso]),
+    db.get<Row>(`SELECT COALESCE(SUM(CASE WHEN paid_method = 'CASH' THEN amount END),0) AS cash, COALESCE(SUM(CASE WHEN paid_method = 'UPI' THEN amount END),0) AS upi,
+        COUNT(*) AS payments FROM orders WHERE paid_by = ? AND payment_status = 'PAID' AND paid_at >= ? AND paid_at < ?`, [id, fromIso, toIso]),
+    db.get<Row>(`SELECT COALESCE(SUM(CASE WHEN action = 'STUDENT_APPROVED' THEN 1 ELSE 0 END),0) AS approved, COALESCE(SUM(CASE WHEN action = 'STUDENT_REJECTED' THEN 1 ELSE 0 END),0) AS rejected,
+        COALESCE(SUM(CASE WHEN action = 'WALKIN_ADDED' THEN 1 ELSE 0 END),0) AS walkins, COALESCE(SUM(CASE WHEN action = 'PASSWORD_RESET' THEN 1 ELSE 0 END),0) AS resets
+      FROM activity WHERE actor_id = ? AND created_at >= ? AND created_at < ?`, [id, fromIso, toIso]),
+    db.get<Row>(`SELECT COUNT(DISTINCT complaint_id) AS handled, COALESCE(SUM(CASE WHEN status = 'RESOLVED' THEN 1 ELSE 0 END),0) AS resolved
+      FROM complaint_updates WHERE by_user = ? AND at >= ? AND at < ?`, [id, fromIso, toIso]),
+    db.get<Row>(`SELECT COUNT(*) AS c FROM activity WHERE actor_id = ? AND action IN ('ROOM_CHANGE_APPROVED','ROOM_CHANGE_REJECTED') AND created_at >= ? AND created_at < ?`, [id, fromIso, toIso]),
+    db.get<Row>('SELECT MAX(created_at) AS at FROM activity WHERE actor_id = ?', [id]),
+    db.all<Row>(`SELECT day_key AS day, COUNT(*) AS orders, COALESCE(ROUND(CAST(SUM(weight_kg) AS NUMERIC), 1),0) AS kg FROM orders
+      WHERE received_by = ? AND day_key BETWEEN ? AND ? AND status != 'CANCELLED' GROUP BY day_key ORDER BY day_key`, [id, r.from, r.to]),
+  ]);
+  res.json({ person, taken, delivered, money, approvals, complaints, room_changes: Number(roomChanges?.c ?? 0), last_active: lastActive?.at ?? null, by_day: byDay });
+}));
+
+function shiftDayKey(key: string, days: number) {
+  const d = new Date(`${key}T12:00:00.000Z`);
+  d.setUTCDate(d.getUTCDate() + days);
+  return d.toISOString().slice(0, 10);
+}

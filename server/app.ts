@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import express from 'express';
 import { db, migrate } from './db.js';
-import { appCors, csrf, initAuthSecret, session } from './auth.js';
+import { appCors, csrf, initAuthSecret, mustChangePassword, session } from './auth.js';
 import { serveFile } from './files.js';
 import { ensureAdmin, seedDemo } from './seed.js';
 import { HttpError, errorHandler } from './util.js';
@@ -30,12 +30,20 @@ export async function createApp({ demo = false } = {}) {
     res.setHeader('Referrer-Policy', 'same-origin');
     res.setHeader('X-Frame-Options', 'DENY');
     res.setHeader('Permissions-Policy', 'camera=(self), microphone=(), geolocation=()');
+    res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
+    // Only our own scripts, styles, fonts and API; images also from data:/blob: (QR codes, photos, the UPI QR).
+    res.setHeader('Content-Security-Policy', [
+      "default-src 'self'", "script-src 'self'", "style-src 'self' 'unsafe-inline'", "img-src 'self' data: blob:",
+      "font-src 'self' data:", "connect-src 'self'", "media-src 'self' blob:", "worker-src 'self' blob:",
+      "object-src 'none'", "base-uri 'self'", "form-action 'self'", "frame-ancestors 'none'",
+    ].join('; '));
+    if (process.env.NODE_ENV === 'production') res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
     next();
   });
   app.use(express.json({ limit: '100kb' }));
 
   const api = express.Router();
-  api.use(appCors, session, csrf);   // appCors answers the app's preflight before anything else
+  api.use(appCors, session, csrf, mustChangePassword);   // appCors answers the app's preflight before anything else
   api.use((_req, res, next) => { res.setHeader('Cache-Control', 'no-store'); next(); });
   api.get('/health', (_req, res) => res.json({ ok: true }));
   api.get('/files/:name', serveFile);

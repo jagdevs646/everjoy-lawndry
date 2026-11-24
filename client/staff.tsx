@@ -1,14 +1,14 @@
 import { FormEvent, KeyboardEvent, useEffect, useRef, useState } from 'react';
-import { Announcement, api, Order, Student, User } from './api';
+import { Announcement, api, ApiError, Order, Service, Student, User } from './api';
 import { ChangePassword } from './auth';
 import { go, kg, plural, requestId, rupees, toast, useAction, useFormAction, useLoad, useRoute, useScrollTop, when } from './lib';
-import { ComplaintsBoard, CounterStudent, HandOver, OpsSettings, OrderSheet, StudentFacts, StudentLine, StudentSheet } from './ops';
-import { Brand, Button, Empty, ErrorNote, Icon, IconName, Loading, PayPill, Scanner, Segmented, Sheet, StatusPill, Stepper } from './ui';
+import { ComplaintsBoard, CounterStudent, HandOver, OpsSettings, OrderSheet, serviceLine, StudentFacts, StudentLine, StudentSheet } from './ops';
+import { Brand, Button, Empty, ErrorNote, Field, Icon, IconName, Loading, PayPill, Scanner, Segmented, Sheet, StatusPill, Stepper } from './ui';
 
 type Summary = {
   today: { received: number; kg: number; clothes: number; delivered: number; collected: number };
   open: { received: number; washing: number; ready: number; late: number };
-  pending_students: number; open_complaints: number; dues: number; settings: OpsSettings; announcements: Announcement[];
+  pending_students: number; room_changes: number; services: Service[]; open_complaints: number; dues: number; settings: OpsSettings; announcements: Announcement[];
 };
 
 export function StaffApp({ user, onSignOut, onUser, onAdmin }: { user: User; onSignOut: () => void; onUser: (u: User) => void; onAdmin?: () => void }) {
@@ -37,17 +37,17 @@ export function StaffApp({ user, onSignOut, onUser, onAdmin }: { user: User; onS
         <button className="sf-user" onClick={() => setMenu(true)} aria-label="Account menu"><span className="avatar">{user.name.split(' ').map(x => x[0]).slice(0, 2).join('')}</span></button>
       </header>
       <main className="sf-main">
-        {page === 'counter' && <Counter settings={s?.settings} onCreated={refresh} openOrder={setOrderId} openStudent={setStudentId} pending={s?.pending_students ?? 0} notices={s?.announcements ?? []} />}
+        {page === 'counter' && <Counter settings={s?.settings} services={s?.services ?? []} onCreated={refresh} openOrder={setOrderId} openStudent={setStudentId} pending={s?.pending_students ?? 0} notices={s?.announcements ?? []} />}
         {page === 'pickup' && <Pickup settings={s?.settings} onDone={refresh} openOrder={setOrderId} />}
         {page === 'orders' && <Orders summary={s} onChanged={refresh} openOrder={setOrderId} />}
-        {page === 'students' && <Students openStudent={setStudentId} pending={s?.pending_students ?? 0} />}
+        {page === 'students' && <Students openStudent={setStudentId} pending={s?.pending_students ?? 0} roomChanges={s?.room_changes ?? 0} />}
         {page === 'issues' && <div className="sf-page"><h1>Complaints</h1><ComplaintsBoard onOpenOrder={setOrderId} /></div>}
       </main>
       <nav className="sf-tabs" aria-label="Counter">
         <Tab to="" icon="plus" label="New order" on={page === 'counter'} />
         <Tab to="pickup" icon="scan" label="Pickup" on={page === 'pickup'} badge={s?.open.ready} />
         <Tab to="orders" icon="washer" label="Orders" on={page === 'orders'} badge={s?.open.late} alert />
-        <Tab to="students" icon="users" label="Students" on={page === 'students'} badge={s?.pending_students} />
+        <Tab to="students" icon="users" label="Students" on={page === 'students'} badge={(s?.pending_students ?? 0) + (s?.room_changes ?? 0)} />
         <Tab to="issues" icon="help" label="Issues" on={page === 'issues'} badge={s?.open_complaints} />
       </nav>
       {orderId && <OrderSheet id={orderId} isAdmin={isAdmin} payFirst={s?.settings.pay_before_pickup ?? true} close={() => setOrderId(null)} onChanged={refresh} />}
@@ -77,9 +77,12 @@ function Tab({ to, icon, label, on, badge, alert }: { to: string; icon: IconName
 
 /* --------------------------------------------------------------- counter */
 
-type Quote = { within_kg: number; extra_kg: number; amount: number; breakdown: { regular: number; extra: number; express: number }; expected_at: string; usage_after: { orders: number; kg: number; order_limit: number; kg_limit: number } };
+type Quote = { within_kg: number; extra_kg: number; amount: number; plan: { hosteler: boolean; label: string }; service: { id: number; name: string; unit: 'KG' | 'PIECE'; rate: number };
+  breakdown: { service: number; extra: number; express: number }; charge_note: string | null; expected_at: string; usage_after: { orders: number; kg: number; order_limit: number; kg_limit: number } };
+/** The server's answer when an order is over a free limit: remove kg, or (if allowed) charge for them. */
+type OverLimit = { code: 'OVER_LIMIT'; extra_kg: number; keep_kg: number; can_charge: boolean; extra_charge?: number; rate?: number };
 
-function Counter({ settings, onCreated, openOrder, openStudent, pending, notices }: { settings?: OpsSettings; onCreated: () => void; openOrder: (id: number) => void; openStudent: (id: number) => void; pending: number; notices: Announcement[] }) {
+function Counter({ settings, services, onCreated, openOrder, openStudent, pending, notices }: { settings?: OpsSettings; services: Service[]; onCreated: () => void; openOrder: (id: number) => void; openStudent: (id: number) => void; pending: number; notices: Announcement[] }) {
   const [student, setStudent] = useState<CounterStudent | null>(null);
   const [created, setCreated] = useState<Order | null>(null);
   if (created) return <Created o={created} onNext={() => { setCreated(null); setStudent(null); }} onOpen={() => openOrder(created.id)} />;
@@ -98,7 +101,7 @@ function Counter({ settings, onCreated, openOrder, openStudent, pending, notices
           </ol>
         </>
       ) : (
-        <OrderForm student={student} settings={settings} onChangeStudent={() => setStudent(null)} onStudent={setStudent}
+        <OrderForm student={student} settings={settings} services={services} onChangeStudent={() => setStudent(null)} onStudent={setStudent}
           onCreated={o => { setCreated(o); onCreated(); }} openOrder={openOrder} openStudent={openStudent} />
       )}
     </div>
@@ -109,6 +112,8 @@ function FindStudent({ onFound }: { onFound: (s: CounterStudent) => void }) {
   const [code, setCode] = useState('');
   const [scan, setScan] = useState(false);
   const [suggestions, setSuggestions] = useState<Student[] | null>(null);
+  const [missed, setMissed] = useState(false);
+  const [walkIn, setWalkIn] = useState(false);
   const { busy, error, setError, submit } = useFormAction();
   const input = useRef<HTMLInputElement>(null);
   useEffect(() => { input.current?.focus(); }, []);
@@ -117,14 +122,14 @@ function FindStudent({ onFound }: { onFound: (s: CounterStudent) => void }) {
     const r = await submit(() => api<{ student: CounterStudent | null; suggestions: Student[] }>(`/ops/students/lookup?code=${encodeURIComponent(value)}`));
     if (!r) return;
     if (r.student) onFound(r.student);
-    else { setSuggestions(r.suggestions); if (!r.suggestions.length) setError(`No student with ID “${value}”. Ask them to register on the website first.`); }
+    else { setSuggestions(r.suggestions); setMissed(true); if (!r.suggestions.length) setError(`No student with ID “${value}”. Ask them to register on the website first.`); }
   };
   const pick = async (id: number) => { const r = await submit(() => api<CounterStudent>(`/ops/students/${id}`)); if (r) onFound(r); };
   return (
     <div className="find">
       <form className="find-row" onSubmit={(e: FormEvent) => { e.preventDefault(); void lookup(); }}>
         <label className="sr-only" htmlFor="idcard">ID card no., name or room</label>
-        <input id="idcard" ref={input} className="find-input" value={code} onChange={e => { setCode(e.target.value); setSuggestions(null); setError(''); }}
+        <input id="idcard" ref={input} className="find-input" value={code} onChange={e => { setCode(e.target.value); setSuggestions(null); setError(''); setMissed(false); }}
           placeholder="ID card no., name or room" autoCapitalize="characters" autoComplete="off" spellCheck={false} enterKeyHint="search" />
         <Button tone="primary" size="lg" busy={busy} icon="search" aria-label="Find student" />
         <Button size="lg" type="button" icon="camera" onClick={() => setScan(!scan)} aria-label={scan ? 'Close camera' : 'Scan ID card'} className={scan ? 'on' : ''} />
@@ -141,64 +146,113 @@ function FindStudent({ onFound }: { onFound: (s: CounterStudent) => void }) {
           ))}
         </ul>
       )}
+      {missed && !walkIn && <button type="button" className="link-btn walkin-link" onClick={() => setWalkIn(true)}>Serve without registration</button>}
+      {walkIn && <WalkIn defaultMobile={/^\d{10}$/.test(code.trim()) ? code.trim() : ''} onFound={onFound} onCancel={() => setWalkIn(false)} />}
     </div>
   );
 }
 
-function OrderForm({ student, settings, onChangeStudent, onStudent, onCreated, openOrder, openStudent }: {
-  student: CounterStudent; settings?: OpsSettings; onChangeStudent: () => void; onStudent: (s: CounterStudent) => void; onCreated: (o: Order) => void; openOrder: (id: number) => void; openStudent: (id: number) => void;
+/** Quick counter entry for someone not registered (guest, staff member, day scholar). Normal prices apply. */
+function WalkIn({ defaultMobile, onFound, onCancel }: { defaultMobile: string; onFound: (s: CounterStudent) => void; onCancel: () => void }) {
+  const [f, setF] = useState({ name: '', mobile: defaultMobile });
+  const { busy, error, submit } = useFormAction();
+  const save = async (e: FormEvent) => {
+    e.preventDefault();
+    const r = await submit(() => api<CounterStudent>('/ops/walk-in', { body: f }));
+    if (r) onFound(r);
+  };
+  return (
+    <form className="walkin stack" onSubmit={save}>
+      <p className="muted small">For someone without an account. They pay normal prices and get the order no. on the bag tag. The same mobile finds them next time.</p>
+      <div className="field-row">
+        <Field label="Name"><input value={f.name} onChange={e => setF({ ...f, name: e.target.value })} autoFocus autoCapitalize="words" /></Field>
+        <Field label="Mobile"><input value={f.mobile} onChange={e => setF({ ...f, mobile: e.target.value })} inputMode="tel" placeholder="10 digits" /></Field>
+      </div>
+      {error && <ErrorNote error={error} />}
+      <div className="btn-pair">
+        <Button tone="primary" busy={busy} disabled={f.name.trim().length < 2 || f.mobile.replace(/\D/g, '').length < 10}>Continue</Button>
+        <Button tone="plain" type="button" onClick={onCancel}>Cancel</Button>
+      </div>
+    </form>
+  );
+}
+
+function OrderForm({ student, settings, services, onChangeStudent, onStudent, onCreated, openOrder, openStudent }: {
+  student: CounterStudent; settings?: OpsSettings; services: Service[]; onChangeStudent: () => void; onStudent: (s: CounterStudent) => void; onCreated: (o: Order) => void; openOrder: (id: number) => void; openStudent: (id: number) => void;
 }) {
+  const [serviceId, setServiceId] = useState<number | null>(services[0]?.id ?? null);
   const [weight, setWeight] = useState('');
   const [count, setCount] = useState('');
-  const [service, setService] = useState<'REGULAR' | 'EXPRESS'>('REGULAR');
+  const [express, setExpress] = useState(false);
   const [note, setNote] = useState('');
+  const [acceptExtra, setAcceptExtra] = useState(false);
   const [quote, setQuote] = useState<Quote | null>(null);
   const [quoteError, setQuoteError] = useState('');
+  const [over, setOver] = useState<OverLimit | null>(null);
   const rid = useRef(requestId());
-  const { busy, error, submit } = useFormAction();
+  const { busy, error, setError, submit } = useFormAction();
   const approve = useAction();
   const max = settings?.max_kg_per_order ?? 7;
+  const service = services.find(x => x.id === serviceId) ?? services[0];
+  useEffect(() => { if (serviceId === null && services[0]) setServiceId(services[0].id); }, [services, serviceId]);
+  const needsWeight = !service || service.unit === 'KG' || !!service.uses_allowance;
   const w = Number(weight);
   const c = Number(count);
-  const ready = w > 0 && c > 0;
+  const ready = c > 0 && (!needsWeight || w > 0);
+  const hosteler = student.plan.hosteler;
+  const freeKg = hosteler && !!service?.uses_allowance;
   const weightRef = useRef<HTMLInputElement>(null);
   useEffect(() => { if (student.status === 'ACTIVE') weightRef.current?.focus(); }, [student.status]);
+  // A different weight or service is a new question: ask again before charging extra.
+  useEffect(() => { setAcceptExtra(false); }, [w, serviceId, student.id]);
 
+  const body = () => ({ studentId: student.id, serviceId: service?.id, weightKg: needsWeight ? w : (w || 0), clothesCount: c, express, acceptExtra });
   // Live rule check: the same server function that saves the order.
   useEffect(() => {
-    setQuote(null); setQuoteError('');
-    if (!ready || student.status !== 'ACTIVE') return;
+    setQuote(null); setQuoteError(''); setOver(null);
+    if (!ready || student.status !== 'ACTIVE' || !service) return;
     const t = setTimeout(() => {
-      api<Quote>('/ops/quote', { body: { studentId: student.id, weightKg: w, clothesCount: c, service } }).then(setQuote).catch(e => setQuoteError(e.message));
+      api<Quote>('/ops/quote', { body: body() }).then(setQuote).catch((e: ApiError) => {
+        if (e.details?.code === 'OVER_LIMIT') setOver(e.details as OverLimit);
+        setQuoteError(e.message);
+      });
     }, 300);
     return () => clearTimeout(t);
-  }, [w, c, service, student.id, student.status, ready]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [w, c, express, serviceId, acceptExtra, student.id, student.status, ready]);
 
   const take = async (e: FormEvent) => {
     e.preventDefault();
-    const o = await submit(() => api<Order>('/ops/orders', { body: { studentId: student.id, weightKg: w, clothesCount: c, service, note, requestId: rid.current } }));
+    const o = await submit(() => api<Order>('/ops/orders', { body: { ...body(), note, requestId: rid.current } }));
     if (o) { rid.current = requestId(); onCreated(o); }
   };
   const approveNow = async () => {
     const r = await approve.run(() => api<CounterStudent>(`/ops/students/${student.id}/review`, { body: { decision: 'APPROVE' } }), `${student.name} approved`);
     if (r) onStudent(r);
   };
+  const keepWithin = () => { if (!over) return; setWeight(String(over.keep_kg)); setError(''); };
   const blocked = student.status !== 'ACTIVE';
-  const over = w > max;
+  const walkIn = student.kind === 'WALKIN';
+  const price = (x: Service) => {
+    const r = hosteler ? x.hosteler_rate : x.rate;
+    const per = x.unit === 'KG' ? 'kg' : 'pc';
+    return r ? `${rupees(r)}/${per}` : hosteler && x.uses_allowance ? 'Free' : `${rupees(0)}/${per}`;
+  };
 
   return (
     <form className="order-form" onSubmit={take}>
       <div className="who">
-        <StudentLine o={{ student_name: student.name, id_card_no: student.id_card_no, hostel_name: student.hostel_name, room_no: student.room_no, mobile: student.mobile }} />
+        <StudentLine o={{ student_name: student.name, id_card_no: walkIn ? 'walk-in' : student.id_card_no, hostel_name: walkIn ? student.mobile : student.hostel_name, room_no: walkIn ? '-' : student.room_no, mobile: student.mobile }} />
         <div className="who-actions">
           <Button size="sm" type="button" onClick={() => openStudent(student.id)}>Details</Button>
           <Button size="sm" type="button" icon="swap" onClick={onChangeStudent}>Change</Button>
         </div>
       </div>
-      <p className="who-usage">This month: {plural(student.usage.orders, 'order')}, {kg(student.usage.kg)}{student.usage.kg_limit ? ` of ${kg(student.usage.kg_limit)}` : ''}. {student.open.length ? `${plural(student.open.length, 'order')} in progress.` : 'Nothing in progress.'}</p>
+      {!hosteler && <p className="plan-line"><Icon name="alert" size={16} />{student.plan.label}.</p>}
+      {hosteler && <p className="who-usage">This month: {plural(student.usage.orders, 'order')}, {kg(student.usage.kg)}{student.usage.kg_limit ? ` of ${kg(student.usage.kg_limit)}` : ''}. {student.open.length ? `${plural(student.open.length, 'order')} in progress.` : 'Nothing in progress.'}</p>}
       {student.open.length > 0 && (
         <ul className="who-open">
-          {student.open.map(o => <li key={o.id}><button type="button" onClick={() => openOrder(o.id)}><b>{o.order_no}</b><span>{o.clothes_count} clothes</span><StatusPill status={o.status} /></button></li>)}
+          {student.open.map(o => <li key={o.id}><button type="button" onClick={() => openOrder(o.id)}><b>{o.order_no}</b><span>{o.service_name ? `${o.service_name}, ` : ''}{o.clothes_count} clothes</span><StatusPill status={o.status} /></button></li>)}
         </ul>
       )}
 
@@ -213,38 +267,72 @@ function OrderForm({ student, settings, onChangeStudent, onStudent, onCreated, o
         ) : <ErrorNote error={`This account is ${student.status.toLowerCase()}${student.review_note ? `: ${student.review_note}` : ''}. Orders cannot be taken.`} />
       ) : (
         <>
+          {services.length > 1 && (
+            <div className="service-chips" role="radiogroup" aria-label="Service">
+              {services.map(x => (
+                <button key={x.id} type="button" role="radio" aria-checked={x.id === service?.id} className={x.id === service?.id ? 'on' : ''} onClick={() => setServiceId(x.id)}>
+                  <b>{x.name}</b><small>{price(x)}</small>
+                </button>
+              ))}
+            </div>
+          )}
           <div className="measure">
-            <label className={`measure-box${over ? ' over' : ''}`}>
-              <span>Weight</span>
+            <label className={`measure-box${freeKg && w > max ? ' over' : ''}${needsWeight ? '' : ' optional'}`}>
+              <span>Weight{needsWeight ? '' : ' (optional)'}</span>
               <span className="measure-input"><input ref={weightRef} inputMode="decimal" value={weight} onChange={e => setWeight(e.target.value.replace(/[^\d.]/g, ''))} placeholder="0.0" aria-describedby="kg-hint" /><em>kg</em></span>
-              <small id="kg-hint">{over ? `Over the ${max} kg limit` : `Up to ${max} kg`}</small>
+              <small id="kg-hint">{freeKg ? (w > max ? `Over the ${max} kg free limit` : `Free up to ${max} kg`) : service?.unit === 'KG' ? `${price(service)}` : 'Priced per piece'}</small>
             </label>
             <div className="measure-box">
               <span>Clothes</span>
               <Stepper value={count} onChange={setCount} min={0} max={300} label="clothes" />
-              <small>Count every piece</small>
+              <small>{service?.unit === 'PIECE' ? `${price(service)}, count every piece` : 'Count every piece'}</small>
             </div>
           </div>
           {settings?.express_enabled && (
-            <Segmented label="Service" value={service} onChange={setService} options={[{ value: 'REGULAR', label: 'Regular' }, { value: 'EXPRESS', label: `Express, ${rupees(settings.express_fee)}` }]} />
+            <Segmented label="Speed" value={express ? 'EXPRESS' : 'REGULAR'} onChange={v => setExpress(v === 'EXPRESS')} options={[{ value: 'REGULAR', label: 'Regular' }, { value: 'EXPRESS', label: `Express, ${rupees(settings.express_fee)}` }]} />
           )}
           <details className="note-details" open={!!note}>
             <summary>Add a note</summary>
             <input value={note} onChange={e => setNote(e.target.value)} placeholder="e.g. 1 blanket, white kurta wash separately" maxLength={200} aria-label="Note" />
           </details>
 
-          <div className={`verdict${quoteError ? ' bad' : quote ? (quote.amount ? ' pay' : ' ok') : ''}`} aria-live="polite">
-            {!ready ? <span>Enter weight and clothes count.</span>
-              : quoteError ? <span><Icon name="alert" size={18} />{quoteError}</span>
-              : !quote ? <span>Checking rules…</span>
-              : <>
-                <b>{quote.amount ? `Collect ${rupees(quote.amount)} at pickup` : 'No charge'}</b>
-                <span>{[quote.extra_kg ? `${kg(quote.extra_kg)} over monthly limit (${rupees(quote.breakdown.extra)})` : '', quote.breakdown.express ? `express ${rupees(quote.breakdown.express)}` : '', quote.breakdown.regular ? `wash ${rupees(quote.breakdown.regular)}` : ''].filter(Boolean).join(', ') || 'Within the monthly limit.'}</span>
-                <span>Ready by {when(quote.expected_at, 'short')}</span>
-              </>}
-          </div>
+          {over ? (
+            <div className="over-choice" role="group" aria-label="Over the free limit">
+              <p><Icon name="alert" size={18} /><span>{quoteError}</span></p>
+              <div className="over-options">
+                {over.keep_kg > 0 && (
+                  <button type="button" onClick={keepWithin}>
+                    <b>Take back {kg(over.extra_kg)}</b>
+                    <small>Student keeps some clothes. Order stays free at {kg(over.keep_kg)}.</small>
+                  </button>
+                )}
+                {over.can_charge && (
+                  <button type="button" className="pay" onClick={() => setAcceptExtra(true)}>
+                    <b>Charge {rupees(over.extra_charge)}</b>
+                    <small>{kg(over.extra_kg)} extra at {rupees(over.rate)}/kg, paid at pickup.</small>
+                  </button>
+                )}
+              </div>
+            </div>
+          ) : (
+            <div className={`verdict${quoteError ? ' bad' : quote ? (quote.amount ? ' pay' : ' ok') : ''}`} aria-live="polite">
+              {!ready ? <span>{needsWeight ? 'Enter weight and clothes count.' : 'Enter the number of pieces.'}</span>
+                : quoteError ? <span><Icon name="alert" size={18} />{quoteError}</span>
+                : !quote ? <span>Checking rules…</span>
+                : <>
+                  <b>{quote.amount ? `Collect ${rupees(quote.amount)} at pickup` : 'No charge'}</b>
+                  <span>{[
+                    quote.breakdown.service ? `${quote.service.name} ${rupees(quote.breakdown.service)}` : '',
+                    quote.extra_kg ? `${kg(quote.extra_kg)} over the free limit ${rupees(quote.breakdown.extra)}` : '',
+                    quote.breakdown.express ? `express ${rupees(quote.breakdown.express)}` : '',
+                  ].filter(Boolean).join(', ') || (freeKg ? 'Within the free limit.' : quote.service.name)}</span>
+                  <span>Ready by {when(quote.expected_at, 'short')}</span>
+                  {acceptExtra && <button type="button" className="link-btn" onClick={() => setAcceptExtra(false)}>Don’t charge, change the weight</button>}
+                </>}
+            </div>
+          )}
           {error && <ErrorNote error={error} />}
-          <Button tone="primary" size="lg" block busy={busy} disabled={!quote || !!quoteError}>Take order: {c || 0} clothes, {kg(w)}</Button>
+          <Button tone="primary" size="lg" block busy={busy} disabled={!quote || !!quoteError}>Take order: {c || 0} clothes{w ? `, ${kg(w)}` : ''}</Button>
         </>
       )}
     </form>
@@ -258,8 +346,8 @@ function Created({ o, onNext, onOpen }: { o: Order; onNext: () => void; onOpen: 
     <div className="sf-page created" role="status">
       <p className="created-label">Order taken. Write this on the bag tag:</p>
       <p className="created-no">{o.order_no}</p>
-      <p className="created-meta">{o.student_name}, room {o.room_no}. {plural(o.clothes_count, 'piece')}, {kg(o.weight_kg)}{o.amount ? `. ${rupees(o.amount)} due at pickup` : ''}.</p>
-      <p className="created-sub">The digital slip is already on the student’s phone.</p>
+      <p className="created-meta">{o.student_name}{o.customer_kind === 'WALKIN' ? '' : `, room ${o.room_no}`}. {serviceLine(o)}: {plural(o.clothes_count, 'piece')}{Number(o.weight_kg) > 0 ? `, ${kg(o.weight_kg)}` : ''}{o.amount ? `. ${rupees(o.amount)} due at pickup` : ''}.</p>
+      <p className="created-sub">{o.customer_kind === 'WALKIN' ? 'Walk-in: tell them the order no. They show it at pickup.' : 'The digital slip is already on the student’s phone.'}</p>
       <Button ref={next} tone="primary" size="lg" block icon="plus" onClick={onNext}>Next student</Button>
       <Button block onClick={onOpen}>Open this order</Button>
     </div>
@@ -414,23 +502,27 @@ function Orders({ summary, onChanged, openOrder }: { summary?: Summary; onChange
 
 /* --------------------------------------------------------------- students */
 
-function Students({ openStudent, pending }: { openStudent: (id: number) => void; pending: number }) {
-  const [view, setView] = useState<'PENDING' | ''>(pending ? 'PENDING' : '');
+function Students({ openStudent, pending, roomChanges }: { openStudent: (id: number) => void; pending: number; roomChanges: number }) {
+  const [view, setView] = useState<'PENDING' | 'ROOMS' | ''>(pending ? 'PENDING' : roomChanges ? 'ROOMS' : '');
   const [q, setQ] = useState('');
-  const list = useLoad(() => api<{ rows: Student[]; total: number }>(`/ops/students?status=${view}&limit=100${q ? `&q=${encodeURIComponent(q)}` : ''}`), [view, q], { every: 30_000 });
+  // Each answer remembers which list it is, so rows of one list are never drawn as another.
+  const loaded = useLoad<{ rows: Student[]; total: number; view: typeof view }>(() => view === 'ROOMS'
+    ? api<{ rows: Student[] }>('/ops/room-changes').then(r => ({ rows: r.rows, total: r.rows.length, view }))
+    : api<{ rows: Student[]; total: number }>(`/ops/students?status=${view}&limit=100${q ? `&q=${encodeURIComponent(q)}` : ''}`).then(r => ({ ...r, view })), [view, q], { every: 30_000 });
+  const list = { ...loaded, data: loaded.data?.view === view ? loaded.data : undefined };
   const onKey = (e: KeyboardEvent<HTMLInputElement>) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); };
   return (
     <div className="sf-page">
       <h1>Students</h1>
-      <Segmented label="Show" value={view} onChange={setView} options={[{ value: 'PENDING', label: `Waiting approval${pending ? ` (${pending})` : ''}` }, { value: '', label: 'Everyone' }]} />
-      <input className="filter-input" value={q} onChange={e => setQ(e.target.value)} onKeyDown={onKey} placeholder="Search name, ID card, room or mobile" aria-label="Search students" />
-      {!list.data ? <Loading /> : !list.data.rows.length ? <Empty icon="users" title={view === 'PENDING' ? 'No one is waiting' : 'No students found'}>{view === 'PENDING' ? 'New sign-ups appear here for you to check against the university portal.' : ''}</Empty> : (
+      <Segmented label="Show" value={view} onChange={setView} options={[{ value: 'PENDING', label: `New${pending ? ` (${pending})` : ''}` }, { value: 'ROOMS', label: `Room changes${roomChanges ? ` (${roomChanges})` : ''}` }, { value: '', label: 'Everyone' }]} />
+      {view !== 'ROOMS' && <input className="filter-input" value={q} onChange={e => setQ(e.target.value)} onKeyDown={onKey} placeholder="Search name, ID card, room or mobile" aria-label="Search students" />}
+      {!list.data ? <Loading /> : !list.data.rows.length ? <Empty icon="users" title={view === 'PENDING' ? 'No one is waiting' : view === 'ROOMS' ? 'No room changes waiting' : 'No students found'}>{view === 'PENDING' ? 'New sign-ups appear here for you to check against the university portal.' : view === 'ROOMS' ? 'When a student changes hostel or room in their profile, it waits here for you to check.' : ''}</Empty> : (
         <ul className="student-rows">
           {list.data.rows.map(s => (
             <li key={s.id}><button onClick={() => openStudent(s.id)}>
               <span className="avatar">{s.name.split(' ').map(x => x[0]).slice(0, 2).join('')}</span>
-              <span className="sr-who"><b>{s.name}</b><small>{s.id_card_no}, {s.hostel_name}, room {s.room_no}</small></span>
-              {s.status !== 'ACTIVE' ? <span className={`pill acc-${s.status.toLowerCase()}`}>{s.status === 'PENDING' ? 'Check' : s.status.toLowerCase()}</span> : <small className="sr-month">{s.month_orders} this month</small>}
+              <span className="sr-who"><b>{s.name}</b><small>{view === 'ROOMS' ? `${s.hostel_name} ${s.room_no} → ${s.pending_hostel_name} ${s.pending_room_no}` : `${s.id_card_no}, ${s.hostel_name}, room ${s.room_no}`}</small></span>
+              {view === 'ROOMS' ? <span className="pill acc-pending">Check</span> : s.status !== 'ACTIVE' ? <span className={`pill acc-${s.status.toLowerCase()}`}>{s.status === 'PENDING' ? 'Check' : s.status.toLowerCase()}</span> : <small className="sr-month">{s.month_orders} this month</small>}
               <Icon name="next" size={18} />
             </button></li>
           ))}

@@ -17,12 +17,27 @@ const types: Record<string, string> = { 'image/jpeg': '.jpg', 'image/png': '.png
 
 export const photoUpload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 5 * 1024 * 1024, files: 1 },
+  // Every multipart part is bounded, not just the file: text fields are kept in memory too.
+  limits: { fileSize: 5 * 1024 * 1024, files: 1, fields: 10, fieldSize: 4 * 1024, fieldNameSize: 64, parts: 12, headerPairs: 50 },
   fileFilter: (_req, file, cb) => (types[file.mimetype] ? cb(null, true) : cb(new HttpError(400, 'Only photos (JPG, PNG, WEBP, HEIC) can be attached.'))),
 });
 
+/** The browser's content type is only a claim: check the file really starts like that kind of image. */
+function looksLike(mime: string, b: Buffer) {
+  const at = (i: number, ...bytes: number[]) => bytes.every((x, j) => b[i + j] === x);
+  const ascii = (i: number, t: string) => b.subarray(i, i + t.length).toString('latin1') === t;
+  switch (mime) {
+    case 'image/jpeg': return at(0, 0xff, 0xd8, 0xff);
+    case 'image/png': return at(0, 0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a);
+    case 'image/webp': return ascii(0, 'RIFF') && ascii(8, 'WEBP');
+    case 'image/heic': case 'image/heif': return ascii(4, 'ftyp') && /^(heic|heix|hevc|hevx|heim|heis|mif1|msf1|avif)$/.test(b.subarray(8, 12).toString('latin1'));
+    default: return false;
+  }
+}
+
 /** Store an uploaded photo in the database and return its file name (what complaints.photo holds). */
 export async function savePhoto(file: Express.Multer.File): Promise<string> {
+  if (!looksLike(file.mimetype, file.buffer)) throw new HttpError(400, 'That file is not a photo. Attach a JPG, PNG, WEBP or HEIC picture.');
   const name = crypto.randomBytes(16).toString('hex') + (types[file.mimetype] || '.img');
   await db.run('INSERT INTO files (name, mime, data, created_at) VALUES (?,?,?,?)', [name, file.mimetype, file.buffer, nowIso()]);
   return name;

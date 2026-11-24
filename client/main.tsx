@@ -64,11 +64,16 @@ function App() {
 
   const checkSession = useCallback(() => {
     api<{ user: User | null }>('/auth/me')
-      .then(r => { setUnreachable(false); setUser(r?.user ?? null); })
+      .then(r => {
+        setUnreachable(false);
+        // Signed out on the server (password reset, signed out elsewhere): don't keep saved slips on this phone.
+        if (!r?.user) clearOfflineCopies();
+        setUser(r?.user ?? null);
+      })
       .catch(e => {
         // Only a definite answer (e.g. not signed in) means signed out; no network or a server error (5xx) means "try again".
         const temporary = e instanceof ApiError && (e.status === 0 || e.status >= 500);
-        if (!temporary) { setUnreachable(false); setUserState(null); return; }
+        if (!temporary) { clearOfflineCopies(); setUnreachable(false); setUserState(null); return; }
         const last = lastUser();
         // Students keep their saved slips: show them from the offline copy.
         if (last?.role === 'STUDENT') { setUnreachable(false); setUserState(last); return; }

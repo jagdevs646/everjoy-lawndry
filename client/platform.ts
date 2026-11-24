@@ -19,11 +19,11 @@ export const platformName = Capacitor.getPlatform();   // 'web' | 'android' | 'i
 const BUILT_IN_SERVER = normaliseServer(String(import.meta.env.VITE_API_BASE ?? ''));
 
 /**
- * Only test builds (built-in server is plain http, or none) let people change the server
- * on the sign-in screen. A production build (https) is pinned to its official server, so
- * nobody can point a shared counter phone at a look-alike server to collect passwords.
+ * Only a test build made for a laptop server (plain http:// in .env.app) lets people change the
+ * server on the sign-in screen. Any other build, including one made without .env.app, is locked,
+ * so nobody can point a phone at a look-alike server to collect passwords.
  */
-export const canChangeServer = !BUILT_IN_SERVER.startsWith('https://');
+export const canChangeServer = BUILT_IN_SERVER.startsWith('http://');
 
 let server = BUILT_IN_SERVER;
 let token: string | null = null;

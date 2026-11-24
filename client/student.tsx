@@ -1,15 +1,17 @@
 import { FormEvent, ReactNode, useEffect, useState } from 'react';
-import { Announcement, api, Complaint, Hostel, Notice, Order, Student, Usage, User } from './api';
+import { Announcement, api, Complaint, Hostel, Notice, Order, Plan, Service, Student, Usage, User } from './api';
 import { ChangePassword } from './auth';
 import { isApp, serverAddress } from './platform';
 import { ago, back, firstName, go, kg, plural, rupees, useFormAction, useLoad, useRoute, useScrollTop, when } from './lib';
-import { Brand, Button, Empty, ErrorNote, Field, Icon, IconButton, IconName, Loading, PayPill, Photo, Progress, QrImage, Sheet, StatusPill } from './ui';
+import { Brand, Button, Empty, ErrorNote, Field, Icon, IconButton, IconName, Loading, PayPill, Photo, Progress, QrImage, Sheet, StatusPill, UpiQr } from './ui';
 
 type Home = {
-  profile: Student; usage: Usage; open: Order[]; due: number; unread: number; open_complaints: number; announcements: Announcement[];
+  profile: Student; plan?: Plan; services?: Service[]; usage: Usage; open: Order[]; due: number; unread: number; open_complaints: number; announcements: Announcement[];
   info: { max_kg_per_order: number; counter_hours: string; upi_id: string; upi_name: string; pay_before_pickup: boolean; express_enabled: boolean; express_fee: number;
-    monthly_kg_limit: number; monthly_order_limit: number; over_limit_action: 'BLOCK' | 'CHARGE'; extra_rate_per_kg: number };
+    monthly_kg_limit: number; monthly_order_limit: number; allow_paid_extra?: boolean; extra_rate_per_kg: number; has_upi_qr?: boolean };
 };
+/** A copy saved by an older version of the app may not have the plan yet. */
+const planOf = (h: Home): Plan => h.plan ?? { hosteler: true, label: 'Hostel plan' };
 
 const cacheKey = (id: number) => `ej-home-${id}`;
 function readCache(id: number): Home | undefined { try { return JSON.parse(localStorage.getItem(cacheKey(id)) || 'null') ?? undefined; } catch { return undefined; } }
@@ -76,7 +78,9 @@ function HomePage({ home }: { home: Home }) {
       <section className="hello">
         <h1>Hi {firstName(p.name)}</h1>
         <p>{p.hostel_name}, room {p.room_no}</p>
+        {p.status === 'ACTIVE' && <p className={`plan-chip${planOf(home).hosteler ? '' : ' ended'}`}>{planOf(home).label}</p>}
       </section>
+      {p.pending_hostel_id && <p className="ready-banner pending"><Icon name="clock" size={18} />Moving to {p.pending_hostel_name}, room {p.pending_room_no}: waiting for the counter to check.</p>}
 
       {p.status !== 'ACTIVE' ? <AccountState p={p} /> : (
         <>
@@ -84,7 +88,7 @@ function HomePage({ home }: { home: Home }) {
           <section aria-label="Laundry at the counter" className="tag-stack">
             {open.length ? open.map(o => <OrderTag key={o.id} o={o} />) : (
               <Empty icon="shirt" title="Nothing at the counter">
-                Drop off up to {info.max_kg_per_order} kg at the laundry counter. Your digital slip appears here straight away.
+                {planOf(home).hosteler ? `Drop off up to ${info.max_kg_per_order} kg free at the laundry counter.` : 'Drop off at the laundry counter. Normal prices apply.'} Your digital slip appears here straight away.
               </Empty>
             )}
           </section>
@@ -98,7 +102,7 @@ function HomePage({ home }: { home: Home }) {
 
       {home.due > 0 && <PayDue amount={home.due} info={info} orders={open.filter(o => o.payment_status === 'DUE')} />}
 
-      {p.status === 'ACTIVE' && <MonthUsage usage={usage} info={info} />}
+      {p.status === 'ACTIVE' && planOf(home).hosteler && <MonthUsage usage={usage} info={info} />}
 
       {home.announcements.length > 0 && (
         <section className="notices" aria-label="Notices from the laundry">
@@ -150,7 +154,7 @@ function OrderTag({ o }: { o: Order }) {
         <span className="order-tag-no">{o.order_no}</span>
         <StatusPill status={o.status} />
       </span>
-      <span className="order-tag-meta">{plural(o.clothes_count, 'piece')} of clothing, {kg(o.weight_kg)}{o.service === 'EXPRESS' ? ', express' : ''}</span>
+      <span className="order-tag-meta">{o.service_name ? `${o.service_name}: ` : ''}{plural(o.clothes_count, 'piece')}{Number(o.weight_kg) > 0 ? `, ${kg(o.weight_kg)}` : ''}{o.service === 'EXPRESS' ? ', express' : ''}</span>
       <Progress status={o.status} />
       <span className="order-tag-foot">
         <span>{timeLine}</span>
@@ -162,17 +166,20 @@ function OrderTag({ o }: { o: Order }) {
 }
 
 function PayDue({ amount, info, orders }: { amount: number; info: Home['info']; orders: Order[] }) {
+  const [qr, setQr] = useState(false);
   const note = orders.map(o => o.order_no).join(' ');
-  const upi = info.upi_id ? `upi://pay?pa=${encodeURIComponent(info.upi_id)}&pn=${encodeURIComponent(info.upi_name || 'Everjoy Lawndry')}&am=${amount}&cu=INR&tn=${encodeURIComponent(note)}` : '';
+  const canUpi = !!info.upi_id || !!info.has_upi_qr;
   return (
     <section className="pay-card">
       <div>
         <b>{rupees(amount)} to pay</b>
-        <p>{orders.map(o => `${o.order_no}: ${rupees(o.amount)}${o.service === 'EXPRESS' ? ' (express)' : ''}${o.extra_kg ? ` (${kg(o.extra_kg)} over monthly limit)` : ''}`).join('. ')}.
+        <p>{orders.map(o => `${o.order_no}: ${rupees(o.amount)}${o.charge_note ? ` (${o.charge_note})` : o.service_name ? ` (${o.service_name})` : ''}`).join('. ')}.
           {info.pay_before_pickup ? ' Pay before you collect.' : ''}</p>
       </div>
-      {upi ? <a className="btn btn-primary btn-md" href={upi}><Icon name="rupee" size={18} /><span>Pay with UPI</span></a> : null}
-      <small>{upi ? 'Show the payment screen at the counter. ' : ''}Cash is also fine at the counter.</small>
+      {canUpi && (qr
+        ? <UpiQr amount={amount} note={note} size={200} showButton />
+        : <Button tone="primary" icon="qr" onClick={() => setQr(true)}>Pay by UPI</Button>)}
+      <small>{canUpi ? 'After paying, show the payment screen at the counter. Staff mark it paid. ' : ''}Cash is also fine at the counter.</small>
     </section>
   );
 }
@@ -186,9 +193,9 @@ function MonthUsage({ usage, info }: { usage: Usage; info: Home['info'] }) {
       {usage.kg_limit > 0 && <>
         <div className="meter" role="meter" aria-valuemin={0} aria-valuemax={usage.kg_limit} aria-valuenow={usage.kg} aria-label="Monthly kg used"><span style={{ width: `${pct}%` }} className={pct >= 90 ? 'hot' : ''} /></div>
         <p className="usage-note">{usage.kg_left ? `${kg(usage.kg_left)} left of your ${kg(usage.kg_limit)} monthly limit.` : `Monthly limit of ${kg(usage.kg_limit)} reached.`}
-          {info.over_limit_action === 'CHARGE' && info.extra_rate_per_kg ? ` Extra weight costs ${rupees(info.extra_rate_per_kg)} per kg.` : usage.kg_left === 0 ? ' New orders open next month.' : ''}</p>
+          {info.allow_paid_extra !== false && info.extra_rate_per_kg ? ` Extra weight costs ${rupees(info.extra_rate_per_kg)} per kg.` : usage.kg_left === 0 ? ' New orders open next month.' : ''}</p>
       </>}
-      <p className="usage-note">Each order can be up to {kg(info.max_kg_per_order)}.{info.express_enabled ? ` Express (faster) service costs ${rupees(info.express_fee)}.` : ''}</p>
+      <p className="usage-note">Each order is free up to {kg(info.max_kg_per_order)}.{info.allow_paid_extra !== false && info.extra_rate_per_kg ? ` Over that, you can pay ${rupees(info.extra_rate_per_kg)} per extra kg or take some clothes back.` : ''}{info.express_enabled ? ` Express (faster) service costs ${rupees(info.express_fee)}.` : ''}</p>
     </section>
   );
 }
@@ -221,8 +228,8 @@ function Slip({ id, cached, close }: { id: number; cached?: Order[]; close: () =
               <div><dt>Given in</dt><dd>{when(order.received_at, 'short')}</dd></div>
               <div><dt>{order.status === 'READY' || order.ready_at ? 'Ready' : 'Expected'}</dt><dd>{when(order.ready_at || order.expected_at, 'short')}</dd></div>
               <div><dt>Room</dt><dd>{order.room_no}, {order.hostel_name}</dd></div>
-              <div><dt>Service</dt><dd>{order.service === 'EXPRESS' ? 'Express' : 'Regular'}</dd></div>
-              {order.amount > 0 && <div className="wide"><dt>Amount</dt><dd>{rupees(order.amount)} <PayPill o={order} /></dd></div>}
+              <div><dt>Service</dt><dd>{order.service_name || 'Wash & fold'}{order.service === 'EXPRESS' ? ', express' : ''}</dd></div>
+              {order.amount > 0 && <div className="wide"><dt>Amount</dt><dd>{rupees(order.amount)} <PayPill o={order} />{order.charge_note ? <small>{order.charge_note}</small> : null}</dd></div>}
               {order.note && <div className="wide"><dt>Note</dt><dd>{order.note}</dd></div>}
               {order.cancel_reason && <div className="wide"><dt>Reason</dt><dd>{order.cancel_reason}</dd></div>}
             </dl>
@@ -260,7 +267,7 @@ function MyOrders() {
             <li key={o.id}>
               <button onClick={() => go(`orders/slip/${o.id}`)}>
                 <span className="h-no">{o.order_no}</span>
-                <span className="h-meta">{when(o.received_at, 'date')}, {plural(o.clothes_count, 'piece')}, {kg(o.weight_kg)}</span>
+                <span className="h-meta">{when(o.received_at, 'date')}, {o.service_name ? `${o.service_name}, ` : ''}{plural(o.clothes_count, 'piece')}{Number(o.weight_kg) > 0 ? `, ${kg(o.weight_kg)}` : ''}</span>
                 <span className="h-right"><StatusPill status={o.status} /><PayPill o={o} /></span>
               </button>
             </li>
@@ -285,9 +292,24 @@ function Help({ home }: { home: Home }) {
       {!list.data ? (list.error ? <ErrorNote error={list.error} retry={list.reload} /> : <Loading />) : !list.data.rows.length
         ? <p className="muted">No complaints. If clothes go missing or come back damaged, report it here with the order number.</p>
         : <div className="complaints">{list.data.rows.map(c => <ComplaintCard key={c.id} c={c} />)}</div>}
+      {!!home.services?.length && <>
+        <h2 className="sub">Services and prices</h2>
+        <table className="price-list">
+          <thead><tr><th>Service</th><th className="num">{planOf(home).hosteler ? 'Your price' : 'Price'}</th></tr></thead>
+          <tbody>
+            {home.services.map(x => {
+              const r = planOf(home).hosteler ? x.hosteler_rate : x.rate;
+              const per = x.unit === 'KG' ? 'kg' : 'piece';
+              return <tr key={x.id}><td>{x.name}{planOf(home).hosteler && x.uses_allowance ? <small>Free up to {kg(home.info.max_kg_per_order)} per order</small> : null}</td><td className="num">{r ? `${rupees(r)} / ${per}` : 'Free'}</td></tr>;
+            })}
+          </tbody>
+        </table>
+        <p className="muted small">{planOf(home).label}. Each service gets its own slip.</p>
+      </>}
       <h2 className="sub">Good to know</h2>
       <dl className="faq">
-        <dt>How much can I give at once?</dt><dd>Up to {kg(home.info.max_kg_per_order)} per order. Staff weigh and count your clothes, and the slip appears on your phone.</dd>
+        <dt>How much can I give at once?</dt><dd>{kg(home.info.max_kg_per_order)} per order is free with the hostel plan.{home.info.allow_paid_extra !== false && home.info.extra_rate_per_kg ? ` If your clothes weigh more, you can pay ${rupees(home.info.extra_rate_per_kg)} per extra kg or take some back.` : ' Heavier loads need a second order.'} Staff weigh and count your clothes, and the slip appears on your phone.</dd>
+        <dt>Can I pay by UPI?</dt><dd>{home.info.upi_id || home.info.has_upi_qr ? 'Yes. Tap “Pay by UPI” on Home to see the QR, pay, and show the payment screen at the counter. Cash also works.' : 'Pay in cash at the counter.'}</dd>
         <dt>My phone is dead at pickup</dt><dd>Tell staff your order number and show your ID card. They can find the order without the QR.</dd>
         <dt>I forgot my password</dt><dd>Ask at the counter. Staff give you a temporary password, and you choose a new one after signing in.</dd>
         <dt>Counter timings</dt><dd>{home.info.counter_hours}</dd>
@@ -384,7 +406,8 @@ function Profile({ home, onSaved, onSignOut, user, onUser }: { home: Home; onSav
         <div><dt>Name</dt><dd>{p.name}</dd></div>
         <div><dt>ID card no.</dt><dd>{p.id_card_no}</dd></div>
         <div><dt>Mobile</dt><dd>{p.mobile}</dd></div>
-        <div><dt>Hostel and room</dt><dd>{p.hostel_name}, room {p.room_no}</dd></div>
+        <div><dt>Hostel and room</dt><dd>{p.hostel_name}, room {p.room_no}{p.pending_hostel_id ? <small>Change to {p.pending_hostel_name}, room {p.pending_room_no} is waiting for the counter</small> : null}</dd></div>
+        {p.status === 'ACTIVE' && <div><dt>Hostel plan</dt><dd>{planOf(home).label}</dd></div>}
         <div><dt>Account</dt><dd><span className={`pill acc-${p.status.toLowerCase()}`}>{status[p.status]}</span></dd></div>
       </dl>
       <div className="menu-list">
@@ -403,12 +426,13 @@ function Profile({ home, onSaved, onSignOut, user, onUser }: { home: Home; onSav
 function EditProfile({ p, close, onSaved }: { p: Student; close: () => void; onSaved: () => void }) {
   const info = useLoad(() => api<{ hostels: Hostel[] }>('/public/info'), []);
   const identity = p.status === 'PENDING' || p.status === 'REJECTED';
-  const [f, setF] = useState({ name: p.name, idCardNo: p.id_card_no, mobile: p.mobile, hostelId: String(p.hostel_id), roomNo: p.room_no });
+  const [f, setF] = useState({ name: p.name, idCardNo: p.id_card_no, mobile: p.mobile, hostelId: String(p.pending_hostel_id ?? p.hostel_id), roomNo: p.pending_room_no ?? p.room_no });
   const { busy, error, submit } = useFormAction();
   const save = async (e: FormEvent) => {
     e.preventDefault();
     const body = identity ? f : { mobile: f.mobile, hostelId: f.hostelId, roomNo: f.roomNo };
-    if (await submit(() => api('/me/profile', { method: 'PATCH', body }), p.status === 'REJECTED' ? 'Sent again for approval' : 'Profile saved')) onSaved();
+    const moved = !identity && (f.hostelId !== String(p.hostel_id) || f.roomNo.trim().toUpperCase() !== p.room_no);
+    if (await submit(() => api('/me/profile', { method: 'PATCH', body }), p.status === 'REJECTED' ? 'Sent again for approval' : moved ? 'Saved. The counter will check your new room before it changes.' : 'Profile saved')) onSaved();
   };
   return (
     <Sheet title={p.status === 'REJECTED' ? 'Fix and resubmit' : 'Edit details'} onClose={close}>
@@ -416,7 +440,7 @@ function EditProfile({ p, close, onSaved }: { p: Student; close: () => void; onS
         {identity ? <>
           <Field label="Full name"><input value={f.name} onChange={e => setF({ ...f, name: e.target.value })} /></Field>
           <Field label="ID card no."><input value={f.idCardNo} onChange={e => setF({ ...f, idCardNo: e.target.value })} autoCapitalize="characters" /></Field>
-        </> : <p className="muted small">Name and ID card no. are locked after approval. Ask the counter if they are wrong.</p>}
+        </> : <p className="muted small">Name and ID card no. are locked after approval. A new hostel or room changes only after the counter checks it.</p>}
         <Field label="Mobile number"><input value={f.mobile} onChange={e => setF({ ...f, mobile: e.target.value })} inputMode="tel" /></Field>
         <div className="field-row">
           <Field label="Hostel">

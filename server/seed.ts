@@ -17,7 +17,8 @@ export async function ensureAdmin(demo: boolean) {
   const generated = !fromEnv && process.env.NODE_ENV === 'production';
   const password = fromEnv || (generated ? crypto.randomBytes(9).toString('base64url') : DEMO_PASSWORD);
   await db.run(`INSERT INTO users (role, login_id, name, password_hash, must_change_password, created_at) VALUES ('ADMIN','ADMIN',?,?,?,?)`,
-    [demo ? 'Asha Nair' : 'Laundry Admin', await bcrypt.hash(password, 10), demo ? 0 : 1, nowIso()]);
+    // Only a local demo skips the forced change; any real server makes the admin choose a password.
+    [demo ? 'Asha Nair' : 'Laundry Admin', await bcrypt.hash(password, 10), demo && process.env.NODE_ENV !== 'production' ? 0 : 1, nowIso()]);
   if (generated) console.log(`First admin account → username: ADMIN  password: ${password}  (change it after signing in)`);
   else console.log(`Created admin account → username: ADMIN  password: ${fromEnv ? '(from ADMIN_PASSWORD)' : DEMO_PASSWORD}`);
 }

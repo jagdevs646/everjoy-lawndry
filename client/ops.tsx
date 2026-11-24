@@ -1,12 +1,17 @@
 /* Building blocks shared by the staff counter and the admin office. */
 import { FormEvent, useState } from 'react';
-import { api, Complaint, Hostel, Order, Student, Usage } from './api';
+import { api, Complaint, Hostel, Order, Plan, Service, Student, Usage } from './api';
 import { eventLabel } from './student';
 import { ago, kg, plural, rupees, toast, useAction, useFormAction, useLoad, when } from './lib';
-import { Button, Empty, ErrorNote, Field, Icon, Loading, PayPill, Photo, Segmented, Sheet, StatusPill, Stepper } from './ui';
+import { Button, Empty, ErrorNote, Field, Icon, Loading, PayPill, Photo, Segmented, Sheet, StatusPill, Stepper, UpiQr } from './ui';
 
-export type OpsSettings = { max_kg_per_order: number; express_enabled: boolean; express_fee: number; pay_before_pickup: boolean; monthly_kg_limit: number; monthly_order_limit: number; max_active_orders: number; regular_rate_per_kg: number; extra_rate_per_kg: number; upi_id: string };
-export type CounterStudent = Student & { usage: Usage; open: Order[]; orders?: Order[] };
+export type OpsSettings = { max_kg_per_order: number; express_enabled: boolean; express_fee: number; pay_before_pickup: boolean; monthly_kg_limit: number; monthly_order_limit: number; max_active_orders: number;
+  allow_paid_extra: boolean; extra_rate_per_kg: number; upi_id: string; upi_name: string; has_upi_qr: boolean };
+export type CounterStudent = Student & { usage: Usage; open: Order[]; orders?: Order[]; plan: Plan };
+export type { Service };
+
+/** “Wash & fold”, “Ironing only (6 pcs)”: what was done, in a few words. */
+export const serviceLine = (o: Pick<Order, 'service_name' | 'service'>) => `${o.service_name || 'Wash & fold'}${o.service === 'EXPRESS' ? ', express' : ''}`;
 
 const isOpen = (o: Order) => ['RECEIVED', 'WASHING', 'READY'].includes(o.status);
 
@@ -45,7 +50,8 @@ export function OrderSheet({ id, close, onChanged, isAdmin, payFirst }: { id: nu
             <div><dt>Received</dt><dd>{when(o.received_at, 'short')}<small>{o.received_by_name}</small></dd></div>
             <div><dt>{o.ready_at ? 'Ready' : 'Expected'}</dt><dd>{when(o.ready_at || o.expected_at, 'short')}</dd></div>
             {o.delivered_at && <div><dt>Handed over</dt><dd>{when(o.delivered_at, 'short')}<small>{o.delivered_by_name}</small></dd></div>}
-            {o.amount > 0 && <div><dt>Amount</dt><dd>{rupees(o.amount)}<small>{o.extra_kg ? `${kg(o.extra_kg)} over limit` : ''}{o.paid_ref ? ` Ref ${o.paid_ref}` : ''}</small></dd></div>}
+            <div><dt>Service</dt><dd>{serviceLine(o)}{o.customer_kind === 'WALKIN' ? <small>Walk-in customer</small> : null}</dd></div>
+            {o.amount > 0 && <div><dt>Amount</dt><dd>{rupees(o.amount)}<small>{o.charge_note || (o.extra_kg ? `${kg(o.extra_kg)} over limit` : '')}{o.paid_ref ? ` Ref ${o.paid_ref}` : ''}</small></dd></div>}
           </dl>
           {o.note && <p className="note-line"><Icon name="tag" size={16} />{o.note}</p>}
           {o.cancel_reason && <p className="note-line bad"><Icon name="x" size={16} />{o.cancel_reason}</p>}
@@ -117,7 +123,10 @@ export function HandOver({ o, payFirst, onDone, onCancel }: { o: Order; payFirst
         <div className="pay-box">
           <b>Collect {rupees(o.amount)}{payFirst ? ' before handing over' : ''}</b>
           <Segmented label="Payment method" value={method} onChange={setMethod} options={[{ value: 'CASH', label: 'Cash' }, { value: 'UPI', label: 'UPI' }]} />
-          {method === 'UPI' && <input value={ref} onChange={e => setRef(e.target.value)} placeholder="UPI ref / last 4 digits (optional)" aria-label="UPI reference" />}
+          {method === 'UPI' && <>
+            <UpiQr amount={o.amount} note={o.order_no} size={180} hint="Mark paid only after you see the payment on the student’s phone or in your UPI app." />
+            <input value={ref} onChange={e => setRef(e.target.value)} placeholder="UPI ref / last 4 digits (optional)" aria-label="UPI reference" />
+          </>}
         </div>
       )}
       {error && <ErrorNote error={error} />}
@@ -142,7 +151,7 @@ function FixOrder({ o, onDone, onCancel }: { o: Order; onDone: (o: Order) => voi
   return (
     <form className="stack" onSubmit={save}>
       <div className="field-row">
-        <Field label="Weight (kg)"><Stepper value={w} onChange={setW} step={0.1} decimals={1} min={0.1} max={50} label="weight" /></Field>
+        <Field label="Weight (kg)"><Stepper value={w} onChange={setW} step={0.1} decimals={1} min={o.unit === 'PIECE' ? 0 : 0.1} max={50} label="weight" /></Field>
         <Field label="Clothes"><Stepper value={c} onChange={setC} min={1} max={300} label="clothes" /></Field>
       </div>
       <Field label="Reason"><input value={reason} onChange={e => setReason(e.target.value)} placeholder="e.g. Re-weighed, scale was not zeroed" /></Field>
@@ -185,7 +194,10 @@ function PayForm({ o, onDone, onCancel }: { o: Order; onDone: (o: Order) => void
     <form className="stack" onSubmit={save}>
       <p className="big-amount">{rupees(o.amount)}</p>
       <Segmented label="Payment method" value={method} onChange={setMethod} options={[{ value: 'CASH', label: 'Cash' }, { value: 'UPI', label: 'UPI' }]} />
-      {method === 'UPI' && <Field label="UPI reference (optional)"><input value={ref} onChange={e => setRef(e.target.value)} /></Field>}
+      {method === 'UPI' && <>
+        <UpiQr amount={o.amount} note={o.order_no} size={200} hint="Ask the student to scan this. Mark paid only after you see the payment." />
+        <Field label="UPI reference (optional)"><input value={ref} onChange={e => setRef(e.target.value)} /></Field>
+      </>}
       {error && <ErrorNote error={error} />}
       <Button tone="primary" block busy={busy}>Mark as paid</Button>
       <Button tone="plain" block type="button" onClick={onCancel}>Back</Button>
@@ -197,11 +209,12 @@ function PayForm({ o, onDone, onCancel }: { o: Order; onDone: (o: Order) => void
 
 export function StudentSheet({ id, close, onChanged, isAdmin, onOpenOrder }: { id: number; close: () => void; onChanged?: () => void; isAdmin: boolean; onOpenOrder: (id: number) => void }) {
   const d = useLoad(() => api<CounterStudent>(`/ops/students/${id}`), [id]);
-  const [mode, setMode] = useState<'view' | 'edit' | 'reject' | 'suspend'>('view');
+  const [mode, setMode] = useState<'view' | 'edit' | 'reject' | 'suspend' | 'room-reject'>('view');
   const [temp, setTemp] = useState('');
   const { busy, run } = useAction();
   const done = (s?: CounterStudent) => { if (s) d.set({ ...d.data!, ...s }); setMode('view'); onChanged?.(); };
   const approve = async () => done(await run(() => api<CounterStudent>(`/ops/students/${id}/review`, { body: { decision: 'APPROVE' } }), 'Student approved'));
+  const approveRoom = async () => done(await run(() => api<CounterStudent>(`/ops/students/${id}/room-change`, { body: { decision: 'APPROVE' } }), 'Room change approved'));
   const reactivate = async () => done(await run(() => api<CounterStudent>(`/ops/students/${id}/status`, { body: { status: 'ACTIVE' } }), 'Account active again'));
   const reset = async () => {
     if (!window.confirm('Give this student a new temporary password? Their old password stops working.')) return;
@@ -212,7 +225,9 @@ export function StudentSheet({ id, close, onChanged, isAdmin, onOpenOrder }: { i
   return (
     <Sheet title={s ? s.name : 'Student'} onClose={close} size="md">
       {!s ? (d.error ? <ErrorNote error={d.error} retry={d.reload} /> : <Loading />) : mode === 'edit' ? (
-        <EditStudent s={s} onDone={done} onCancel={() => setMode('view')} />
+        <EditStudent s={s} isAdmin={isAdmin} onDone={done} onCancel={() => setMode('view')} />
+      ) : mode === 'room-reject' ? (
+        <RoomReject s={s} onDone={done} onCancel={() => setMode('view')} />
       ) : mode === 'reject' || mode === 'suspend' ? (
         <StudentReason s={s} kind={mode} onDone={done} onCancel={() => setMode('view')} />
       ) : (
@@ -224,6 +239,15 @@ export function StudentSheet({ id, close, onChanged, isAdmin, onOpenOrder }: { i
               <div className="btn-pair">
                 <Button tone="good" size="lg" icon="check" busy={busy} onClick={approve}>Approve</Button>
                 <Button tone="danger" size="lg" icon="x" onClick={() => setMode('reject')}>Reject</Button>
+              </div>
+            </div>
+          )}
+          {s.pending_hostel_id && (
+            <div className="approve-box">
+              <p><b>Wants to move</b> from {s.hostel_name}, room {s.room_no} to <b>{s.pending_hostel_name}, room {s.pending_room_no}</b>{s.change_requested_at ? ` (asked ${ago(s.change_requested_at)})` : ''}. Check the hostel allotment list before approving.</p>
+              <div className="btn-pair">
+                <Button tone="good" icon="check" busy={busy} onClick={approveRoom}>Approve move</Button>
+                <Button tone="danger" icon="x" onClick={() => setMode('room-reject')}>Not approved</Button>
               </div>
             </div>
           )}
@@ -263,7 +287,8 @@ export function StudentFacts({ s }: { s: CounterStudent }) {
     <dl className="facts">
       <div><dt>ID card no.</dt><dd className="big">{s.id_card_no}</dd></div>
       <div><dt>Account</dt><dd><span className={`pill acc-${s.status.toLowerCase()}`}>{label[s.status]}</span></dd></div>
-      <div><dt>Hostel</dt><dd>{s.hostel_name}, room {s.room_no}</dd></div>
+      <div><dt>Hostel</dt><dd>{s.kind === 'WALKIN' ? 'Walk-in customer' : <>{s.hostel_name}, room {s.room_no}</>}</dd></div>
+      <div><dt>Plan</dt><dd>{s.plan.hosteler ? 'Hosteler' : <span className="pill pay-due">Normal prices</span>}<small>{s.plan.label}</small></dd></div>
       <div><dt>Mobile</dt><dd><a href={`tel:${s.mobile}`}>{s.mobile}</a></dd></div>
       <div><dt>This month</dt><dd>{plural(s.usage.orders, 'order')}, {kg(s.usage.kg)}{s.usage.kg_limit ? <small>{kg(s.usage.kg_left)} left of {kg(s.usage.kg_limit)}</small> : null}</dd></div>
       <div><dt>Registered</dt><dd>{when(s.created_at, 'date')}{s.reviewed_by_name ? <small>Checked by {s.reviewed_by_name}</small> : null}</dd></div>
@@ -271,9 +296,9 @@ export function StudentFacts({ s }: { s: CounterStudent }) {
   );
 }
 
-function EditStudent({ s, onDone, onCancel }: { s: CounterStudent; onDone: (s: CounterStudent) => void; onCancel: () => void }) {
+function EditStudent({ s, isAdmin, onDone, onCancel }: { s: CounterStudent; isAdmin: boolean; onDone: (s: CounterStudent) => void; onCancel: () => void }) {
   const hostels = useLoad(() => api<{ hostels: Hostel[] }>('/public/info'), []);
-  const [f, setF] = useState({ name: s.name, idCardNo: s.id_card_no, mobile: s.mobile, hostelId: String(s.hostel_id), roomNo: s.room_no });
+  const [f, setF] = useState<Record<string, string>>({ name: s.name, idCardNo: s.id_card_no, mobile: s.mobile, hostelId: String(s.hostel_id), roomNo: s.room_no, ...(isAdmin ? { validUntil: s.valid_until ?? '' } : {}) });
   const { busy, error, submit } = useFormAction();
   const save = async (e: FormEvent) => {
     e.preventDefault();
@@ -293,8 +318,28 @@ function EditStudent({ s, onDone, onCancel }: { s: CounterStudent; onDone: (s: C
         </Field>
         <Field label="Room no."><input value={f.roomNo} onChange={e => setF({ ...f, roomNo: e.target.value })} /></Field>
       </div>
+      {isAdmin && s.kind !== 'WALKIN' && <Field label="Hostel plan valid till" hint="After this date the student pays normal prices. Leave empty for no end date."><input type="date" value={f.validUntil} onChange={e => setF({ ...f, validUntil: e.target.value })} /></Field>}
       {error && <ErrorNote error={error} />}
       <Button tone="primary" block busy={busy}>Save details</Button>
+      <Button tone="plain" block type="button" onClick={onCancel}>Back</Button>
+    </form>
+  );
+}
+
+function RoomReject({ s, onDone, onCancel }: { s: CounterStudent; onDone: (s: CounterStudent) => void; onCancel: () => void }) {
+  const [note, setNote] = useState('');
+  const { busy, error, submit } = useFormAction();
+  const save = async (e: FormEvent) => {
+    e.preventDefault();
+    const r = await submit(() => api<CounterStudent>(`/ops/students/${s.id}/room-change`, { body: { decision: 'REJECT', note } }), 'The student was told');
+    if (r) onDone(r);
+  };
+  return (
+    <form className="stack" onSubmit={save}>
+      <p>{s.name} stays in {s.hostel_name}, room {s.room_no}.</p>
+      <Field label="Why not?" hint="The student sees this message"><input value={note} onChange={e => setNote(e.target.value)} placeholder="e.g. Room 512 is not on the allotment list" autoFocus /></Field>
+      {error && <ErrorNote error={error} />}
+      <Button tone="danger" block busy={busy} disabled={note.trim().length < 3}>Keep the old room</Button>
       <Button tone="plain" block type="button" onClick={onCancel}>Back</Button>
     </form>
   );

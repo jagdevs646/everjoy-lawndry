@@ -273,7 +273,7 @@ class Db {
 export const db = new Db();
 
 /** Every table, in an order that respects foreign keys (used for JSON backups). */
-export const TABLES = ['users', 'hostels', 'students', 'settings', 'counters', 'orders', 'order_events', 'notifications', 'announcements', 'complaints', 'complaint_updates', 'files', 'activity'] as const;
+export const TABLES = ['users', 'hostels', 'students', 'settings', 'services', 'counters', 'orders', 'order_events', 'notifications', 'announcements', 'complaints', 'complaint_updates', 'files', 'activity'] as const;
 
 export async function migrate() {
   const { id, blob } = db.types;
@@ -416,7 +416,75 @@ export async function migrate() {
       created_at TEXT NOT NULL
     );
     CREATE INDEX IF NOT EXISTS idx_activity_time ON activity(created_at);
+    CREATE TABLE IF NOT EXISTS services (
+      id ${id},
+      name TEXT NOT NULL,
+      unit TEXT NOT NULL DEFAULT 'KG' CHECK (unit IN ('KG','PIECE')),
+      rate DOUBLE PRECISION NOT NULL DEFAULT 0,
+      hosteler_rate DOUBLE PRECISION NOT NULL DEFAULT 0,
+      uses_allowance INTEGER NOT NULL DEFAULT 0,
+      active INTEGER NOT NULL DEFAULT 1,
+      sort INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_services_name ON services (lower(name));
   `);
+
+  // Columns added after the first release. ADD COLUMN keeps existing data (Neon and local files).
+  const add = [
+    ['students', 'kind', "TEXT NOT NULL DEFAULT 'HOSTELER'"],      // HOSTELER | WALKIN
+    ['students', 'valid_until', 'TEXT'],                            // hostel plan end (YYYY-MM-DD); NULL = no end set
+    ['students', 'pending_hostel_id', 'INTEGER'],                   // room/hostel change waiting for staff approval
+    ['students', 'pending_room_no', 'TEXT'],
+    ['students', 'change_requested_at', 'TEXT'],
+    ['students', 'claimable', 'INTEGER NOT NULL DEFAULT 0'],        // imported from Excel: student sets the password
+    ['orders', 'service_id', 'INTEGER'],
+    ['orders', 'service_name', 'TEXT'],
+    ['orders', 'unit', 'TEXT'],
+    ['orders', 'rate', 'DOUBLE PRECISION'],
+    ['orders', 'charge_note', 'TEXT'],
+    ['orders', 'plan_hosteler', 'INTEGER'],
+    ['users', 'password_expires_at', 'TEXT'],                     // temporary passwords stop working after this
+    ['students', 'claim_hash', 'TEXT'],                            // imported account: sha256 of the one-time claim code
+    ['students', 'claim_expires_at', 'TEXT'],                         // 1 = hostel prices when taken (kept for corrections)
+  ] as const;
+  for (const [table, column, def] of add) {
+    try {
+      await db.driver.script(`ALTER TABLE ${table} ADD COLUMN ${column} ${def}`);
+    } catch (e) {
+      if (!/duplicate column|already exists/i.test(String((e as Error).message))) throw e;
+    }
+  }
+
+  // Default services the first time (admin edits names and prices in Rules & pricing).
+  const count = await db.get<{ c: number }>('SELECT COUNT(*) AS c FROM services');
+  if (!Number(count?.c)) {
+    const at = nowIso();
+    // Upgrading a database that is already in use: keep what the admin had in effect. The old version
+    // stored only settings that differed from its defaults (no charging over the limit, ₹0 extra, ₹0/kg).
+    const inUse = Number((await db.get<{ c: number }>('SELECT COUNT(*) AS c FROM users'))?.c) > 0;
+    const old = Object.fromEntries((await db.all<{ key: string; value: string }>('SELECT key, value FROM settings')).map(r => {
+      try { return [r.key, JSON.parse(r.value)]; } catch { return [r.key, null]; }
+    }));
+    const keep = async (key: string, value: unknown) => {
+      if (key in old) return;
+      await db.run('INSERT INTO settings (key, value, updated_at, updated_by) VALUES (?,?,?,NULL) ON CONFLICT(key) DO NOTHING', [key, JSON.stringify(value), at]);
+    };
+    if (inUse) {
+      await keep('allow_paid_extra', old.over_limit_action === 'CHARGE');
+      await keep('extra_rate_per_kg', 0);
+    }
+    const oldRate = inUse && Number.isFinite(Number(old.regular_rate_per_kg)) ? Math.max(0, Number(old.regular_rate_per_kg)) : 0;
+    const defaults: [string, 'KG' | 'PIECE', number, number, number, number][] = [
+      ['Wash & fold', 'KG', Math.max(30, oldRate), oldRate, 1, 1],
+      ['Wash + iron', 'KG', 50, 20, 1, 2],
+      ['Ironing only', 'PIECE', 10, 10, 0, 3],
+      ['Dry cleaning', 'PIECE', 80, 80, 0, 4],
+    ];
+    for (const [name, unit, rate, hostelerRate, usesAllowance, sort] of defaults) {
+      await db.run('INSERT INTO services (name, unit, rate, hosteler_rate, uses_allowance, sort, created_at) VALUES (?,?,?,?,?,?,?)', [name, unit, rate, hostelerRate, usesAllowance, sort, at]);
+    }
+  }
 }
 
 /** Insert a row and return its new id (works on both engines via RETURNING). */

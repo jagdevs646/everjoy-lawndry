@@ -5,7 +5,8 @@ import { z } from 'zod';
 export const APP_TZ = process.env.APP_TZ || 'Asia/Kolkata';
 
 export class HttpError extends Error {
-  constructor(public status: number, message: string) { super(message); }
+  /** `details` is sent to the client with the message (e.g. the choices for an over-limit order). */
+  constructor(public status: number, message: string, public details?: Record<string, unknown>) { super(message); }
 }
 
 export const nowIso = () => new Date().toISOString();
@@ -46,7 +47,7 @@ export function handle<Req extends Request = Request>(fn: (req: Req, res: Respon
 }
 
 export function errorHandler(err: unknown, _req: Request, res: Response, _next: NextFunction) {
-  if (err instanceof HttpError) return res.status(err.status).json({ error: err.message });
+  if (err instanceof HttpError) return res.status(err.status).json({ error: err.message, ...(err.details ? { details: err.details } : {}) });
   const e = err as { code?: string; message?: string; type?: string };
   if (e?.code === 'LIMIT_FILE_SIZE') return res.status(400).json({ error: 'Photo must be smaller than 5 MB.' });
   if (e?.type === 'entity.parse.failed') return res.status(400).json({ error: 'Invalid request body.' });
@@ -72,6 +73,11 @@ export const zText = (min: number, max: number) => z.string().trim().min(min, `m
 /** Database ids are 32-bit integers on Postgres; anything larger can't exist. */
 export const MAX_ID = 2_147_483_647;
 export const zId = z.coerce.number().int().positive().max(MAX_ID);
+export const zDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Use a date like 2027-05-31').refine(v => {
+  const [y, m, d] = v.split('-').map(Number);
+  const t = new Date(Date.UTC(y, m - 1, d));
+  return t.getUTCFullYear() === y && t.getUTCMonth() === m - 1 && t.getUTCDate() === d;
+}, 'That date does not exist (check day and month)');
 
 /** A LIKE pattern for "contains q" that treats %, _ and \ in user input literally (use with ESCAPE '\'). */
 export const likeContains = (q: string) => `%${q.replace(/[\\%_]/g, m => `\\${m}`)}%`;

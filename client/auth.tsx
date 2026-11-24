@@ -1,5 +1,5 @@
 import { FormEvent, useState } from 'react';
-import { api, Hostel, User } from './api';
+import { api, ApiError, Hostel, User } from './api';
 import { go, toast, useFormAction, useLoad, useRoute } from './lib';
 import { builtInServer, canChangeServer, isApp, probeServer, serverAddress, setServer } from './platform';
 import { Brand, Button, ErrorNote, Field, Icon, Sheet } from './ui';
@@ -63,14 +63,18 @@ function SignIn({ onSignedIn, counterHours }: { onSignedIn: (u: User) => void; c
 }
 
 function Register({ info, onSignedIn }: { info?: Info; onSignedIn: (u: User) => void }) {
-  const [f, setF] = useState({ idCardNo: '', name: '', mobile: '', hostelId: '', roomNo: '', password: '', confirm: '' });
+  const [f, setF] = useState({ idCardNo: '', name: '', mobile: '', hostelId: '', roomNo: '', password: '', confirm: '', claimCode: '' });
+  const [needsCode, setNeedsCode] = useState(false);
   const { busy, error, setError, submit: send } = useFormAction();
   const set = (k: keyof typeof f) => (e: { target: { value: string } }) => setF({ ...f, [k]: e.target.value });
   const submit = async (e: FormEvent) => {
     e.preventDefault();
     if (f.password !== f.confirm) return setError('The two passwords do not match.');
-    const r = await send(() => api<{ user: User }>('/auth/signup', { body: f }));
-    if (r) { go(''); onSignedIn(r.user); }
+    const r = await send(() => api<{ user: User; claimed?: boolean }>('/auth/signup', { body: f }).catch((err: ApiError) => {
+      if (err.details?.code === 'CLAIM_CODE') setNeedsCode(true);
+      throw err;
+    }));
+    if (r) { if (r.claimed) toast('Your account is ready. The laundry office already checked your details.'); go(''); onSignedIn(r.user); }
   };
   const noHostels = info && info.hostels.length === 0;
   return (
@@ -78,6 +82,7 @@ function Register({ info, onSignedIn }: { info?: Info; onSignedIn: (u: User) => 
       <a className="auth-back" href="#/"><Icon name="back" size={18} />Sign in</a>
       <h1>Register</h1>
       <p className="lede">Fill this once. Then show your ID card at the counter and staff will approve you.</p>
+      <p className="muted small">Already added by the laundry office? Use the same ID card no. and mobile number they have, enter the claim code they gave you, and choose your password.</p>
       {noHostels && <ErrorNote error="Registration opens once the laundry office adds the hostel list. Please check back soon." />}
       <Field label="ID card no." hint="Exactly as printed on your university ID card">
         <input value={f.idCardNo} onChange={set('idCardNo')} autoCapitalize="characters" spellCheck={false} autoComplete="username" required />
@@ -99,6 +104,11 @@ function Register({ info, onSignedIn }: { info?: Info; onSignedIn: (u: User) => 
           <input value={f.roomNo} onChange={set('roomNo')} autoCapitalize="characters" required />
         </Field>
       </div>
+      {needsCode || f.claimCode ? (
+        <Field label="Claim code" hint="From the laundry office, e.g. K7QM-4821. No code? Ask at the counter.">
+          <input value={f.claimCode} onChange={set('claimCode')} autoCapitalize="characters" spellCheck={false} autoComplete="one-time-code" />
+        </Field>
+      ) : <button type="button" className="link-btn" onClick={() => setNeedsCode(true)}>I have a claim code from the office</button>}
       <div className="field-row">
         <Field label="Password" hint="At least 6 characters">
           <input type="password" value={f.password} onChange={set('password')} autoComplete="new-password" required />

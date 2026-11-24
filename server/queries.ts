@@ -6,6 +6,7 @@ import { dayKey, HttpError, likeContains, nowIso } from './util.js';
 const ORDER_COLS = `o.id, o.order_no, o.student_id, o.hostel_name, o.room_no, o.mobile, o.weight_kg, o.clothes_count, o.service, o.note,
   o.status, o.within_kg, o.extra_kg, o.amount, o.payment_status, o.paid_method, o.paid_ref, o.paid_at, o.received_at, o.day_key,
   o.expected_at, o.ready_at, o.delivered_at, o.returned_count, o.cancel_reason,
+  o.service_id, o.service_name, o.unit, o.rate, o.charge_note, st.kind AS customer_kind,
   u.name AS student_name, st.id_card_no, rb.name AS received_by_name, dl.name AS delivered_by_name,
   CASE WHEN o.status IN ('RECEIVED','WASHING') AND o.expected_at < ? THEN 1 ELSE 0 END AS late`;
 const ORDER_FROM = `FROM orders o JOIN users u ON u.id = o.student_id JOIN students st ON st.user_id = o.student_id
@@ -69,8 +70,10 @@ export async function findOrderByCode(code: string) {
 }
 
 const STUDENT_COLS = `u.id, u.name, u.mobile, u.login_id, u.active, u.created_at, u.must_change_password,
-  st.id_card_no, st.hostel_id, h.name AS hostel_name, st.room_no, st.status, st.review_note, st.reviewed_at, rv.name AS reviewed_by_name`;
-const STUDENT_FROM = `FROM users u JOIN students st ON st.user_id = u.id JOIN hostels h ON h.id = st.hostel_id LEFT JOIN users rv ON rv.id = st.reviewed_by`;
+  st.id_card_no, st.hostel_id, h.name AS hostel_name, st.room_no, st.status, st.review_note, st.reviewed_at, rv.name AS reviewed_by_name,
+  st.kind, st.valid_until, st.claimable, st.pending_hostel_id, ph.name AS pending_hostel_name, st.pending_room_no, st.change_requested_at`;
+const STUDENT_FROM = `FROM users u JOIN students st ON st.user_id = u.id JOIN hostels h ON h.id = st.hostel_id LEFT JOIN users rv ON rv.id = st.reviewed_by
+  LEFT JOIN hostels ph ON ph.id = st.pending_hostel_id`;
 
 export async function studentProfile(id: number) {
   const s = await db.get<Record<string, unknown> & { id: number; status: string; hostel_id: number; name: string; id_card_no: string }>(
@@ -79,11 +82,14 @@ export async function studentProfile(id: number) {
   return s;
 }
 
-export async function listStudents(f: { q?: string; status?: string; hostelId?: number; limit?: number; offset?: number }) {
+export async function listStudents(f: { q?: string; status?: string; hostelId?: number; plan?: 'EXPIRED' | 'VALID' | 'WALKIN' | ''; limit?: number; offset?: number }) {
   const where: string[] = [];
   const p: unknown[] = [];
   const month = dayKey().slice(0, 7);
   if (f.status) { where.push('st.status = ?'); p.push(f.status); }
+  if (f.plan === 'WALKIN') where.push("st.kind = 'WALKIN'");
+  else if (f.plan === 'EXPIRED') { where.push("st.kind = 'HOSTELER' AND st.valid_until IS NOT NULL AND st.valid_until < ?"); p.push(dayKey()); }
+  else if (f.plan === 'VALID') { where.push("st.kind = 'HOSTELER' AND (st.valid_until IS NULL OR st.valid_until >= ?)"); p.push(dayKey()); }
   if (f.hostelId) { where.push('st.hostel_id = ?'); p.push(f.hostelId); }
   if (f.q) {
     const q = f.q.trim();

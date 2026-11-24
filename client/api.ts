@@ -11,12 +11,18 @@ export type Order = {
   received_by_name?: string; delivered_by_name?: string | null; late?: number; qr_token?: string;
   events?: { type: string; note: string | null; at: string; by_name: string | null; by_role: Role | null }[];
   via?: 'QR' | 'NUMBER';
+  service_id?: number | null; service_name?: string | null; unit?: 'KG' | 'PIECE' | null; rate?: number | null; charge_note?: string | null; customer_kind?: 'HOSTELER' | 'WALKIN';
 };
 export type Student = {
   id: number; name: string; mobile: string; login_id: string; active: number; created_at: string; id_card_no: string; hostel_id: number; hostel_name: string;
   room_no: string; status: 'PENDING' | 'ACTIVE' | 'REJECTED' | 'SUSPENDED'; review_note?: string | null; reviewed_at?: string | null; reviewed_by_name?: string | null;
   month_orders?: number; month_kg?: number; open_orders?: number;
+  kind?: 'HOSTELER' | 'WALKIN'; valid_until?: string | null; claimable?: number;
+  pending_hostel_id?: number | null; pending_hostel_name?: string | null; pending_room_no?: string | null; change_requested_at?: string | null;
 };
+export type Plan = { hosteler: boolean; label: string };
+export type Service = { id: number; name: string; unit: 'KG' | 'PIECE'; rate: number; hosteler_rate: number; uses_allowance: number; active: number; sort: number };
+export type PaymentInfo = { upi_id: string; upi_name: string; has_upi_qr: boolean };
 export type Usage = { month: string; orders: number; kg: number; active: number; order_limit: number; kg_limit: number; kg_left: number | null; orders_left: number | null };
 export type Hostel = { id: number; name: string; active?: number; students?: number };
 export type Announcement = { id: number; title: string; body: string; created_at: string; expires_on: string | null; hostel_id: number | null; hostel_name: string | null; created_by_name?: string; expired?: number };
@@ -27,7 +33,7 @@ export type Complaint = {
 };
 export type Notice = { id: number; title: string; body: string; order_id: number | null; read_at: string | null; created_at: string };
 
-export class ApiError extends Error { constructor(public status: number, message: string) { super(message); } }
+export class ApiError extends Error { constructor(public status: number, message: string, public details?: Record<string, any>) { super(message); } }
 
 const listeners = new Set<() => void>();
 /** Called when any request comes back 401, so the app can drop to the sign-in screen. */
@@ -56,7 +62,7 @@ export async function api<T = unknown>(path: string, init: { method?: string; bo
   }
   if (!res.ok) {
     const data = await res.json().catch(() => ({}));
-    throw new ApiError(res.status, data.error || `Request failed (${res.status}).`);
+    throw new ApiError(res.status, data.error || `Request failed (${res.status}).`, data.details ?? undefined);
   }
   if (res.status === 204) return undefined as T;
   if (init.as === 'blob') return res.blob() as Promise<T>;
@@ -129,6 +135,11 @@ async function saveAndShare(blob: Blob, name: string) {
 
 /** Load a private file (complaint photo) with this user's session and return a temporary object URL. */
 export async function fileObjectUrl(name: string) {
-  const blob = await api<Blob>(`/files/${encodeURIComponent(name)}`, { as: 'blob' });
+  return blobUrl(`/files/${encodeURIComponent(name)}`);
+}
+
+/** Load any signed-in image (e.g. the UPI QR) and return a temporary object URL. */
+export async function blobUrl(path: string) {
+  const blob = await api<Blob>(path, { as: 'blob' });
   return URL.createObjectURL(blob);
 }

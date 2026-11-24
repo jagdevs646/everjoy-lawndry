@@ -51,8 +51,8 @@ One website for everyone. After signing in, each role gets its own look:
   1. **Find the student**: type the ID no., name or room, use a USB/Bluetooth barcode scanner, or tap the camera to scan the ID card barcode or the student's ID QR.
   2. See the student's card: name, ID, hostel/room, mobile, this month's usage, orders already in progress.
   3. **Not yet approved?** Approve right there after checking the portal.
-  4. Enter **weight** (large number pad) and **clothes count** (+/−). Choose Regular or Express (if offered). Add an optional note (e.g. "1 blanket").
-  5. A **live rule check** shows instantly: "No charge" / "Collect ₹30 at pickup" / "Limit is 7 kg, remove 0.4 kg" / "Monthly limit reached", plus the ready-by time.
+  4. Pick the **service** (Wash & fold, Wash + iron, Ironing only, Dry cleaning, or whatever the admin set up), enter **weight** and **clothes count** (+/−). Choose Regular or Express (if offered). One slip per service: a student with washing and dry cleaning gets two order numbers. Add an optional note (e.g. "1 blanket").
+  5. A **live rule check** shows instantly: "No charge" / "Collect ₹30 at pickup", plus the ready-by time. Over a free limit it shows **two buttons**: *Take back 1.5 kg* (order stays free) or *Charge ₹37.5* (extra kg at the admin's rate, paid at pickup).
   6. **Take order**. A big order no. appears to write on the bag tag, and the slip is already on the student's phone.
   - **Double-tap safe**: tapping Take order twice never creates two orders.
 - **Pickup**
@@ -88,13 +88,28 @@ One website for everyone. After signing in, each role gets its own look:
 - **Staff**: create counter staff or other admins (username + first password, which must be changed at first sign-in), reset passwords, **switch off** people who leave. Their history is kept.
 - **Rules & pricing** (apply to new orders immediately; old orders keep what they were charged):
   - Weight limit per order (default **7 kg**), orders a student may have in progress (default 2), ready time in hours.
-  - **Monthly limit per student**: kg per month and/or orders per month (0 = no limit). When a student goes over the kg limit: **do not accept**, or **accept and charge ₹X per extra kg**.
-  - **Pricing**: regular wash price per kg (0 if laundry is part of hostel fees), **express service** on/off with fee and ready time.
-  - **Payments**: require payment before pickup; UPI ID and name for the student's Pay with UPI button.
+  - **Free washing per student**: free kg per order (default 7), free kg and/or orders per month (0 = no limit). **Let students pay for extra kg** on/off, and the price per extra kg.
+  - **Hostel plan**: the current semester end date, given to students approved from now on.
+  - **Express service** on/off with fee and ready time.
+  - **Payments**: require payment before pickup; UPI ID and name; **upload the UPI QR** image.
+  - **Services and prices**: add or edit services, each priced per kg or per piece, with a hosteler price and a normal price. "Uses the free kg" makes a service count toward the free limits.
   - Counter timings text.
   - **Hostels**: add, rename, hide.
 - **Activity log**: every important action (orders, handovers, corrections, cancellations, payments, approvals, password resets, rule changes with old and new values, exports, backups) with who and when. It cannot be edited.
 - **Counter mode**: the admin can switch to the staff counter screens in one tap and come back.
+
+## Added in November 2026
+
+| Feature | Who | What it does |
+|---|---|---|
+| **Room change needs approval** | Student, staff | A student who is already approved can change hostel/room in Profile, but it stays "waiting for the counter" until staff approve it (Students → Room changes). Staff can turn it down with a reason the student sees. |
+| **Over the free limit: remove or pay** | Staff, student | Over 7 kg (or the monthly free kg) the counter chooses: take clothes back, or charge the extra kg at the admin's rate. The admin can switch the paid option off. |
+| **UPI QR** | Admin, staff, student | Admin uploads the business UPI QR once. Students tap *Pay by UPI* on Home to see it (or a QR with the amount filled in, made from the UPI ID). At the counter, choosing UPI shows the same QR. Staff mark the order paid after checking the payment. |
+| **Staff work report** | Admin | Staff page shows each person's orders this month, money collected and last active time. *Work* opens a report for any period: orders taken (kg, clothes), handed over, count mismatches, cash and UPI collected, complaints handled, approvals, room changes, walk-ins, orders per day. |
+| **Add students or staff from Excel** | Admin | Download the template, fill it, upload. Every row is checked first; if any row is wrong nothing is added and each problem is listed with its row number. Imported students are already approved: they *Register* with the same ID card no. and mobile and choose their own password. Imported staff get temporary passwords shown once. |
+| **Hostel plan validity** | Admin, staff, student | Each student has a "plan valid till" date (set in bulk from Students → Plan dates, per student in Edit, or from the Excel sheet). After that date they pay normal prices for every service. The student sees their plan on Home and in Help. |
+| **Walk-in customers** | Staff | Not shown anywhere as a feature: when a counter search finds nobody, a small *Serve without registration* link appears. Name + mobile is enough; they pay normal prices, and the same mobile finds them next time. They cannot sign in. |
+| **Multiple services** | Everyone | Washing, washing + ironing, ironing only, dry cleaning (editable). Each has its own price and its own slip. Reports and the Excel register show the service of each order. |
 
 ---
 

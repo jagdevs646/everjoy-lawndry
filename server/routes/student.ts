@@ -1,9 +1,9 @@
-import { Router } from 'express';
+import { NextFunction, Request, Response, Router } from 'express';
 import { z } from 'zod';
 import { db, insertId, logActivity } from '../db.js';
 import { AuthedRequest, requireRole } from '../auth.js';
 import { photoUpload, savePhoto } from '../files.js';
-import { getSettings, monthUsage } from '../rules.js';
+import { getSettings, listServices, monthUsage, planStatus } from '../rules.js';
 import { announcementsFor, complaintDetail, listComplaints, orderDetail, studentProfile } from '../queries.js';
 import { HttpError, handle, nowIso, parse, zId, zText } from '../util.js';
 import { zIdCard, zMobile, zRoom } from './public.js';
@@ -17,7 +17,7 @@ export const COMPLAINT_CATEGORIES = ['Missing clothes', 'Damaged clothes', 'Wron
 
 /** Student-facing order fields: own orders only, includes the QR token for the digital slip. */
 const MY_ORDER_COLS = `id, order_no, weight_kg, clothes_count, service, note, status, within_kg, extra_kg, amount, payment_status, paid_method, paid_at,
-  qr_token, received_at, expected_at, ready_at, delivered_at, returned_count, cancel_reason, hostel_name, room_no`;
+  qr_token, received_at, expected_at, ready_at, delivered_at, returned_count, cancel_reason, hostel_name, room_no, service_name, unit, rate, charge_note`;
 
 router.get('/me/home', handle(async (req, res) => {
   const user = me(req);
@@ -29,8 +29,11 @@ router.get('/me/home', handle(async (req, res) => {
   const openComplaints = (await db.get<{ c: number }>(`SELECT COUNT(*) AS c FROM complaints WHERE student_id = ? AND status != 'RESOLVED'`, [user.id]))!.c;
   const usage = await monthUsage(user.id);
   const announcements = (await announcementsFor(profile.hostel_id)).slice(0, 3);
+  const services = await listServices();
   res.json({
     profile,
+    plan: planStatus({ kind: String(profile.kind), valid_until: (profile.valid_until as string | null) ?? null }),
+    services,
     usage,
     open,
     due,
@@ -40,7 +43,8 @@ router.get('/me/home', handle(async (req, res) => {
     info: {
       max_kg_per_order: s.max_kg_per_order, counter_hours: s.counter_hours, upi_id: s.upi_id, upi_name: s.upi_name,
       pay_before_pickup: s.pay_before_pickup, express_enabled: s.express_enabled, express_fee: s.express_fee,
-      monthly_kg_limit: s.monthly_kg_limit, monthly_order_limit: s.monthly_order_limit, over_limit_action: s.over_limit_action, extra_rate_per_kg: s.extra_rate_per_kg,
+      monthly_kg_limit: s.monthly_kg_limit, monthly_order_limit: s.monthly_order_limit, allow_paid_extra: s.allow_paid_extra, extra_rate_per_kg: s.extra_rate_per_kg,
+      has_upi_qr: !!s.upi_qr_file,
     },
   });
 }));
@@ -82,8 +86,18 @@ router.patch('/me/profile', handle(async (req, res) => {
       await db.run('UPDATE students SET id_card_no = ? WHERE user_id = ?', [b.idCardNo, user.id]);
     }
     await db.run('UPDATE users SET mobile = ?, name = COALESCE(?, name) WHERE id = ?', [b.mobile, canEditIdentity ? b.name ?? null : null, user.id]);
-    await db.run(`UPDATE students SET hostel_id = ?, room_no = ?, status = CASE WHEN status = 'REJECTED' THEN 'PENDING' ELSE status END WHERE user_id = ?`, [b.hostelId, b.roomNo, user.id]);
-    await logActivity(user.id, current.status === 'REJECTED' ? 'STUDENT_RESUBMITTED' : 'PROFILE_UPDATED', 'student', current.id_card_no, `room ${b.roomNo} · ${b.mobile}`);
+    const roomChanged = b.hostelId !== Number(current.hostel_id) || b.roomNo !== current.room_no;
+    if (canEditIdentity) {
+      // Not approved yet: the whole registration is checked by staff anyway, so change it directly.
+      await db.run(`UPDATE students SET hostel_id = ?, room_no = ?, status = CASE WHEN status = 'REJECTED' THEN 'PENDING' ELSE status END WHERE user_id = ?`, [b.hostelId, b.roomNo, user.id]);
+    } else if (roomChanged) {
+      // Approved students: a new hostel/room waits for staff to check it before it replaces the old one.
+      await db.run('UPDATE students SET pending_hostel_id = ?, pending_room_no = ?, change_requested_at = ? WHERE user_id = ?', [b.hostelId, b.roomNo, nowIso(), user.id]);
+    } else if (current.pending_hostel_id) {
+      // Back to the room already on file: withdraw the waiting change.
+      await db.run('UPDATE students SET pending_hostel_id = NULL, pending_room_no = NULL, change_requested_at = NULL WHERE user_id = ?', [user.id]);
+    }
+    await logActivity(user.id, current.status === 'REJECTED' ? 'STUDENT_RESUBMITTED' : !canEditIdentity && roomChanged ? 'ROOM_CHANGE_REQUESTED' : 'PROFILE_UPDATED', 'student', current.id_card_no, `room ${b.roomNo}, ${b.mobile}`);
   });
   res.json(await studentProfile(user.id));
 }));
@@ -96,7 +110,11 @@ router.get('/me/complaints', handle(async (req, res) => {
   res.json({ rows, categories: COMPLAINT_CATEGORIES });
 }));
 
-router.post('/me/complaints', photoUpload.single('photo'), handle(async (req, res) => {
+/** Only approved students can raise complaints (and upload photos); checked before the upload is read. */
+const activeOnly = (req: Request, _res: Response, next: NextFunction) =>
+  (req as AuthedRequest).user?.student_status === 'ACTIVE' ? next() : next(new HttpError(403, 'Your account must be approved first.'));
+
+router.post('/me/complaints', activeOnly, photoUpload.single('photo'), handle(async (req, res) => {
   const user = me(req);
   const b = parse(z.object({
     orderId: z.union([z.literal(''), z.coerce.number().int().positive()]).optional(),

@@ -2,11 +2,11 @@ import crypto from 'node:crypto';
 import { Router } from 'express';
 import bcrypt from 'bcryptjs';
 import { z } from 'zod';
-import { db, logActivity, notify } from '../db.js';
+import { db, insertId, logActivity, notify } from '../db.js';
 import { AuthedRequest, requireRole } from '../auth.js';
-import { cancelOrder, correctOrder, createOrder, deliverOrder, getOrderRow, getSettings, monthUsage, orderInput, quote, recordPayment, setStatus } from '../rules.js';
+import { cancelOrder, correctOrder, createOrder, deliverOrder, getOrderRow, getSettings, listServices, monthUsage, orderInput, planStatus, quote, recordPayment, setStatus } from '../rules.js';
 import { announcementsFor, complaintDetail, findOrderByCode, listComplaints, listOrders, listStudents, orderDetail, studentProfile } from '../queries.js';
-import { dayKey, handle, HttpError, MAX_ID, nowIso, parse, startOfLocalDayIso, zId, zText } from '../util.js';
+import { dayKey, handle, HttpError, MAX_ID, nowIso, parse, startOfLocalDayIso, zDate, zId, zText } from '../util.js';
 import { normaliseLogin, zIdCard, zMobile, zRoom } from './public.js';
 
 export const router = Router();
@@ -16,7 +16,14 @@ const actor = (req: unknown) => (req as AuthedRequest).user;
 const isAdmin = (req: unknown) => actor(req).role === 'ADMIN';
 
 /** Readable temporary password, e.g. "wash-4821". Shown once to staff, who tells the student. */
-export const tempPassword = () => `${['wash', 'fold', 'iron', 'fresh', 'clean', 'soap'][crypto.randomInt(6)]}-${crypto.randomInt(1000, 9999)}`;
+/** Easy to read out at the counter, hard to guess: e.g. "fold-K7QM-4821" (about 40 bits). No 0/O or 1/I/L. */
+export function tempPassword() {
+  const letters = 'ABCDEFGHJKMNPQRSTUVWXYZ';
+  const code = Array.from({ length: 4 }, () => letters[crypto.randomInt(letters.length)]).join('');
+  return `${['wash', 'fold', 'iron', 'fresh', 'clean', 'soap'][crypto.randomInt(6)]}-${code}-${crypto.randomInt(1000, 10000)}`;
+}
+/** A temporary password works for 7 days; after that the counter gives a new one. */
+export const tempPasswordExpiry = () => new Date(Date.now() + 7 * 86400_000).toISOString();
 
 router.get('/ops/summary', handle(async (_req, res) => {
   const today = dayKey();
@@ -25,7 +32,7 @@ router.get('/ops/summary', handle(async (_req, res) => {
   const [
     received, kg, clothes, delivered, collected,
     openReceived, washing, ready, late,
-    pendingStudents, openComplaints, dues, settings, announcements,
+    pendingStudents, openComplaints, dues, settings, announcements, roomChanges, services,
   ] = await Promise.all([
     one(`SELECT COUNT(*) AS c FROM orders WHERE day_key = ? AND status != 'CANCELLED'`, today),
     one(`SELECT COALESCE(ROUND(CAST(SUM(weight_kg) AS NUMERIC), 1), 0) AS c FROM orders WHERE day_key = ? AND status != 'CANCELLED'`, today),
@@ -41,11 +48,15 @@ router.get('/ops/summary', handle(async (_req, res) => {
     one(`SELECT COALESCE(SUM(amount),0) AS c FROM orders WHERE payment_status = 'DUE' AND status != 'CANCELLED'`),
     pickSettings(),
     announcementsFor(null),
+    one(`SELECT COUNT(*) AS c FROM students WHERE pending_hostel_id IS NOT NULL`),
+    listServices(),
   ]);
   res.json({
     today: { received, kg, clothes, delivered, collected },
     open: { received: openReceived, washing, ready, late },
     pending_students: pendingStudents,
+    room_changes: roomChanges,
+    services,
     open_complaints: openComplaints,
     dues,
     settings,
@@ -58,14 +69,15 @@ async function pickSettings() {
   return {
     max_kg_per_order: s.max_kg_per_order, express_enabled: s.express_enabled, express_fee: s.express_fee, pay_before_pickup: s.pay_before_pickup,
     monthly_kg_limit: s.monthly_kg_limit, monthly_order_limit: s.monthly_order_limit, max_active_orders: s.max_active_orders,
-    regular_rate_per_kg: s.regular_rate_per_kg, extra_rate_per_kg: s.extra_rate_per_kg, upi_id: s.upi_id,
+    allow_paid_extra: s.allow_paid_extra, extra_rate_per_kg: s.extra_rate_per_kg,
+    upi_id: s.upi_id, upi_name: s.upi_name, has_upi_qr: !!s.upi_qr_file,
   };
 }
 
 /* ---------------------------------------------------------------- students */
 
 router.get('/ops/students', handle(async (req, res) => {
-  const q = parse(z.object({ q: z.string().optional(), status: z.enum(['PENDING', 'ACTIVE', 'REJECTED', 'SUSPENDED']).optional().or(z.literal('')), hostelId: z.coerce.number().int().positive().max(MAX_ID).optional(), limit: z.coerce.number().int().optional(), offset: z.coerce.number().int().min(0).optional() }), req.query);
+  const q = parse(z.object({ q: z.string().optional(), status: z.enum(['PENDING', 'ACTIVE', 'REJECTED', 'SUSPENDED']).optional().or(z.literal('')), hostelId: z.coerce.number().int().positive().max(MAX_ID).optional(), plan: z.enum(['EXPIRED', 'VALID', 'WALKIN', '']).optional(), limit: z.coerce.number().int().optional(), offset: z.coerce.number().int().min(0).optional() }), req.query);
   res.json(await listStudents({ ...q, status: q.status || undefined }));
 }));
 
@@ -80,10 +92,10 @@ router.get('/ops/students/lookup', handle(async (req, res) => {
 }));
 
 async function counterCard(id: number) {
-  const open = await db.all(`SELECT id, order_no, status, clothes_count, weight_kg, amount, payment_status, received_at, expected_at FROM orders WHERE student_id = ? AND status IN ('RECEIVED','WASHING','READY') ORDER BY id`, [id]);
+  const open = await db.all(`SELECT id, order_no, status, clothes_count, weight_kg, amount, payment_status, received_at, expected_at, service_name FROM orders WHERE student_id = ? AND status IN ('RECEIVED','WASHING','READY') ORDER BY id`, [id]);
   const profile = await studentProfile(id);
   const usage = await monthUsage(id);
-  return { ...profile, usage, open };
+  return { ...profile, plan: planStatus({ kind: String(profile.kind), valid_until: (profile.valid_until as string | null) ?? null }), usage, open };
 }
 
 router.get('/ops/students/:id', handle(async (req, res) => {
@@ -96,13 +108,23 @@ router.get('/ops/students/:id', handle(async (req, res) => {
 router.patch('/ops/students/:id', handle(async (req, res) => {
   const id = parse(zId, req.params.id);
   const before = await studentProfile(id);
-  const b = parse(z.object({ name: zText(2, 80), idCardNo: zIdCard, mobile: zMobile, hostelId: z.coerce.number().int().positive(), roomNo: zRoom }), req.body);
+  const b = parse(z.object({
+    name: zText(2, 80), idCardNo: zIdCard, mobile: zMobile, hostelId: z.coerce.number().int().positive().max(MAX_ID), roomNo: zRoom,
+    // Hostel plan end date: admin only (staff edits leave it as it is).
+    validUntil: z.union([z.literal(''), z.null(), zDate]).optional(),
+  }), req.body);
+  if (b.validUntil !== undefined && !isAdmin(req)) throw new HttpError(403, 'Only the admin can change a hostel plan date.');
   if (!(await db.get('SELECT 1 FROM hostels WHERE id = ?', [b.hostelId]))) throw new HttpError(400, 'Choose a hostel.');
   if (b.idCardNo !== before.id_card_no && (await db.get('SELECT 1 FROM users WHERE login_id = ? AND id != ?', [b.idCardNo, id]))) throw new HttpError(409, 'Another account already uses that ID card no.');
   await db.tx(async () => {
     await db.run('UPDATE users SET name = ?, mobile = ?, login_id = ? WHERE id = ?', [b.name, b.mobile, b.idCardNo, id]);
     await db.run('UPDATE students SET id_card_no = ?, hostel_id = ?, room_no = ? WHERE user_id = ?', [b.idCardNo, b.hostelId, b.roomNo, id]);
-    await logActivity(actor(req).id, 'STUDENT_EDITED', 'student', b.idCardNo, `${before.name}/${before.id_card_no} → ${b.name}/${b.idCardNo}, room ${b.roomNo}`);
+    if (b.validUntil !== undefined) await db.run('UPDATE students SET valid_until = ? WHERE user_id = ?', [b.validUntil || null, id]);
+    // Staff set the hostel/room themselves: a change the student asked for earlier no longer applies.
+    if (b.hostelId !== Number(before.hostel_id) || b.roomNo !== before.room_no) {
+      await db.run('UPDATE students SET pending_hostel_id = NULL, pending_room_no = NULL, change_requested_at = NULL WHERE user_id = ?', [id]);
+    }
+    await logActivity(actor(req).id, 'STUDENT_EDITED', 'student', b.idCardNo, `${before.name}/${before.id_card_no} → ${b.name}/${b.idCardNo}, room ${b.roomNo}${b.validUntil !== undefined ? `, plan till ${b.validUntil || 'no end'}` : ''}`);
   });
   res.json(await counterCard(id));
 }));
@@ -117,6 +139,9 @@ router.post('/ops/students/:id/review', handle(async (req, res) => {
     if (b.decision === 'REJECT' && !b.note) throw new HttpError(400, 'Tell the student why (e.g. “ID no. does not match portal”).');
     const status = b.decision === 'APPROVE' ? 'ACTIVE' : 'REJECTED';
     await db.run('UPDATE students SET status = ?, review_note = ?, reviewed_by = ?, reviewed_at = ? WHERE user_id = ?', [status, b.note || null, actor(req).id, nowIso(), id]);
+    // Approved hostelers get the current semester's plan end date, if the admin has set one.
+    const { semester_end: semesterEnd } = await getSettings();
+    if (status === 'ACTIVE' && semesterEnd && !s.valid_until) await db.run('UPDATE students SET valid_until = ? WHERE user_id = ?', [semesterEnd, id]);
     await notify(id, status === 'ACTIVE' ? 'Registration approved 🎉' : 'Registration needs a fix', status === 'ACTIVE' ? 'You can now give laundry at the counter. Your digital slips will appear here.' : `Reason: ${b.note}. Update your details in Profile and resubmit.`);
     await logActivity(actor(req).id, status === 'ACTIVE' ? 'STUDENT_APPROVED' : 'STUDENT_REJECTED', 'student', s.id_card_no, b.note);
   });
@@ -140,9 +165,75 @@ router.post('/ops/students/:id/reset-password', handle(async (req, res) => {
   const id = parse(zId, req.params.id);
   const s = await studentProfile(id);
   const pass = tempPassword();
-  await db.run('UPDATE users SET password_hash = ?, must_change_password = 1, token_version = token_version + 1 WHERE id = ?', [await bcrypt.hash(pass, 10), id]);
-  await logActivity(actor(req).id, 'PASSWORD_RESET', 'student', s.id_card_no);
+  const hash = await bcrypt.hash(pass, 10);
+  await db.tx(async () => {
+    await db.run('UPDATE users SET password_hash = ?, must_change_password = 1, password_expires_at = ?, token_version = token_version + 1 WHERE id = ?', [hash, tempPasswordExpiry(), id]);
+    // Staff checked the student in person: an imported account no longer waits to be claimed.
+    await db.run('UPDATE students SET claimable = 0, claim_hash = NULL, claim_expires_at = NULL WHERE user_id = ?', [id]);
+    await logActivity(actor(req).id, 'PASSWORD_RESET', 'student', s.id_card_no);
+  });
   res.json({ tempPassword: pass });
+}));
+
+/* ------------------------------------------------------------ room changes */
+
+/** Students' hostel/room changes wait here until staff check them. */
+router.get('/ops/room-changes', handle(async (_req, res) => {
+  res.json({ rows: await db.all(`SELECT u.id, u.name, u.mobile, st.id_card_no, st.room_no, h.name AS hostel_name,
+      st.pending_room_no, ph.name AS pending_hostel_name, st.change_requested_at
+    FROM students st JOIN users u ON u.id = st.user_id JOIN hostels h ON h.id = st.hostel_id
+    JOIN hostels ph ON ph.id = st.pending_hostel_id
+    WHERE st.pending_hostel_id IS NOT NULL ORDER BY st.change_requested_at`) });
+}));
+
+router.post('/ops/students/:id/room-change', handle(async (req, res) => {
+  const id = parse(zId, req.params.id);
+  const b = parse(z.object({ decision: z.enum(['APPROVE', 'REJECT']), note: z.string().trim().max(200).default('') }), req.body);
+  await db.tx(async () => {
+    await db.lockRow('users', id);
+    const s = await db.get<{ id_card_no: string; pending_hostel_id: number | null; pending_room_no: string | null }>(
+      'SELECT id_card_no, pending_hostel_id, pending_room_no FROM students WHERE user_id = ?', [id]);
+    if (!s) throw new HttpError(404, 'Student not found.');
+    if (!s.pending_hostel_id) throw new HttpError(409, 'There is no room change waiting for this student.');
+    if (b.decision === 'REJECT' && !b.note) throw new HttpError(400, 'Tell the student why (e.g. "Room not on the hostel list").');
+    const newHostel = await db.get<{ name: string }>('SELECT name FROM hostels WHERE id = ?', [s.pending_hostel_id]);
+    if (b.decision === 'APPROVE') {
+      await db.run('UPDATE students SET hostel_id = ?, room_no = ?, pending_hostel_id = NULL, pending_room_no = NULL, change_requested_at = NULL WHERE user_id = ?', [s.pending_hostel_id, s.pending_room_no, id]);
+      await notify(id, 'Room change approved', `Your laundry account now shows ${newHostel?.name}, room ${s.pending_room_no}.`);
+    } else {
+      await db.run('UPDATE students SET pending_hostel_id = NULL, pending_room_no = NULL, change_requested_at = NULL WHERE user_id = ?', [id]);
+      await notify(id, 'Room change not approved', `Reason: ${b.note}. Your hostel and room stay as before.`);
+    }
+    await logActivity(actor(req).id, b.decision === 'APPROVE' ? 'ROOM_CHANGE_APPROVED' : 'ROOM_CHANGE_REJECTED', 'student', s.id_card_no,
+      `${newHostel?.name}, room ${s.pending_room_no}${b.note ? `, ${b.note}` : ''}`);
+  });
+  res.json(await counterCard(id));
+}));
+
+/* ---------------------------------------------------------------- walk-ins */
+
+/**
+ * Quick counter registration for someone who isn't a registered student (not shown to students).
+ * Walk-ins pay normal prices. The same mobile number finds the same customer again.
+ */
+router.post('/ops/walk-in', handle(async (req, res) => {
+  const b = parse(z.object({ name: zText(2, 80), mobile: zMobile }), req.body);
+  const loginId = `WALKIN-${b.mobile}`;
+  const existing = await db.get<{ id: number; kind: string | null }>('SELECT u.id, st.kind FROM users u LEFT JOIN students st ON st.user_id = u.id WHERE u.login_id = ?', [loginId]);
+  if (existing && existing.kind === 'WALKIN') return res.json(await counterCard(existing.id));
+  if (existing) throw new HttpError(409, 'This mobile number is tied to another account. Search for it in Students.');
+  const id = await db.tx(async () => {
+    const hostel = await db.get<{ id: number }>("SELECT id FROM hostels WHERE lower(name) = 'walk-in customers'");
+    const hostelId = hostel?.id ?? await insertId('INSERT INTO hostels (name, active) VALUES (?, 0)', ['Walk-in customers']);
+    // No usable password: walk-ins are served at the counter and never sign in.
+    const unusable = await bcrypt.hash(crypto.randomBytes(24).toString('hex'), 10);
+    const userId = await insertId(`INSERT INTO users (role, login_id, name, mobile, password_hash, created_at) VALUES ('STUDENT',?,?,?,?,?)`, [loginId, b.name, b.mobile, unusable, nowIso()]);
+    await db.run(`INSERT INTO students (user_id, id_card_no, hostel_id, room_no, status, kind, reviewed_by, reviewed_at) VALUES (?,?,?,?,'ACTIVE','WALKIN',?,?)`,
+      [userId, loginId, hostelId, '-', actor(req).id, nowIso()]);
+    await logActivity(actor(req).id, 'WALKIN_ADDED', 'student', loginId, b.name);
+    return userId;
+  });
+  res.status(201).json(await counterCard(id));
 }));
 
 /* ------------------------------------------------------------------ orders */
@@ -175,7 +266,8 @@ router.post('/ops/scan', handle(async (req, res) => {
 
 router.post('/ops/orders/status', handle(async (req, res) => {
   const b = parse(z.object({ ids: z.array(zId).min(1).max(200), status: z.enum(['RECEIVED', 'WASHING', 'READY']) }), req.body);
-  res.json({ changed: await setStatus(actor(req).id, b.ids, b.status) });
+  // Back to "received" re-opens staff-only corrections and cancelling, so only the admin may do it.
+  res.json({ changed: await setStatus(actor(req).id, b.ids, b.status, { allowBackToReceived: isAdmin(req) }) });
 }));
 
 router.post('/ops/orders/:id/pay', handle(async (req, res) => {
@@ -222,7 +314,7 @@ router.post('/ops/orders/:id/cancel', handle(async (req, res) => {
 
 router.patch('/ops/orders/:id', handle(async (req, res) => {
   const id = parse(zId, req.params.id);
-  const b = parse(z.object({ weightKg: z.coerce.number().positive(), clothesCount: z.coerce.number().int().min(1).max(300), reason: zText(3, 200) }), req.body);
+  const b = parse(z.object({ weightKg: z.coerce.number().min(0).max(50), clothesCount: z.coerce.number().int().min(1).max(300), reason: zText(3, 200) }), req.body);
   await db.tx(async () => {   // the status check and the correction see the same row
     await db.lockRow('orders', id);
     const o = await getOrderRow(id);
