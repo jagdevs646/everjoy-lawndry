@@ -16,7 +16,7 @@ The new code ignores `DEMO` when `NODE_ENV=production`, so this can't happen aga
 
 ## 2. Check the live database for demo accounts (Neon)
 
-The auditors disagreed on whether the demo seed ever ran on the live database. The live hostel list (`HOR 11`, `HOR 7`) suggests it didn't, but check, because it takes one minute.
+**Most likely yes:** the Render log shows `Demo data ready → staff: STAFF1 · students: EJ2026001…EJ2026007` on the first start with Postgres (23 Nov 2026, 18:53). The live hostels `HOR 11` and `HOR 7` are probably the renamed demo hostels. If so, anyone who has read the README can sign in as staff with `STAFF1` / `Everjoy@123`. **Do this first.** The quickest fix without SQL: sign in as `ADMIN`, open **Staff**, and **Switch off** `STAFF1` and `STAFF2`. Then open **Students**, search `EJ2026`, and put those demo students on hold, or reset the database as below.
 
 - [ ] Neon → your project → **SQL Editor** → run:
   ```sql
