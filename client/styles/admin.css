@@ -47,7 +47,7 @@ html[data-theme='admin'] h1, html[data-theme='admin'] h2 { letter-spacing: -.01e
 .ad-top h1 { font-size: 1.75rem; font-weight: 700; }
 .ad-top p { color: var(--muted); }
 .ad-menu { display: none !important; }
-.ad-main { padding: 18px 32px 48px; max-width: 1280px; }
+.ad-main { padding: 18px 32px 48px; }   /* tables and reports use the whole window */
 .ad-narrow { max-width: 900px; }
 @media (max-width: 900px) {
   .ad-shell { grid-template-columns: 1fr; }
@@ -200,3 +200,9 @@ html[data-theme='admin'] h1, html[data-theme='admin'] h2 { letter-spacing: -.01e
 .mail-ok { display: flex; gap: 6px; align-items: center; color: var(--good); font-weight: 600; }
 .mail-off { display: flex; gap: 6px; align-items: flex-start; color: var(--warn); font-weight: 600; }
 .ledger .card-no { font-size: .85rem; padding: 0 6px; }
+
+/* Staff table: fits the window. Column titles and the action buttons wrap instead of scrolling sideways. */
+.ledger.fit { min-width: 0; table-layout: auto; }
+.ledger.fit th { white-space: normal; vertical-align: bottom; }
+.ledger.fit .row-actions { flex-wrap: wrap; white-space: normal; min-width: 150px; }
+@media (max-width: 760px) { .ledger.fit { min-width: 720px; } }

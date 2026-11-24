@@ -367,12 +367,12 @@ function Staff({ me }: { me: User }) {
     if (r) setTemp({ name: s.name, pass: r.tempPassword });
   };
   return (
-    <div className="stack ad-narrow">
+    <div className="stack">
       <div className="row-between"><p className="muted">People who can sign in to the counter or this office. Switch someone off when they leave; their history stays.</p><div className="btn-pair"><Button icon="download" onClick={() => setImporting(true)}>Add from Excel</Button><Button tone="primary" icon="plus" onClick={() => setAdding(true)}>Add staff</Button></div></div>
       {temp && <div className="temp-pass" role="status"><span>Temporary password for {temp.name}</span><b>{temp.pass}</b><small>They will choose a new one after signing in.</small></div>}
       {!list.data ? <Loading /> : (
         <div className="ledger-wrap">
-          <table className="ledger">
+          <table className="ledger fit">
             <thead><tr><th>Name</th><th>Username</th><th>Role</th><th className="num">Taken this month</th><th className="num">Handed over</th><th className="num">Collected</th><th>Last active</th><th>Account</th><th /></tr></thead>
             <tbody>
               {list.data.rows.map(s => (
