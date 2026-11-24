@@ -38,7 +38,7 @@ function secret() {
 const COOKIE = 'ej_session';
 const MAX_AGE_DAYS = 30;  // students stay signed in on their own phone
 
-const issueToken = (userId: number, tokenVersion: number) => jwt.sign({ sub: userId, v: tokenVersion }, secret(), { expiresIn: `${MAX_AGE_DAYS}d` });
+const issueToken = (userId: number, tokenVersion: number) => jwt.sign({ sub: userId, v: tokenVersion, typ: 'session' }, secret(), { expiresIn: `${MAX_AGE_DAYS}d` });
 
 export function setSessionCookie(res: Response, userId: number, tokenVersion: number) {
   res.cookie(COOKIE, issueToken(userId, tokenVersion), {
@@ -78,7 +78,7 @@ export function appCors(req: Request, res: Response, next: NextFunction) {
     res.setHeader('Access-Control-Allow-Origin', origin);
     res.setHeader('Vary', 'Origin');
     res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, x-ej, x-ej-client');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, x-ej, x-ej-client, x-ej-device');
     res.setHeader('Access-Control-Expose-Headers', 'Content-Disposition');
     res.setHeader('Access-Control-Max-Age', '86400');
     if (req.method === 'OPTIONS') return res.status(204).end();
@@ -110,12 +110,13 @@ export async function session(req: Request, _res: Response, next: NextFunction) 
   const token = bearer || readCookie(req, COOKIE);
   if (token) {
     const key = secret();  // outside the try: a missing initAuthSecret() is a startup bug, not a signed-out user
-    let p: { sub: number; v: number };
+    let p: { sub: number; v: number; typ?: string };
     try {
-      p = jwt.verify(token, key) as unknown as { sub: number; v: number };
+      p = jwt.verify(token, key) as unknown as { sub: number; v: number; typ?: string };
     } catch {
       return next();   // expired or tampered token: treat as signed out
     }
+    if (p.typ === 'device') return next();   // a trusted-device token is not a session
     // A database error here is NOT "signed out": let it become a 500/503 so apps keep their token and retry.
     try {
       const user = await loadUser(Number(p.sub), p.v);
@@ -145,6 +146,40 @@ export function requireRole(...roles: Role[]) {
     next();
   };
 }
+
+/*
+ * Trusted devices. After a student types the email code on a phone or browser, that device gets a
+ * signed "device token" (httpOnly cookie on the website, secure storage in the app). It names the
+ * user and the account's token_version, so signing out, a password change or a reset untrusts every
+ * device at once. It is not a session: the password is still needed.
+ */
+const DEVICE_COOKIE = 'ej_device';
+const DEVICE_DAYS = 30;
+
+export function trustDevice(req: Request, res: Response, userId: number, tokenVersion: number): string | undefined {
+  const t = jwt.sign({ sub: userId, v: tokenVersion, typ: 'device' }, secret(), { expiresIn: `${DEVICE_DAYS}d` });
+  if (isAppClient(req)) return t;
+  res.cookie(DEVICE_COOKIE, t, { httpOnly: true, sameSite: 'lax', secure: process.env.NODE_ENV === 'production', maxAge: DEVICE_DAYS * 86400_000, path: '/' });
+  return undefined;
+}
+
+export function isTrustedDevice(req: Request, userId: number, tokenVersion: number) {
+  const t = String(req.headers['x-ej-device'] || '') || readCookie(req, DEVICE_COOKIE);
+  if (!t) return false;
+  try {
+    const p = jwt.verify(t, secret()) as unknown as { sub: number; v: number; typ?: string };
+    return p.typ === 'device' && Number(p.sub) === userId && p.v === tokenVersion;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The key a student's phone uses to sign the rotating slip QR. It is derived from the order's
+ * secret QR token with the server secret, so the token itself (shown inside the old fixed QR, and
+ * possibly in old screenshots) is never enough to make a valid QR.
+ */
+export const slipKey = (qrToken: string) => crypto.createHmac('sha256', secret()).update(`slipqr:${qrToken}`).digest('base64url');
 
 /* Tiny in-memory limiter: enough for one server; resets on restart. */
 const hits = new Map<string, { n: number; until: number }>();

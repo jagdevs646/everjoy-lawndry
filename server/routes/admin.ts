@@ -11,6 +11,8 @@ import { AuthedRequest, requireRole } from '../auth.js';
 import { getSettings, listServices, saveSettings, serviceSchema } from '../rules.js';
 import { photoUpload, savePhoto } from '../files.js';
 import { readUpload, writeXlsx, XLSX_TYPE } from '../sheets.js';
+import { mailConfigured } from '../mail.js';
+import { checkStudentEmail } from '../otp.js';
 import { announcementsFor, listOrders } from '../queries.js';
 import { dayKey, handle, HttpError, likeContains, nowIso, parse, startOfLocalDayIso, zDate, zId, zText } from '../util.js';
 import { normaliseLogin, zIdCard, zMobile, zPassword, zRoom } from './public.js';
@@ -107,6 +109,10 @@ router.get('/admin/overview', handle(async (_req, res) => {
 /* ---------------------------------------------------------------- settings */
 
 router.get('/admin/settings', handle(async (_req, res) => res.json(await getSettings())));
+/** Is email sending set up on this server (Render: BREVO_API_KEY and MAIL_FROM)? */
+router.get('/admin/mail-status', handle(async (_req, res) => {
+  res.json({ configured: mailConfigured(), from: mailConfigured() ? process.env.MAIL_FROM : null, local: !mailConfigured() && process.env.NODE_ENV !== 'production' });
+}));
 router.put('/admin/settings', handle(async (req, res) => {
   // The UPI QR image is set only by uploading it.
   const { upi_qr_file: _ignored, ...rest } = (req.body ?? {}) as Record<string, unknown>;
@@ -268,6 +274,7 @@ router.get('/admin/export', handle(async (req, res) => {
   const t = (v: unknown) => (v ? new Date(String(v)).toLocaleString('en-IN', { timeZone: process.env.APP_TZ || 'Asia/Kolkata', dateStyle: 'medium', timeStyle: 'short' }) : '');
   const sheet = (rows as Record<string, unknown>[]).reverse().map(o => ({
     'Order No': o.order_no,
+    'Card No': o.tag_no ?? '',
     'Date In': t(o.received_at),
     'ID Card No': o.id_card_no,
     'Name': o.student_name,
@@ -408,13 +415,15 @@ router.delete('/admin/upi-qr', handle(async (req, res) => {
  */
 router.post('/admin/students/validity', handle(async (req, res) => {
   const b = parse(z.object({
+    validFrom: z.union([z.literal(''), zDate]).optional().default(''),
     validUntil: z.union([z.literal(''), zDate]),
     scope: z.enum(['ALL', 'HOSTEL', 'IDS']),
     hostelId: zId.optional(),
     ids: z.array(zId).max(5000).optional(),
   }), req.body);
+  if (b.validFrom && b.validUntil && b.validFrom > b.validUntil) throw new HttpError(400, 'The plan start must be before its end.');
   const where: string[] = ["kind = 'HOSTELER'", "status = 'ACTIVE'"];
-  const p: unknown[] = [b.validUntil || null];
+  const p: unknown[] = [b.validFrom || null, b.validUntil || null];
   if (b.scope === 'HOSTEL') {
     if (!b.hostelId) throw new HttpError(400, 'Choose a hostel.');
     where.push('hostel_id = ?'); p.push(b.hostelId);
@@ -423,16 +432,21 @@ router.post('/admin/students/validity', handle(async (req, res) => {
     if (!b.ids?.length) throw new HttpError(400, 'Choose at least one student.');
     where.push(`user_id IN (${b.ids.map(() => '?').join(',')})`); p.push(...b.ids);
   }
-  const r = await db.run(`UPDATE students SET valid_until = ? WHERE ${where.join(' AND ')}`, p);
-  await logActivity(actor(req).id, 'PLAN_DATES_SET', 'student', null, `${r.changes} students → ${b.validUntil || 'no end date'} (${b.scope})`);
+  const r = await db.run(`UPDATE students SET valid_from = ?, valid_until = ? WHERE ${where.join(' AND ')}`, p);
+  await logActivity(actor(req).id, 'PLAN_DATES_SET', 'student', null, `${r.changes} students → ${b.validFrom || '…'} to ${b.validUntil || 'no end date'} (${b.scope})`);
   res.json({ changed: r.changes });
 }));
 
 /* ------------------------------------------------------------ Excel import */
 
 const IMPORT_COLUMNS = {
-  students: ['ID Card No', 'Full Name', 'Mobile', 'Hostel', 'Room', 'Valid Until'],
+  students: ['ID Card No', 'Full Name', 'Mobile', 'University Email', 'Hostel', 'Room', 'Valid From', 'Valid Until'],
   staff: ['Full Name', 'Username', 'Mobile', 'Role'],
+} as const;
+/** Columns a sheet must have; the others may be missing (older templates). */
+const REQUIRED_COLUMNS = {
+  students: ['ID Card No', 'Full Name', 'Mobile', 'Hostel', 'Room'],
+  staff: ['Full Name', 'Username', 'Role'],
 } as const;
 type ImportType = keyof typeof IMPORT_COLUMNS;
 
@@ -440,12 +454,14 @@ type ImportType = keyof typeof IMPORT_COLUMNS;
 router.get('/admin/import/template/:type', handle(async (req, res) => {
   const type = parse(z.enum(['students', 'staff']), req.params.type) as ImportType;
   const example = type === 'students'
-    ? [{ 'ID Card No': 'EJ2026101', 'Full Name': 'Ananya Rao', 'Mobile': '9876543210', 'Hostel': 'Girls Hostel 1', 'Room': '204', 'Valid Until': '2027-05-31' }]
+    ? [{ 'ID Card No': 'EJ2026101', 'Full Name': 'Ananya Rao', 'Mobile': '9876543210', 'University Email': 'ananya.rao@university.edu.in', 'Hostel': 'Girls Hostel 1', 'Room': '204', 'Valid From': '2027-01-01', 'Valid Until': '2027-06-30' }]
     : [{ 'Full Name': 'Suresh Kumar', 'Username': 'SURESH', 'Mobile': '9811122233', 'Role': 'STAFF' }];
   const help = type === 'students'
     ? [['How to fill this sheet'], ['One student per row. Keep the header row exactly as it is and delete the example row.'],
       ['ID Card No: as printed on the ID card. Students sign in with it.'], ['Mobile: 10 digits. Students use it to set their own password: Register with the same ID card no. and mobile.'],
-      ['Hostel: must match a hostel name (a new name creates that hostel).'], ['Valid Until: last day of the hostel plan, as YYYY-MM-DD (e.g. 2027-05-31). Leave empty for no end date.'],
+      ['University Email: the student gets a sign-in code here the first time (and on each new phone). Without it, the office hands out a claim code instead.'],
+      ['Hostel: must match a hostel name (a new name creates that hostel).'],
+      ['Valid From / Valid Until: the semester of the hostel plan, as YYYY-MM-DD. Jan–Jun semester: 2027-01-01 to 2027-06-30. Jul–Dec semester: 2027-07-01 to 2027-12-31. Leave both empty for no dates.'],
       ['A student who is already registered is updated (hostel, room, valid until), not added twice.']]
     : [['How to fill this sheet'], ['One staff member per row. Keep the header row and delete the example row.'],
       ['Username: letters and numbers, used to sign in.'], ['Role: STAFF (counter) or ADMIN.'],
@@ -486,27 +502,41 @@ router.post('/admin/import/:type', sheetUpload.single('file'), handle(async (req
   const sheet = await readUpload(req.file.buffer, /\.csv$/i.test(req.file.originalname));
   if (!sheet.length) throw new HttpError(400, 'The sheet has no rows under the header.');
   const rows = sheet.map(r => r.cells);
+  const hasFrom = !!rows[0] && 'valid from' in rows[0];
+  const hasUntil = !!rows[0] && 'valid until' in rows[0];
   const rowNo = (i: number) => sheet[i].row;
-  const missing = IMPORT_COLUMNS[type].filter(h => !(h.toLowerCase() in rows[0]));
+  const missing = REQUIRED_COLUMNS[type].filter(h => !(h.toLowerCase() in rows[0]));
   if (missing.length) throw new HttpError(400, `Missing column(s): ${missing.join(', ')}. Use the template from this page.`);
   const errors: { row: number; message: string }[] = [];
   const col = (r: Record<string, string>, h: string) => r[h.toLowerCase()] ?? '';
 
   if (type === 'students') {
-    const schema = z.object({ idCardNo: zIdCard, name: zText(2, 80), mobile: zMobile, hostel: zText(1, 40), roomNo: zRoom, validUntil: z.union([z.literal(''), zDate]) });
+    const schema = z.object({
+      idCardNo: zIdCard, name: zText(2, 80), mobile: zMobile, hostel: zText(1, 40), roomNo: zRoom,
+      email: z.union([z.literal(''), z.string().trim().toLowerCase().max(120).email('not a valid email')]),
+      validFrom: z.union([z.literal(''), zDate]), validUntil: z.union([z.literal(''), zDate]),
+    }).refine(x => !x.validFrom || !x.validUntil || x.validFrom <= x.validUntil, { message: 'Valid From must be before Valid Until', path: ['validFrom'] });
     const parsed: (z.infer<typeof schema> & { row: number })[] = [];
     const seen = new Set<string>();
     rows.forEach((r, i) => {
-      const result = schema.safeParse({ idCardNo: col(r, 'ID Card No'), name: col(r, 'Full Name'), mobile: col(r, 'Mobile'), hostel: col(r, 'Hostel'), roomNo: col(r, 'Room'), validUntil: excelDate(col(r, 'Valid Until')) });
+      const result = schema.safeParse({ idCardNo: col(r, 'ID Card No'), name: col(r, 'Full Name'), mobile: col(r, 'Mobile'), email: col(r, 'University Email'), hostel: col(r, 'Hostel'), roomNo: col(r, 'Room'), validFrom: excelDate(col(r, 'Valid From')), validUntil: excelDate(col(r, 'Valid Until')) });
       if (!result.success) { const iss = result.error.issues[0]; errors.push({ row: rowNo(i), message: `${String(iss.path[0] ?? '')}: ${iss.message}` }); return; }
       if (seen.has(result.data.idCardNo)) { errors.push({ row: rowNo(i), message: `ID card ${result.data.idCardNo} appears twice in the sheet` }); return; }
+      if (result.data.email && seen.has(`@${result.data.email}`)) { errors.push({ row: rowNo(i), message: `Email ${result.data.email} appears twice in the sheet` }); return; }
       seen.add(result.data.idCardNo);
+      if (result.data.email) seen.add(`@${result.data.email}`);
       parsed.push({ ...result.data, row: rowNo(i) });
     });
     for (const r of parsed) {
       const clash = await db.get<{ role: string; kind: string | null }>('SELECT u.role, st.kind FROM users u LEFT JOIN students st ON st.user_id = u.id WHERE u.login_id = ?', [r.idCardNo]);
       if (clash && clash.role !== 'STUDENT') errors.push({ row: r.row, message: `${r.idCardNo} is already a staff username` });
       else if (clash && clash.kind === 'WALKIN') errors.push({ row: r.row, message: `${r.idCardNo} belongs to a walk-in customer` });
+      const current = await db.get<{ email: string | null }>('SELECT email FROM students WHERE id_card_no = ?', [r.idCardNo]);
+      if (r.email && r.email !== (current?.email ?? '').toLowerCase()) {
+        try { await checkStudentEmail(r.email); } catch (e) { errors.push({ row: r.row, message: (e as Error).message }); continue; }
+        const other = await db.get<{ id_card_no: string }>('SELECT id_card_no FROM students WHERE lower(email) = ? AND id_card_no != ?', [r.email, r.idCardNo]);
+        if (other) errors.push({ row: r.row, message: `${r.email} is already used by ${other.id_card_no}` });
+      }
     }
     if (errors.length) return res.status(422).json({ error: `Nothing was imported. Fix ${errors.length} row(s) and upload again.`, details: { errors: errors.slice(0, 200) } });
     const result = await db.tx(async () => {
@@ -524,9 +554,19 @@ router.post('/admin/import/:type', sheetUpload.single('file'), handle(async (req
       };
       for (const r of parsed) {
         const hid = await hostelId(r.hostel);
-        const existing = await db.get<{ user_id: number; claimable: number }>('SELECT user_id, claimable FROM students WHERE id_card_no = ?', [r.idCardNo]);
+        const existing = await db.get<{ user_id: number; claimable: number; email: string | null }>('SELECT user_id, claimable, email FROM students WHERE id_card_no = ?', [r.idCardNo]);
         if (existing) {
-          await db.run('UPDATE students SET hostel_id = ?, room_no = ?, valid_until = ?, kind = ? WHERE user_id = ?', [hid, r.roomNo, r.validUntil || null, 'HOSTELER', existing.user_id]);
+          // A sheet without the date columns leaves the plan dates as they are; an empty cell in a date column clears it.
+          const sets = ['hostel_id = ?', 'room_no = ?', "kind = 'HOSTELER'"];
+          const vals: unknown[] = [hid, r.roomNo];
+          if (hasFrom) { sets.push('valid_from = ?'); vals.push(r.validFrom || null); }
+          if (hasUntil) { sets.push('valid_until = ?'); vals.push(r.validUntil || null); }
+          await db.run(`UPDATE students SET ${sets.join(', ')} WHERE user_id = ?`, [...vals, existing.user_id]);
+          if (r.email && r.email !== (existing.email ?? '').toLowerCase()) {
+            // New address from the office: confirmed again by the next sign-in code; trusted devices start over.
+            await db.run('UPDATE students SET email = ?, email_verified_at = NULL WHERE user_id = ?', [r.email, existing.user_id]);
+            await db.run('UPDATE users SET token_version = token_version + 1 WHERE id = ?', [existing.user_id]);
+          }
           if (existing.claimable) {
             // Not claimed yet: a fresh code replaces the old one (it may have been lost).
             const code = newCode();
@@ -539,10 +579,12 @@ router.post('/admin/import/:type', sheetUpload.single('file'), handle(async (req
         // No usable password: the student claims the account by registering with this ID card no. and mobile.
         const unusable = await bcrypt.hash(crypto.randomBytes(24).toString('hex'), 8);
         const userId = await insertId(`INSERT INTO users (role, login_id, name, mobile, password_hash, created_at) VALUES ('STUDENT',?,?,?,?,?)`, [r.idCardNo, r.name, r.mobile, unusable, nowIso()]);
+        // The student sets up the account with an emailed code (when email codes are on) or with this claim code from
+        // the office. Every new account gets a claim code, so nobody is stuck if email codes are off.
         const code = newCode();
-        await db.run(`INSERT INTO students (user_id, id_card_no, hostel_id, room_no, status, kind, valid_until, claimable, claim_hash, claim_expires_at, reviewed_by, reviewed_at) VALUES (?,?,?,?,'ACTIVE','HOSTELER',?,1,?,?,?,?)`,
-          [userId, r.idCardNo, hid, r.roomNo, r.validUntil || null, claimHash(code), claimExpires, actor(req).id, nowIso()]);
-        codes.push({ idCardNo: r.idCardNo, name: r.name, code });
+        await db.run(`INSERT INTO students (user_id, id_card_no, hostel_id, room_no, status, kind, valid_from, valid_until, claimable, claim_hash, claim_expires_at, email, reviewed_by, reviewed_at) VALUES (?,?,?,?,'ACTIVE','HOSTELER',?,?,1,?,?,?,?,?)`,
+          [userId, r.idCardNo, hid, r.roomNo, r.validFrom || null, r.validUntil || null, code ? claimHash(code) : null, code ? claimExpires : null, r.email || null, actor(req).id, nowIso()]);
+        if (code) codes.push({ idCardNo: r.idCardNo, name: r.name, code });
         created++;
       }
       await logActivity(actor(req).id, 'STUDENTS_IMPORTED', 'student', null, `${created} added, ${updated} updated${newHostels.length ? `, new hostels: ${newHostels.join(', ')}` : ''}`);

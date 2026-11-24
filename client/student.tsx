@@ -1,9 +1,9 @@
 import { FormEvent, ReactNode, useEffect, useState } from 'react';
-import { Announcement, api, Complaint, Hostel, Notice, Order, Plan, Service, Student, Usage, User } from './api';
-import { ChangePassword } from './auth';
+import { Announcement, api, Complaint, Hostel, Notice, OtpStart, Order, Plan, Service, Student, Usage, User } from './api';
+import { ChangePassword, OtpStep } from './auth';
 import { isApp, serverAddress } from './platform';
-import { ago, back, firstName, go, kg, plural, rupees, useFormAction, useLoad, useRoute, useScrollTop, when } from './lib';
-import { Brand, Button, Empty, ErrorNote, Field, Icon, IconButton, IconName, Loading, PayPill, Photo, Progress, QrImage, Sheet, StatusPill, UpiQr } from './ui';
+import { ago, back, firstName, go, kg, noteServerTime, plural, rupees, shrinkPhoto, toast, useAction, useFormAction, useLoad, useRoute, useScrollTop, when } from './lib';
+import { Avatar, Brand, Button, Empty, ErrorNote, Field, Icon, IconButton, IconName, Loading, PayPill, Photo, Progress, QrImage, Sheet, SlipQr, StatusPill, UpiQr, useNoScreenshots } from './ui';
 
 type Home = {
   profile: Student; plan?: Plan; services?: Service[]; usage: Usage; open: Order[]; due: number; unread: number; open_complaints: number; announcements: Announcement[];
@@ -21,7 +21,7 @@ export function StudentApp({ user, onSignOut, onUser }: { user: User; onSignOut:
   const parts = useRoute();
   // Home is polled so "Ready for pickup" shows up without a refresh. The last copy is kept
   // on the phone, so the slip QR still opens with weak network at the counter.
-  const home = useLoad(async () => { const h = await api<Home>('/me/home'); writeCache(user.id, h); return h; }, [user.id], { every: 30_000 });
+  const home = useLoad(async () => { const h = await api<Home & { server_time?: number }>('/me/home'); noteServerTime(h.server_time); writeCache(user.id, h); return h; }, [user.id], { every: 30_000 });
   const data = home.data ?? readCache(user.id);
   const offline = !home.data && !!data && !!home.error;
 
@@ -76,9 +76,12 @@ function HomePage({ home }: { home: Home }) {
   return (
     <div className="st-home">
       <section className="hello">
-        <h1>Hi {firstName(p.name)}</h1>
-        <p>{p.hostel_name}, room {p.room_no}</p>
-        {p.status === 'ACTIVE' && <p className={`plan-chip${planOf(home).hosteler ? '' : ' ended'}`}>{planOf(home).label}</p>}
+        <button className="hello-photo" onClick={() => go('me')} aria-label="Profile"><Avatar name={p.name} photo={p.photo} size={56} /></button>
+        <div>
+          <h1>Hi {firstName(p.name)}</h1>
+          <p>{p.hostel_name}, room {p.room_no}</p>
+          {p.status === 'ACTIVE' && <p className={`plan-chip${planOf(home).hosteler ? '' : ' ended'}`}>{planOf(home).label}</p>}
+        </div>
       </section>
       {p.pending_hostel_id && <p className="ready-banner pending"><Icon name="clock" size={18} />Moving to {p.pending_hostel_name}, room {p.pending_room_no}: waiting for the counter to check.</p>}
 
@@ -124,7 +127,8 @@ function AccountState({ p }: { p: Student }) {
     <section className="state-card pending">
       <Icon name="card" size={26} />
       <h2>One step left: show your ID card</h2>
-      <p>Take your university ID card to the laundry counter. Staff will check your details on the university portal and approve you. It takes a minute.</p>
+      <p>{p.photo ? '' : 'Add a clear photo of your face first. '}Take your university ID card to the laundry counter. Staff will check your details on the university portal and approve you. It takes a minute.</p>
+      {!p.photo && <Button icon="camera" onClick={() => go('me')}>Add my photo</Button>}
       <Button tone="primary" icon="qr" onClick={() => go('myqr')}>Show my ID QR</Button>
     </section>
   );
@@ -151,7 +155,7 @@ function OrderTag({ o }: { o: Order }) {
     <button className={`order-tag s-${o.status.toLowerCase()}`} onClick={() => go(`slip/${o.id}`)}>
       <span className="order-tag-hole" aria-hidden="true" />
       <span className="order-tag-top">
-        <span className="order-tag-no">{o.order_no}</span>
+        <span className="order-tag-no">{o.tag_no ? <>Card {o.tag_no}</> : o.order_no}</span>
         <StatusPill status={o.status} />
       </span>
       <span className="order-tag-meta">{o.service_name ? `${o.service_name}: ` : ''}{plural(o.clothes_count, 'piece')}{Number(o.weight_kg) > 0 ? `, ${kg(o.weight_kg)}` : ''}{o.service === 'EXPRESS' ? ', express' : ''}</span>
@@ -203,9 +207,10 @@ function MonthUsage({ usage, info }: { usage: Usage; info: Home['info'] }) {
 /* ------------------------------------------------------------------ slip */
 
 function Slip({ id, cached, close }: { id: number; cached?: Order[]; close: () => void }) {
-  const o = useLoad(() => api<Order>(`/me/orders/${id}`), [id], { every: 20_000 });
+  const o = useLoad(async () => { const r = await api<Order & { server_time?: number }>(`/me/orders/${id}`); noteServerTime(r.server_time); return r; }, [id], { every: 20_000 });
   const order = o.data ?? cached?.find(x => x.id === id);
   const live = order && ['RECEIVED', 'WASHING', 'READY'].includes(order.status);
+  useNoScreenshots(!!live);
   return (
     <Sheet title="Laundry slip" onClose={close} size="sm" className="slip-sheet">
       {!order ? (o.error ? <ErrorNote error={o.error} retry={o.reload} /> : <Loading />) : (
@@ -214,11 +219,12 @@ function Slip({ id, cached, close }: { id: number; cached?: Order[]; close: () =
             <span className="slip-hole" aria-hidden="true" />
             <header>
               <span className="slip-brand">Everjoy Lawndry</span>
-              <span className="slip-no">{order.order_no}</span>
+              <span className="slip-no">{order.tag_no ? <span className="card-no">{order.tag_no}</span> : order.order_no}</span>
+              {order.tag_no && <span className="slip-order">Order {order.order_no}</span>}
               <StatusPill status={order.status} />
             </header>
-            {live && order.qr_token ? (
-              <div className="slip-qr"><QrImage text={`EJ:${order.qr_token}`} size={220} /></div>
+            {live && order.qr_key ? (
+              <div className="slip-qr"><SlipQr orderId={order.id} slipKey={order.qr_key} size={220} /></div>
             ) : (
               <div className={`slip-stamp ${order.status === 'CANCELLED' ? 'void' : ''}`}>{order.status === 'CANCELLED' ? 'Cancelled' : `Collected ${when(order.delivered_at, 'short')}`}</div>
             )}
@@ -239,7 +245,7 @@ function Slip({ id, cached, close }: { id: number; cached?: Order[]; close: () =
               </ol>
             )}
           </article>
-          {live && <p className="slip-help">Show this QR at the counter when you collect. Turn your screen brightness up if it does not scan.</p>}
+          {live && <p className="slip-help">Show this QR at the counter when you collect{order.tag_no ? `, or tell them card ${order.tag_no} and show your ID card` : ''}. The QR changes every 30 seconds, so a screenshot or a photo of it won't work.</p>}
           <Button icon="help" block onClick={() => go(`help/new/${order.id}`)}>Report a problem with this order</Button>
         </>
       )}
@@ -333,26 +339,6 @@ function ComplaintCard({ c }: { c: Complaint }) {
   );
 }
 
-/**
- * Shrink a camera photo before upload (longest side 1600 px, JPEG): faster on campus data and
- * keeps the database small. Falls back to the original if the browser can't decode it (e.g. HEIC).
- */
-async function shrinkPhoto(file: File): Promise<Blob> {
-  try {
-    const bitmap = await createImageBitmap(file);
-    const scale = Math.min(1, 1600 / Math.max(bitmap.width, bitmap.height));
-    if (scale === 1 && file.size < 900_000) return file;
-    const canvas = document.createElement('canvas');
-    canvas.width = Math.round(bitmap.width * scale);
-    canvas.height = Math.round(bitmap.height * scale);
-    canvas.getContext('2d')!.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
-    const blob = await new Promise<Blob | null>(r => canvas.toBlob(r, 'image/jpeg', 0.82));
-    return blob && blob.size < file.size ? blob : file;
-  } catch {
-    return file;
-  }
-}
-
 function NewComplaint({ categories, orderId, close, onDone }: { categories: string[]; orderId?: string; close: () => void; onDone: () => void }) {
   const orders = useLoad(() => api<{ rows: Order[] }>('/me/orders?limit=20'), []);
   const [f, setF] = useState({ orderId: orderId ?? '', category: '', description: '' });
@@ -402,10 +388,12 @@ function Profile({ home, onSaved, onSignOut, user, onUser }: { home: Home; onSav
   return (
     <div className="st-page">
       <h1>Profile</h1>
+      <ProfilePhoto p={p} onSaved={onSaved} />
       <dl className="profile-card">
         <div><dt>Name</dt><dd>{p.name}</dd></div>
         <div><dt>ID card no.</dt><dd>{p.id_card_no}</dd></div>
         <div><dt>Mobile</dt><dd>{p.mobile}</dd></div>
+        <div><dt>University email</dt><dd>{p.email ?? <AddEmail onSaved={onSaved} />}{p.email && <small>{p.email_verified_at ? 'Sign-in codes are sent here' : 'Confirmed at your next sign-in on a new phone'}</small>}</dd></div>
         <div><dt>Hostel and room</dt><dd>{p.hostel_name}, room {p.room_no}{p.pending_hostel_id ? <small>Change to {p.pending_hostel_name}, room {p.pending_room_no} is waiting for the counter</small> : null}</dd></div>
         {p.status === 'ACTIVE' && <div><dt>Hostel plan</dt><dd>{planOf(home).label}</dd></div>}
         <div><dt>Account</dt><dd><span className={`pill acc-${p.status.toLowerCase()}`}>{status[p.status]}</span></dd></div>
@@ -458,6 +446,7 @@ function EditProfile({ p, close, onSaved }: { p: Student; close: () => void; onS
 }
 
 function MyQr({ profile, close }: { profile: Student; close: () => void }) {
+  useNoScreenshots();
   return (
     <Sheet title="My ID for the counter" onClose={close} size="sm">
       <div className="my-qr">
@@ -487,5 +476,55 @@ function Inbox({ close }: { close: () => void }) {
         </ul>
       )}
     </Sheet>
+  );
+}
+
+/** Profile photo: the student adds it until approval; afterwards it is locked and only the counter changes it. */
+function ProfilePhoto({ p, onSaved }: { p: Student; onSaved: () => void }) {
+  const { busy, run } = useAction();
+  const locked = p.status === 'ACTIVE' && !!p.photo;
+  const pick = async (file: File | undefined) => {
+    if (!file) return;
+    const small = await shrinkPhoto(file, 900);
+    const form = new FormData();
+    form.append('photo', small, 'photo.jpg');
+    if (await run(() => api('/me/photo', { form }), 'Photo saved') !== undefined) onSaved();
+  };
+  return (
+    <div className="photo-row profile-photo">
+      <Avatar name={p.name} photo={p.photo} size={88} />
+      <div className="stack">
+        {locked ? <p className="muted small">Your photo is checked by the counter. To change it, ask at the counter.</p> : <>
+          <p className="muted small">{p.photo ? 'Staff compare this with your face at the counter.' : 'Add a clear photo of your face. Staff compare it with you at the counter.'}</p>
+          <label className={`btn btn-quiet btn-sm${busy ? ' is-busy' : ''}`}>
+            <Icon name="camera" size={18} /><span>{p.photo ? 'Change photo' : 'Add photo'}</span>
+            <input type="file" accept="image/*" capture="user" hidden onChange={e => { void pick(e.target.files?.[0]); e.target.value = ''; }} />
+          </label>
+        </>}
+      </div>
+    </div>
+  );
+}
+
+/** Students registered before email codes add their university email once. */
+function AddEmail({ onSaved }: { onSaved: () => void }) {
+  const [email, setEmail] = useState('');
+  const [open, setOpen] = useState(false);
+  const [otp, setOtp] = useState<OtpStart | null>(null);
+  const { busy, error, submit } = useFormAction();
+  if (!open) return <button type="button" className="link-btn" onClick={() => setOpen(true)}>Add your university email</button>;
+  // The email is saved only after the code sent to it is typed in.
+  if (otp) return <Sheet title="Confirm your email" onClose={() => setOtp(null)} size="sm"><OtpStep start={otp} onDone={() => { toast('Email added'); setOtp(null); onSaved(); }} onBack={() => setOtp(null)} /></Sheet>;
+  const save = async (e: FormEvent) => {
+    e.preventDefault();
+    const r = await submit(() => api<OtpStart>('/me/email', { method: 'PUT', body: { email } }));
+    if (r) setOtp(r);
+  };
+  return (
+    <form className="stack" onSubmit={save}>
+      <input type="email" value={email} onChange={e => setEmail(e.target.value)} placeholder="name@university.edu" inputMode="email" autoCapitalize="none" aria-label="University email" />
+      {error && <ErrorNote error={error} />}
+      <Button size="sm" tone="primary" busy={busy} disabled={!email.includes('@')}>Save email</Button>
+    </form>
   );
 }

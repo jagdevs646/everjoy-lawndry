@@ -1,4 +1,6 @@
 import { db } from './db.js';
+import crypto from 'node:crypto';
+import { QR_STEP_SECONDS, normaliseCard, qrSignature } from './rules.js';
 import { dayKey, HttpError, likeContains, nowIso } from './util.js';
 
 /* Columns safe to show staff/admin. qr_token and request_id are never listed.
@@ -6,7 +8,7 @@ import { dayKey, HttpError, likeContains, nowIso } from './util.js';
 const ORDER_COLS = `o.id, o.order_no, o.student_id, o.hostel_name, o.room_no, o.mobile, o.weight_kg, o.clothes_count, o.service, o.note,
   o.status, o.within_kg, o.extra_kg, o.amount, o.payment_status, o.paid_method, o.paid_ref, o.paid_at, o.received_at, o.day_key,
   o.expected_at, o.ready_at, o.delivered_at, o.returned_count, o.cancel_reason,
-  o.service_id, o.service_name, o.unit, o.rate, o.charge_note, st.kind AS customer_kind,
+  o.service_id, o.service_name, o.unit, o.rate, o.charge_note, st.kind AS customer_kind, o.tag_no, u.photo AS student_photo,
   u.name AS student_name, st.id_card_no, rb.name AS received_by_name, dl.name AS delivered_by_name,
   CASE WHEN o.status IN ('RECEIVED','WASHING') AND o.expected_at < ? THEN 1 ELSE 0 END AS late`;
 const ORDER_FROM = `FROM orders o JOIN users u ON u.id = o.student_id JOIN students st ON st.user_id = o.student_id
@@ -33,8 +35,8 @@ function orderWhere(f: OrderFilters, now: string) {
     const q = f.q.trim();
     const digits = q.replace(/^EJ-?/i, '');
     const like = likeContains(q);
-    where.push(`(o.order_no = ? OR LOWER(st.id_card_no) LIKE LOWER(?) ESCAPE '\\' OR LOWER(u.name) LIKE LOWER(?) ESCAPE '\\' OR o.room_no = ? OR LOWER(o.mobile) LIKE LOWER(?) ESCAPE '\\')`);
-    p.push(`EJ-${digits}`, like, like, q, like);
+    where.push(`(o.order_no = ? OR o.tag_no = ? OR LOWER(st.id_card_no) LIKE LOWER(?) ESCAPE '\\' OR LOWER(u.name) LIKE LOWER(?) ESCAPE '\\' OR o.room_no = ? OR LOWER(o.mobile) LIKE LOWER(?) ESCAPE '\\')`);
+    p.push(`EJ-${digits}`, normaliseCard(q), like, like, q, like);
   }
   return { sql: where.length ? `WHERE ${where.join(' AND ')}` : '', p };
 }
@@ -58,20 +60,53 @@ export async function orderDetail(id: number, opts: { includeQr?: boolean } = {}
 
 export async function findOrderByCode(code: string) {
   const raw = code.trim();
-  if (raw.startsWith('EJ:')) {
-    const row = await db.get<{ id: number }>('SELECT id FROM orders WHERE qr_token = ?', [raw.slice(3)]);
-    if (!row) throw new HttpError(404, 'This QR is not a valid Everjoy slip. Do not hand over clothes.');
+  if (raw.startsWith('EJ2:')) {
+    // Rotating slip QR: right order, right signature, made within the last ~2 minutes (phone clocks drift a little).
+    const m = /^EJ2:(\d{1,10})\.(\d{1,12})\.([A-Za-z0-9_-]{16})$/.exec(raw);
+    const row = m ? await db.get<{ id: number; qr_token: string }>('SELECT id, qr_token FROM orders WHERE id = ?', [Number(m[1])]) : undefined;
+    if (!m || !row) throw new HttpError(404, 'This QR is not a valid Everjoy slip. Do not hand over clothes.');
+    const step = Number(m[2]);
+    const now = Math.floor(Date.now() / 1000 / QR_STEP_SECONDS);
+    const want = Buffer.from(qrSignature(row.qr_token, row.id, step));
+    const got = Buffer.from(m[3]);
+    if (want.length !== got.length || !crypto.timingSafeEqual(want, got)) throw new HttpError(404, 'This QR is not a valid Everjoy slip. Do not hand over clothes.');
+    if (Math.abs(step - now) > 4) throw new HttpError(409, 'This slip QR is from another time: a screenshot, or the phone clock is wrong. Ask the student to open the slip again (with automatic time on), or check their ID card and use the card no.');
     return { id: row.id, via: 'QR' as const };
   }
-  const digits = raw.replace(/^EJ-?/i, '').replace(/\D/g, '');
-  const row = digits ? await db.get<{ id: number }>('SELECT id FROM orders WHERE order_no = ?', [`EJ-${digits}`]) : undefined;
-  if (!row) throw new HttpError(404, `No order found for “${raw}”.`);
-  return { id: row.id, via: 'NUMBER' as const };
+  if (raw.startsWith('EJ:')) {
+    // The old fixed QR could be screenshotted and shared, so it is no longer accepted.
+    throw new HttpError(409, 'This is an old-style slip QR. Ask the student to update the app or reload the website and open the slip again, or check their ID card and use the card no.');
+  }
+  const openCard = async (card: string) => db.get<{ id: number; order_no: string }>(`SELECT id, order_no FROM orders WHERE tag_no = ? AND status IN ('RECEIVED','WASHING','READY')`, [card]);
+  const byOrderNo = async (digits: string) => db.get<{ id: number }>('SELECT id FROM orders WHERE order_no = ?', [`EJ-${digits}`]);
+  // "EJ-1042" / "EJ1042" is always an order no. (card letters can't be EJ).
+  const ej = /^EJ-?(\d{1,10})$/i.exec(raw.replace(/\s/g, ''));
+  if (ej) {
+    const row = await byOrderNo(ej[1]);
+    if (!row) throw new HttpError(404, `No order found for “${raw}”.`);
+    return { id: row.id, via: 'NUMBER' as const };
+  }
+  const card = normaliseCard(raw);
+  // Letters then numbers: a basket card (A1002) on an order that hasn't been collected yet.
+  if (/^[A-Z]{1,3}\d{1,6}$/.test(card)) {
+    const row = await openCard(card);
+    if (!row) throw new HttpError(404, `No basket is waiting on card ${card}.`);
+    return { id: row.id, via: 'CARD' as const };
+  }
+  // Only digits: could be a card without letters or an order no.
+  if (/^\d{1,10}$/.test(card)) {
+    const [c, o] = await Promise.all([card.length <= 6 ? openCard(card) : undefined, byOrderNo(card)]);
+    if (c && o && c.id !== o.id) throw new HttpError(409, `Card ${card} is on ${c.order_no}, and there is also an order EJ-${card}. Type EJ-${card} for the order, or check the card.`);
+    if (c) return { id: c.id, via: 'CARD' as const };
+    if (o) return { id: o.id, via: 'NUMBER' as const };
+  }
+  throw new HttpError(404, `No open basket card or order found for “${raw}”.`);
 }
 
 const STUDENT_COLS = `u.id, u.name, u.mobile, u.login_id, u.active, u.created_at, u.must_change_password,
   st.id_card_no, st.hostel_id, h.name AS hostel_name, st.room_no, st.status, st.review_note, st.reviewed_at, rv.name AS reviewed_by_name,
-  st.kind, st.valid_until, st.claimable, st.pending_hostel_id, ph.name AS pending_hostel_name, st.pending_room_no, st.change_requested_at`;
+  st.kind, st.valid_until, st.valid_from, st.claimable, st.pending_hostel_id, ph.name AS pending_hostel_name, st.pending_room_no, st.change_requested_at,
+  u.photo, st.email, st.email_verified_at`;
 const STUDENT_FROM = `FROM users u JOIN students st ON st.user_id = u.id JOIN hostels h ON h.id = st.hostel_id LEFT JOIN users rv ON rv.id = st.reviewed_by
   LEFT JOIN hostels ph ON ph.id = st.pending_hostel_id`;
 
@@ -82,14 +117,15 @@ export async function studentProfile(id: number) {
   return s;
 }
 
-export async function listStudents(f: { q?: string; status?: string; hostelId?: number; plan?: 'EXPIRED' | 'VALID' | 'WALKIN' | ''; limit?: number; offset?: number }) {
+export async function listStudents(f: { q?: string; status?: string; hostelId?: number; plan?: 'EXPIRED' | 'VALID' | 'UPCOMING' | 'WALKIN' | ''; limit?: number; offset?: number }) {
   const where: string[] = [];
   const p: unknown[] = [];
   const month = dayKey().slice(0, 7);
   if (f.status) { where.push('st.status = ?'); p.push(f.status); }
   if (f.plan === 'WALKIN') where.push("st.kind = 'WALKIN'");
   else if (f.plan === 'EXPIRED') { where.push("st.kind = 'HOSTELER' AND st.valid_until IS NOT NULL AND st.valid_until < ?"); p.push(dayKey()); }
-  else if (f.plan === 'VALID') { where.push("st.kind = 'HOSTELER' AND (st.valid_until IS NULL OR st.valid_until >= ?)"); p.push(dayKey()); }
+  else if (f.plan === 'VALID') { where.push("st.kind = 'HOSTELER' AND (st.valid_from IS NULL OR st.valid_from <= ?) AND (st.valid_until IS NULL OR st.valid_until >= ?)"); p.push(dayKey(), dayKey()); }
+  else if (f.plan === 'UPCOMING') { where.push("st.kind = 'HOSTELER' AND st.valid_from IS NOT NULL AND st.valid_from > ?"); p.push(dayKey()); }
   if (f.hostelId) { where.push('st.hostel_id = ?'); p.push(f.hostelId); }
   if (f.q) {
     const q = f.q.trim();

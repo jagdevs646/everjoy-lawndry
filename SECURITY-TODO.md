@@ -37,6 +37,20 @@ The auditors disagreed on whether the demo seed ever ran on the live database. T
 - [ ] Sign in as `ADMIN` and use **Change password** (bottom of the admin menu). After that, the password in the logs no longer works.
 - [ ] Optional: in Render → Environment, add `ADMIN_PASSWORD` as a secret value for any future fresh database, so no password is ever printed to the logs.
 
+## Email codes (Brevo): needed before students can get sign-in codes
+
+The app emails students a 6-digit code from their university email. Their first time on a new phone or browser, imported students setting up their account, and new registrations all get one. Until email is set up on Render, the live server **keeps email codes off**: students sign in with only a password, and imported students use the office claim code. The admin office shows the status under **Rules & pricing → Student sign-in**.
+
+- [ ] Create a free account at [brevo.com](https://www.brevo.com) (300 emails/day free).
+- [ ] Brevo → **Senders, Domains & Dedicated IPs → Senders** → add and verify the address codes will come from (for example `laundry@youruniversity.edu`, or a Gmail address you own). Ask the university IT team to also authenticate the domain in Brevo (**Domains**), so the codes don't land in spam.
+- [ ] Brevo → **SMTP & API → API keys** → create a key. Copy it once.
+- [ ] Render → `everjoy-lawndry` → **Environment** → add these, then **Save, rebuild and deploy**:
+  - `BREVO_API_KEY` = the key (mark it as secret)
+  - `MAIL_FROM` = the verified sender address
+  - `MAIL_FROM_NAME` = `Everjoy Lawndry` (optional)
+- [ ] Admin office → **Rules & pricing → Student sign-in**: check it says "Email is set up", and fill in the **university email domain** (e.g. `university.edu.in`), so codes can only be sent to university addresses and nobody can use the form to send emails to random people.
+- [ ] Watch the free limit: 300 emails per day. During admission week, imports and new phones can exceed that. Brevo's paid plan removes the limit; codes that can't be sent show "Could not send the email code right now".
+
 ## 4. Optional hardening (Render and Neon)
 
 These are not open holes, but they reduce the damage if a dashboard account or the database address leaks.

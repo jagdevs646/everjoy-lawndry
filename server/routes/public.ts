@@ -1,9 +1,10 @@
 import crypto from 'node:crypto';
-import { Router } from 'express';
+import { Request, Response, Router } from 'express';
 import bcrypt from 'bcryptjs';
 import { z } from 'zod';
 import { db, insertId, logActivity } from '../db.js';
-import { AuthedRequest, clearLimit, clearSessionCookie, hit, limited, loadUser, overLimit, startSession, unhit } from '../auth.js';
+import { AuthedRequest, clearLimit, clearSessionCookie, hit, isTrustedDevice, limited, loadUser, overLimit, startSession, trustDevice, unhit } from '../auth.js';
+import { checkStudentEmail, resendChallenge, startChallenge, studentOtpOn, useChallenge } from '../otp.js';
 import { getSettings } from '../rules.js';
 import { studentProfile } from '../queries.js';
 import { HttpError, handle, nowIso, parse, zText } from '../util.js';
@@ -33,6 +34,9 @@ router.get('/public/info', handle(async (_req, res) => {
     hostels: await db.all('SELECT id, name FROM hostels WHERE active = 1 ORDER BY name'),
     max_kg_per_order: s.max_kg_per_order,
     counter_hours: s.counter_hours,
+    // Registration asks for the university email when sign-in codes are on.
+    email_codes: await studentOtpOn(),
+    email_domain: s.student_email_domain,
   });
 }));
 
@@ -47,26 +51,42 @@ function claimCodeMatches(code: string, hash: string) {
   return a.length === b.length && crypto.timingSafeEqual(a, b);
 }
 
+/** Start a session after sign-in or a confirmed code. Students who typed a code also get this device trusted. */
+async function signedIn(req: Request, res: Response, userId: number, tokenVersion: number, opts: { trust?: boolean; status?: number; extra?: object } = {}) {
+  const token = startSession(req, res, userId, tokenVersion);
+  const deviceToken = opts.trust ? trustDevice(req, res, userId, tokenVersion) : undefined;
+  res.status(opts.status ?? 200).json({ user: await loadUser(userId), token, ...(deviceToken ? { deviceToken } : {}), ...(opts.extra ?? {}) });
+}
+
+/**
+ * Limit how often codes are emailed from one network (the per-inbox limit and daily cap live in otp.ts).
+ * A whole campus may share one Wi-Fi address, so sign-in codes get a generous limit; registration codes,
+ * which can be sent to any address typed in, get a tighter one.
+ */
+function codeSendLimit(req: Request, kind: 'login' | 'signup') {
+  const key = `otp-${kind}-ip:${ip(req)}`;
+  if (overLimit(key, kind === 'login' ? 200 : 120)) throw new HttpError(429, 'Too many codes asked for from this network. Wait 15 minutes, or ask at the counter.');
+  hit(key, 15 * 60_000);
+}
+
 router.post('/auth/login', handle(async (req, res) => {
   const body = parse(z.object({ loginId: z.string().trim().min(1, 'Enter your ID card no. or username').max(64, 'That ID looks too long'), password: z.string().min(1, 'Enter your password').max(128, 'That password is too long') }), req.body);
   const loginId = normaliseLogin(body.loginId);
   const key = `login:${ip(req)}:${loginId}`;
   const ipKey = `login-ip:${ip(req)}`;              // one network guessing across many accounts (password spraying)
   const accountKey = `login-account:${loginId}`;   // per account, whatever the IP, so spoofed or rotating IPs can't guess forever
-  // Only wrong passwords count, so someone typing the right password is never blocked by others' failures from elsewhere
-  // for long: the account limit is high and short, the per-device limit is the tight one.
   if (overLimit(key, 8) || overLimit(ipKey, 40) || overLimit(accountKey, 25)) throw new HttpError(429, 'Too many attempts. Wait 15 minutes, or ask the counter to reset your password.');
   // Count the attempt now (before the slow password check), so a burst of parallel requests can't all slip
   // under the limit. A correct password takes its count back below.
   const window = 15 * 60_000;
   hit(key, window); hit(ipKey, window); hit(accountKey, window);
-  const u = await db.get<{ id: number; password_hash: string; active: number; token_version: number; claimable: number | null; password_expires_at: string | null }>(
-    'SELECT u.id, u.password_hash, u.active, u.token_version, u.password_expires_at, st.claimable FROM users u LEFT JOIN students st ON st.user_id = u.id WHERE u.login_id = ?', [loginId]);
+  const u = await db.get<{ id: number; role: string; password_hash: string; active: number; token_version: number; claimable: number | null; password_expires_at: string | null; email: string | null }>(
+    'SELECT u.id, u.role, u.password_hash, u.active, u.token_version, u.password_expires_at, st.claimable, st.email FROM users u LEFT JOIN students st ON st.user_id = u.id WHERE u.login_id = ?', [loginId]);
   // Always run bcrypt, even for unknown IDs, so the answer time doesn't reveal which IDs exist.
   const ok = await bcrypt.compare(body.password, u?.password_hash ?? DUMMY_HASH);
   if (!u || !ok) {
     throw new HttpError(401, u?.claimable
-      ? 'Your account was added by the laundry office. Tap "Register with your ID card" and enter your ID card no., mobile number and the claim code from the office.'
+      ? 'Your account was added by the laundry office. Tap "Register with your ID card" to set it up.'
       : 'Wrong ID / username or password.');
   }
   unhit(ipKey); unhit(accountKey);
@@ -74,9 +94,15 @@ router.post('/auth/login', handle(async (req, res) => {
   if (!u.active) throw new HttpError(403, 'This account is switched off. Please contact the laundry counter.');
   clearLimit(key);
   clearLimit(accountKey);
-  const token = startSession(req, res, u.id, u.token_version);
-  res.json({ user: await loadUser(u.id), token });
+  // A student on a phone or browser that hasn't confirmed a code yet: email a code first.
+  if (u.role === 'STUDENT' && u.email && await studentOtpOn() && !isTrustedDevice(req, u.id, u.token_version)) {
+    codeSendLimit(req, 'login');
+    return res.json(await startChallenge('LOGIN', u.email, u.id, { v: u.token_version }));
+  }
+  await signedIn(req, res, u.id, u.token_version);
 }));
+
+const zEmail = z.string().trim().toLowerCase().max(120).email('Enter your university email address');
 
 router.post('/auth/signup', handle(async (req, res) => {
   // Generous: a whole campus can share one Wi-Fi IP during orientation week. Staff approval is the real gate.
@@ -85,53 +111,126 @@ router.post('/auth/signup', handle(async (req, res) => {
     idCardNo: zIdCard,
     name: zText(2, 80),
     mobile: zMobile,
+    email: z.union([z.literal(''), zEmail]).optional().default(''),
     hostelId: z.coerce.number().int().positive('Choose your hostel').max(2147483647),
     roomNo: zRoom,
     password: zPassword(6),
     claimCode: z.string().trim().max(40).optional().default(''),
   }), req.body);
-  // Students imported from Excel by the office "claim" their account: same ID card no. and the mobile
-  // number from the sheet. They choose their password; their hostel and room stay as imported.
-  const imported = await db.get<{ user_id: number; mobile: string | null; token_version: number; claim_hash: string | null; claim_expires_at: string | null }>(
-    'SELECT st.user_id, u.mobile, u.token_version, st.claim_hash, st.claim_expires_at FROM students st JOIN users u ON u.id = st.user_id WHERE st.id_card_no = ? AND st.claimable = 1', [b.idCardNo]);
+  const otp = await studentOtpOn();
+
+  // Students imported from Excel by the office "claim" their account. With a university email on file
+  // they confirm a code sent there; otherwise they need the one-time claim code the office handed out.
+  const imported = await db.get<{ user_id: number; mobile: string | null; token_version: number; claim_hash: string | null; claim_expires_at: string | null; email: string | null }>(
+    'SELECT st.user_id, u.mobile, u.token_version, st.claim_hash, st.claim_expires_at, st.email FROM students st JOIN users u ON u.id = st.user_id WHERE st.id_card_no = ? AND st.claimable = 1', [b.idCardNo]);
   if (imported) {
-    // ID card no. and mobile are not secret (classmates know both), so the office's one-time claim code is required too.
     const claimKey = `claim:${b.idCardNo}`;
-    if (overLimit(claimKey, 8)) throw new HttpError(429, 'Too many tries. Wait an hour, or ask at the counter.');
+    if (overLimit(claimKey, 6)) throw new HttpError(429, 'Too many tries. Wait an hour, or ask at the counter.');
+    hit(claimKey, 60 * 60_000);   // every attempt counts, right or wrong
+    // With an email on file and codes on, the emailed code is used (unless the student typed the office's claim code).
+    if (imported.email && otp && !b.claimCode) {
+      if (imported.mobile !== b.mobile) throw new HttpError(409, 'This ID card no. was added by the laundry office with a different mobile number. Check it, or ask at the counter.', { code: 'CLAIM_MOBILE' });
+      codeSendLimit(req, 'login');
+      return res.status(202).json(await startChallenge('CLAIM', imported.email, imported.user_id, { passwordHash: await bcrypt.hash(b.password, 10), v: imported.token_version }));
+    }
+    if (!imported.claim_hash) {
+      throw new HttpError(409, 'Email codes are off right now and the office has no claim code for you. Ask at the counter to set up your account.', { code: 'CLAIM_COUNTER' });
+    }
     const codeOk = !!imported.claim_hash && !!b.claimCode && claimCodeMatches(b.claimCode, imported.claim_hash)
       && (!imported.claim_expires_at || imported.claim_expires_at >= nowIso());
     if (!codeOk || imported.mobile !== b.mobile) {
-      hit(claimKey, 60 * 60_000);
       throw new HttpError(409, 'This ID card no. was added by the laundry office. Enter your mobile number and the claim code they gave you, or ask at the counter.', { code: 'CLAIM_CODE' });
     }
-    await db.tx(async () => {
-      await db.lockRow('users', imported.user_id);
-      await db.run('UPDATE users SET password_hash = ?, password_expires_at = NULL, token_version = token_version + 1 WHERE id = ?', [await bcrypt.hash(b.password, 10), imported.user_id]);
-      await db.run('UPDATE students SET claimable = 0, claim_hash = NULL, claim_expires_at = NULL WHERE user_id = ?', [imported.user_id]);
-      await logActivity(imported.user_id, 'STUDENT_CLAIMED', 'student', b.idCardNo, 'Set password for an imported account');
-    });
-    const token = startSession(req, res, imported.user_id, imported.token_version + 1);
-    return res.status(200).json({ user: await loadUser(imported.user_id), token, claimed: true });
+    const version = await claimAccount(imported.user_id, await bcrypt.hash(b.password, 10), b.idCardNo, false);
+    return signedIn(req, res, imported.user_id, version, { extra: { claimed: true } });
   }
+
   if (!await db.get('SELECT 1 AS ok FROM hostels WHERE id = ? AND active = 1', [b.hostelId])) throw new HttpError(400, 'Choose your hostel.');
   if (await db.get('SELECT 1 AS ok FROM users WHERE login_id = ?', [b.idCardNo])) throw new HttpError(409, ALREADY_REGISTERED);
+  if (otp && !b.email) throw new HttpError(400, 'Enter your university email. Your sign-in codes are sent there.');
+  if (b.email) {
+    await checkStudentEmail(b.email);
+    if (await db.get('SELECT 1 AS ok FROM students WHERE lower(email) = ?', [b.email])) throw new HttpError(409, 'This email is already used by another account. Ask at the counter if it is yours.');
+  }
   const passwordHash = await bcrypt.hash(b.password, 10);
-  let id: number;
+  const details = { idCardNo: b.idCardNo, name: b.name, mobile: b.mobile, email: b.email, hostelId: b.hostelId, roomNo: b.roomNo, passwordHash };
+  if (otp) {
+    // The account is created only after the student types the code from that email.
+    codeSendLimit(req, 'signup');
+    return res.status(202).json(await startChallenge('SIGNUP', b.email, null, details));
+  }
+  const id = await createStudent(details, false);
+  await signedIn(req, res, id, 0, { status: 201 });
+}));
+
+type NewStudent = { idCardNo: string; name: string; mobile: string; email: string; hostelId: number; roomNo: string; passwordHash: string };
+async function createStudent(d: NewStudent, emailVerified: boolean) {
+  if (await db.get('SELECT 1 AS ok FROM users WHERE login_id = ?', [d.idCardNo])) throw new HttpError(409, ALREADY_REGISTERED);
   try {
-    id = await db.tx(async () => {
+    return await db.tx(async () => {
       const userId = await insertId(`INSERT INTO users (role, login_id, name, mobile, password_hash, created_at) VALUES ('STUDENT',?,?,?,?,?)`,
-        [b.idCardNo, b.name, b.mobile, passwordHash, nowIso()]);
-      await db.run('INSERT INTO students (user_id, id_card_no, hostel_id, room_no) VALUES (?,?,?,?)', [userId, b.idCardNo, b.hostelId, b.roomNo]);
-      await logActivity(userId, 'STUDENT_SIGNUP', 'student', b.idCardNo, `${b.name} · room ${b.roomNo}`);
+        [d.idCardNo, d.name, d.mobile, d.passwordHash, nowIso()]);
+      await db.run('INSERT INTO students (user_id, id_card_no, hostel_id, room_no, email, email_verified_at) VALUES (?,?,?,?,?,?)',
+        [userId, d.idCardNo, d.hostelId, d.roomNo, d.email || null, emailVerified ? nowIso() : null]);
+      await logActivity(userId, 'STUDENT_SIGNUP', 'student', d.idCardNo, `${d.name} · room ${d.roomNo}`);
       return userId;
     });
   } catch (e) {
-    // Two sign-ups with the same ID card at the same moment: the second one loses at the UNIQUE constraint.
-    if (isUniqueViolation(e)) throw new HttpError(409, ALREADY_REGISTERED);
+    // Two sign-ups with the same ID card (or email) at the same moment: the second one loses at a UNIQUE constraint.
+    if (isUniqueViolation(e)) throw new HttpError(409, 'This ID card no. or email is already registered. Sign in instead, or ask at the counter.');
     throw e;
   }
-  const token = startSession(req, res, id, 0);
-  res.status(201).json({ user: await loadUser(id), token });
+}
+
+/** Set the password of an imported account and open it. Returns the new token version. */
+async function claimAccount(userId: number, passwordHash: string, idCardNo: string, emailVerified: boolean) {
+  return db.tx(async () => {
+    await db.lockRow('users', userId);
+    const st = await db.get<{ claimable: number }>('SELECT claimable FROM students WHERE user_id = ?', [userId]);
+    if (!st?.claimable) throw new HttpError(409, 'This account is already set up. Sign in instead, or ask the counter to reset your password.');
+    await db.run('UPDATE users SET password_hash = ?, password_expires_at = NULL, token_version = token_version + 1 WHERE id = ?', [passwordHash, userId]);
+    await db.run(`UPDATE students SET claimable = 0, claim_hash = NULL, claim_expires_at = NULL${emailVerified ? ', email_verified_at = ?' : ''} WHERE user_id = ?`, emailVerified ? [nowIso(), userId] : [userId]);
+    await logActivity(userId, 'STUDENT_CLAIMED', 'student', idCardNo, emailVerified ? 'Set up with a code from the university email' : 'Set up with the office claim code');
+    return (await db.get<{ token_version: number }>('SELECT token_version FROM users WHERE id = ?', [userId]))!.token_version;
+  });
+}
+
+/** The student typed the code from their email. */
+router.post('/auth/otp', handle(async (req, res) => {
+  const b = parse(z.object({ challenge: z.string().min(10).max(80), code: z.string().trim().min(4).max(12) }), req.body);
+  // Each code allows only 5 tries; this per-network cap only slows mass guessing (campus Wi-Fi is shared, so it is generous).
+  if (limited(`otp-check:${ip(req)}`, 300, 15 * 60_000)) throw new HttpError(429, 'Too many tries. Wait 15 minutes.');
+  const c = await useChallenge(b.challenge, b.code);
+  if (c.purpose === 'SIGNUP') {
+    const id = await createStudent(c.payload as unknown as NewStudent, true);
+    return signedIn(req, res, id, 0, { status: 201, trust: true });
+  }
+  const u = await db.get<{ id: number; active: number; token_version: number; login_id: string }>('SELECT id, active, token_version, login_id FROM users WHERE id = ?', [c.user_id]);
+  if (!u || !u.active) throw new HttpError(403, 'This account is switched off. Please contact the laundry counter.');
+  // A code sent before a password reset, email change or sign-out-everywhere no longer counts.
+  const v = (c.payload as { v?: number } | null)?.v;
+  if (v !== undefined && v !== u.token_version) throw new HttpError(410, 'This code is no longer valid. Start again.');
+  if (c.purpose === 'EMAIL') {
+    const email = String((c.payload as { email: string }).email);
+    if (await db.get('SELECT 1 AS ok FROM students WHERE lower(email) = ? AND user_id != ?', [email, u.id])) throw new HttpError(409, 'This email is already used by another account.');
+    const r = await db.run('UPDATE students SET email = ?, email_verified_at = ? WHERE user_id = ? AND email IS NULL', [email, nowIso(), u.id]);
+    if (r.changes !== 1) throw new HttpError(409, 'An email is already on your account. Ask at the counter to change it.');
+    await logActivity(u.id, 'EMAIL_ADDED', 'student', u.login_id, email);
+    return signedIn(req, res, u.id, u.token_version, { trust: true });
+  }
+  if (c.purpose === 'CLAIM') {
+    const version = await claimAccount(u.id, String((c.payload as { passwordHash: string }).passwordHash), u.login_id, true);
+    return signedIn(req, res, u.id, version, { trust: true, extra: { claimed: true } });
+  }
+  // LOGIN: confirming the code also confirms the email address.
+  await db.run('UPDATE students SET email_verified_at = COALESCE(email_verified_at, ?) WHERE user_id = ?', [nowIso(), u.id]);
+  await signedIn(req, res, u.id, u.token_version, { trust: true });
+}));
+
+router.post('/auth/otp/resend', handle(async (req, res) => {
+  const b = parse(z.object({ challenge: z.string().min(10).max(80) }), req.body);
+  if (limited(`otp-resend:${ip(req)}`, 20, 15 * 60_000)) throw new HttpError(429, 'Too many codes asked for. Wait 15 minutes.');
+  res.json(await resendChallenge(b.challenge));
 }));
 
 /** Sign out. The session token is cancelled on the server too, so a copied token stops working (this signs the account out everywhere). */

@@ -1,9 +1,9 @@
 import { FormEvent, ReactNode, useEffect, useRef, useState } from 'react';
 import { Announcement, api, ApiError, blobUrl, download, Hostel, Order, Service, Student, User } from './api';
 import { ChangePassword } from './auth';
-import { ago, kg, plural, rupees, shiftDay, toast, todayKey, useAction, useFormAction, useLoad, useRoute, useScrollTop, when } from './lib';
-import { ComplaintsBoard, OrderSheet, StudentSheet } from './ops';
-import { Brand, Button, Empty, ErrorNote, Field, Icon, IconButton, IconName, invalidatePaymentInfo, Loading, PayPill, Segmented, Sheet, StatusPill, Switch } from './ui';
+import { ago, kg, planPeriod, plural, rupees, shiftDay, toast, todayKey, useAction, useFormAction, useLoad, useRoute, useScrollTop, when } from './lib';
+import { ComplaintsBoard, OrderSheet, SemesterChips, StudentSheet } from './ops';
+import { Avatar, Brand, Button, Empty, ErrorNote, Field, Icon, IconButton, IconName, invalidatePaymentInfo, Loading, PayPill, Segmented, Sheet, StatusPill, Switch } from './ui';
 
 type Overview = {
   today: { orders: number; kg: number; delivered: number };
@@ -220,6 +220,7 @@ export function actionText(a: string) {
     STAFF_CREATED: 'created staff', STAFF_DEACTIVATED: 'switched off', STAFF_REACTIVATED: 'switched on', STAFF_UPDATED: 'updated staff', ANNOUNCEMENT_POSTED: 'posted notice',
     ANNOUNCEMENT_REMOVED: 'removed notice', COMPLAINT_RAISED: 'raised complaint', COMPLAINT_UPDATED: 'replied to complaint', EXPORTED: 'exported register', BACKUP_DOWNLOADED: 'downloaded backup', DEMO_SEEDED: 'loaded demo data',
     ROOM_CHANGE_REQUESTED: 'asked to change room:', ROOM_CHANGE_APPROVED: 'approved room change for', ROOM_CHANGE_REJECTED: 'turned down room change for', WALKIN_ADDED: 'served walk-in',
+    PHOTO_ADDED: 'added own photo:', PHOTO_SET: 'took photo of', PHOTO_REMOVED: 'removed photo of', EMAIL_ADDED: 'added email:', ORDER_CARD: 'changed basket card of',
     SERVICE_ADDED: 'added service', SERVICE_UPDATED: 'changed service', PLAN_DATES_SET: 'set hostel plan dates', STUDENTS_IMPORTED: 'imported students', STAFF_IMPORTED: 'imported staff', STUDENT_CLAIMED: 'set up imported account',
   } as Record<string, string>)[a] ?? a.toLowerCase().replace(/_/g, ' ');
 }
@@ -265,11 +266,12 @@ function Register({ open }: { open: Openers }) {
           <p className="muted small">{list.data.total} {list.data.total === 1 ? 'order' : 'orders'}{f.from ? ` from ${when(`${f.from}T12:00:00`, 'date')}` : ''}{f.to ? ` to ${when(`${f.to}T12:00:00`, 'date')}` : ''}</p>
           <div className="ledger-wrap">
             <table className="ledger">
-              <thead><tr><th>Order</th><th>Date in</th><th>Student</th><th>Room</th><th>Service</th><th className="num">Clothes</th><th className="num">Kg</th><th>Status</th><th>Payment</th><th>Handed over</th></tr></thead>
+              <thead><tr><th>Order</th><th>Card</th><th>Date in</th><th>Student</th><th>Room</th><th>Service</th><th className="num">Clothes</th><th className="num">Kg</th><th>Status</th><th>Payment</th><th>Handed over</th></tr></thead>
               <tbody>
                 {list.data.rows.map(o => (
                   <tr key={o.id} onClick={() => open.order(o.id)} tabIndex={0} onKeyDown={e => e.key === 'Enter' && open.order(o.id)}>
                     <td className="ord">{o.order_no}</td>
+                    <td>{o.tag_no ? <span className="card-no">{o.tag_no}</span> : <span className="muted">–</span>}</td>
                     <td>{when(o.received_at)}</td>
                     <td><b>{o.student_name}</b><small>{o.id_card_no}</small></td>
                     <td>{o.room_no}<small>{o.hostel_name}</small></td>
@@ -308,7 +310,7 @@ function Students({ open }: { open: Openers }) {
         <input className="grow" value={f.q} onChange={set('q')} placeholder="Search name, ID card, mobile or room" aria-label="Search students" />
         <select value={f.status} onChange={set('status')} aria-label="Account status"><option value="">Everyone</option><option value="PENDING">Waiting for approval</option><option value="ACTIVE">Approved</option><option value="REJECTED">Rejected</option><option value="SUSPENDED">On hold</option></select>
         <select value={f.hostelId} onChange={set('hostelId')} aria-label="Hostel"><option value="">All hostels</option>{hostels.data?.hostels.map(h => <option key={h.id} value={h.id}>{h.name}</option>)}</select>
-        <select value={f.plan} onChange={set('plan')} aria-label="Hostel plan"><option value="">Any plan</option><option value="VALID">Plan valid</option><option value="EXPIRED">Plan ended</option><option value="WALKIN">Walk-ins</option></select>
+        <select value={f.plan} onChange={set('plan')} aria-label="Hostel plan"><option value="">Any plan</option><option value="VALID">Plan valid</option><option value="UPCOMING">Plan not started</option><option value="EXPIRED">Plan ended</option><option value="WALKIN">Walk-ins</option></select>
         <Button icon="clock" onClick={() => setSheet('plan')}>Plan dates</Button>
         <Button tone="primary" icon="plus" onClick={() => setSheet('import')}>Add from Excel</Button>
       </div>
@@ -319,16 +321,18 @@ function Students({ open }: { open: Openers }) {
           <p className="muted small">{plural(list.data.total, 'student')}</p>
           <div className="ledger-wrap">
             <table className="ledger">
-              <thead><tr><th>Name</th><th>ID card no.</th><th>Hostel, room</th><th>Mobile</th><th>Account</th><th>Plan till</th><th className="num">This month</th><th className="num">In progress</th></tr></thead>
+              <thead><tr><th>Name</th><th>ID card no.</th><th>Hostel, room</th><th>Mobile</th><th>Account</th><th>Hostel plan</th><th className="num">This month</th><th className="num">In progress</th></tr></thead>
               <tbody>
                 {list.data.rows.map(s => (
                   <tr key={s.id} onClick={() => open.student(s.id)} tabIndex={0} onKeyDown={e => e.key === 'Enter' && open.student(s.id)}>
-                    <td><b>{s.name}</b><small>Joined {when(s.created_at, 'date')}</small></td>
+                    <td><span className="who-cell"><Avatar name={s.name} photo={s.photo} size={32} /><span><b>{s.name}</b><small>Joined {when(s.created_at, 'date')}</small></span></span></td>
                     <td className="ord">{s.id_card_no}</td>
                     <td>{s.kind === 'WALKIN' ? <span className="muted">Walk-in</span> : <>{s.hostel_name}, {s.room_no}</>}{s.pending_hostel_id ? <small className="bad">Moving to {s.pending_hostel_name} {s.pending_room_no}</small> : null}</td>
                     <td>{s.mobile}</td>
                     <td><span className={`pill acc-${s.status.toLowerCase()}`}>{label[s.status]}</span>{s.claimable ? <small>Not signed in yet</small> : null}</td>
-                    <td>{s.kind === 'WALKIN' ? <span className="muted">–</span> : s.valid_until ? <span className={s.valid_until < today ? 'bad' : ''}>{when(`${s.valid_until}T12:00:00`, 'date')}</span> : <span className="muted">No end</span>}</td>
+                    <td>{s.kind === 'WALKIN' ? <span className="muted">–</span> : s.valid_until || s.valid_from
+                      ? <span className={(s.valid_until && s.valid_until < today) || (s.valid_from && s.valid_from > today) ? 'bad' : ''}>{planPeriod(s.valid_from, s.valid_until)}</span>
+                      : <span className="muted">No dates</span>}</td>
                     <td className="num">{s.month_orders}<small>{kg(s.month_kg)}</small></td>
                     <td className="num">{s.open_orders || <span className="muted">–</span>}</td>
                   </tr>
@@ -545,7 +549,8 @@ const Row = ({ k, v, warn }: { k: string; v: ReactNode; warn?: boolean }) => <di
 type Settings = {
   max_kg_per_order: number; max_active_orders: number; monthly_order_limit: number; monthly_kg_limit: number; allow_paid_extra: boolean;
   extra_rate_per_kg: number; express_enabled: boolean; express_fee: number; regular_turnaround_hours: number; express_turnaround_hours: number;
-  pay_before_pickup: boolean; upi_id: string; upi_name: string; upi_qr_file?: string; semester_end: string; counter_hours: string;
+  pay_before_pickup: boolean; upi_id: string; upi_name: string; upi_qr_file?: string; semester_start: string; semester_end: string; counter_hours: string;
+  student_email_otp: boolean; student_email_domain: string; card_required: boolean; card_series: { prefix: string; from: number; to: number }[];
 };
 
 function Settings() {
@@ -582,10 +587,28 @@ function Settings() {
           {draft.allow_paid_extra && <Field label="Price per extra kg (₹)"><input type="number" min="0" value={draft.extra_rate_per_kg} onChange={num('extra_rate_per_kg')} /></Field>}
         </section>
         <section className="ad-card settings-group">
-          <h2>Hostel plan</h2>
-          <Field label="Current semester ends" hint="Given to students approved from now on. After their date they pay normal prices. Set dates for existing students from Students → Plan dates.">
-            <input type="date" value={draft.semester_end} onChange={e => setDraft({ ...draft, semester_end: e.target.value })} />
+          <h2>Hostel plan (current semester)</h2>
+          <p className="muted small">Given to students approved from now on. Outside their dates they pay normal prices. Set dates for existing students from Students → Plan dates, or per student at the counter.</p>
+          <SemesterChips from={draft.semester_start} until={draft.semester_end} onPick={(from, until) => setDraft({ ...draft, semester_start: from, semester_end: until })} />
+          <div className="field-grid">
+            <Field label="Semester starts"><input type="date" value={draft.semester_start} onChange={e => setDraft({ ...draft, semester_start: e.target.value })} /></Field>
+            <Field label="Semester ends"><input type="date" value={draft.semester_end} onChange={e => setDraft({ ...draft, semester_end: e.target.value })} /></Field>
+          </div>
+        </section>
+        <section className="ad-card settings-group">
+          <h2>Student sign-in</h2>
+          <MailStatus />
+          <Switch checked={draft.student_email_otp} onChange={v => setDraft({ ...draft, student_email_otp: v })} label="Email code on a new phone or browser"
+            hint="Students type a 6-digit code sent to their university email the first time they sign in on a device. New registrations confirm their email the same way." />
+          <Field label="University email domain (optional)" hint="Only addresses ending with this are accepted, e.g. university.edu.in. Recommended: it stops codes being sent to random addresses.">
+            <input value={draft.student_email_domain} onChange={e => setDraft({ ...draft, student_email_domain: e.target.value })} placeholder="university.edu.in" autoCapitalize="none" />
           </Field>
+        </section>
+        <section className="ad-card settings-group">
+          <h2>Basket cards</h2>
+          <p className="muted small">The numbered cards hung on each laundry basket (A1002, A628…). Staff type the card no. at drop-off and find the basket by it at pickup. A card can be on only one basket until it is collected, then it is free again.</p>
+          <Switch checked={draft.card_required} onChange={v => setDraft({ ...draft, card_required: v })} label="Card no. needed for every order" />
+          <CardSeries series={draft.card_series} onChange={card_series => setDraft({ ...draft, card_series })} />
         </section>
         <section className="ad-card settings-group">
           <h2>Express</h2>
@@ -877,21 +900,26 @@ function ImportSheet({ type, close, onDone }: { type: 'students' | 'staff'; clos
 /* --------------------------------------------------------- hostel plan dates */
 
 function PlanDates({ close, onDone, hostels }: { close: () => void; onDone: () => void; hostels: Hostel[] }) {
-  const [f, setF] = useState({ scope: 'ALL' as 'ALL' | 'HOSTEL', hostelId: '', validUntil: '' });
+  const [f, setF] = useState({ scope: 'ALL' as 'ALL' | 'HOSTEL', hostelId: '', validFrom: '', validUntil: '' });
   const { busy, error, submit } = useFormAction();
   const save = async (e: FormEvent) => {
     e.preventDefault();
-    const body = { scope: f.scope, validUntil: f.validUntil, ...(f.scope === 'HOSTEL' ? { hostelId: Number(f.hostelId) } : {}) };
+    const body = { scope: f.scope, validFrom: f.validFrom, validUntil: f.validUntil, ...(f.scope === 'HOSTEL' ? { hostelId: Number(f.hostelId) } : {}) };
     const r = await submit(() => api<{ changed: number }>('/admin/students/validity', { body }));
     if (r) { toast(`Plan date set for ${plural(r.changed, 'student')}`); onDone(); }
   };
   return (
     <Sheet title="Set hostel plan dates" onClose={close} size="sm">
       <form className="stack" onSubmit={save}>
-        <p className="muted small">For a new semester. After this date students pay normal prices until you set a new date. To give one student a different date, open the student and edit.</p>
+        <p className="muted small">For a new semester (January–June or July–December). Outside these dates students pay normal prices. To give one student different dates, open the student and edit.</p>
         <Segmented label="Who" value={f.scope} onChange={scope => setF({ ...f, scope })} options={[{ value: 'ALL', label: 'All approved students' }, { value: 'HOSTEL', label: 'One hostel' }]} />
         {f.scope === 'HOSTEL' && <Field label="Hostel"><select value={f.hostelId} onChange={e => setF({ ...f, hostelId: e.target.value })}><option value="">Choose</option>{hostels.map(h => <option key={h.id} value={h.id}>{h.name}</option>)}</select></Field>}
-        <Field label="Plan valid till" hint="Leave empty to remove the end date"><input type="date" value={f.validUntil} onChange={e => setF({ ...f, validUntil: e.target.value })} /></Field>
+        <SemesterChips from={f.validFrom} until={f.validUntil} onPick={(validFrom, validUntil) => setF({ ...f, validFrom, validUntil })} />
+        <div className="field-row">
+          <Field label="From"><input type="date" value={f.validFrom} onChange={e => setF({ ...f, validFrom: e.target.value })} /></Field>
+          <Field label="Till"><input type="date" value={f.validUntil} onChange={e => setF({ ...f, validUntil: e.target.value })} /></Field>
+        </div>
+        <p className="muted small">Leave both empty to remove the dates.</p>
         {error && <ErrorNote error={error} />}
         <Button tone="primary" block busy={busy} disabled={f.scope === 'HOSTEL' && !f.hostelId}>Save plan date</Button>
       </form>
@@ -952,5 +980,44 @@ function StaffWork({ id, name, close }: { id: number; name: string; close: () =>
         )}
       </div>
     </Sheet>
+  );
+}
+
+/** Whether this server can send email (Render: BREVO_API_KEY and MAIL_FROM). */
+function MailStatus() {
+  const m = useLoad(() => api<{ configured: boolean; from: string | null; local: boolean }>('/admin/mail-status'), []);
+  if (!m.data) return null;
+  if (m.data.configured) return <p className="mail-ok"><Icon name="check" size={16} />Email is set up. Codes are sent from {m.data.from}.</p>;
+  if (m.data.local) return <p className="muted small">Test server: codes are printed in the server window instead of emailed.</p>;
+  return <p className="mail-off"><Icon name="alert" size={16} />Email is not set up on the server yet, so email codes are off. See SECURITY-TODO.md → “Email codes (Brevo)”.</p>;
+}
+
+type Series = { prefix: string; from: number; to: number };
+/** The admin's card series, e.g. A 1–3000 and B 1–500. */
+function CardSeries({ series, onChange }: { series: Series[]; onChange: (s: Series[]) => void }) {
+  const [n, setN] = useState({ prefix: 'A', from: '1', to: '3000' });
+  const add = () => {
+    const from = Number(n.from), to = Number(n.to);
+    if (!Number.isInteger(from) || !Number.isInteger(to) || from > to) { toast('“From” must be a number not bigger than “To”.', 'bad'); return; }
+    onChange([...series, { prefix: n.prefix.trim().toUpperCase(), from, to }]);
+  };
+  return (
+    <div className="stack">
+      {series.length ? (
+        <ul className="series-list">
+          {series.map((x, i) => (
+            <li key={i}><b className="card-no">{x.prefix}{x.from}</b> to <b className="card-no">{x.prefix}{x.to}</b>
+              <Button size="sm" tone="plain" icon="x" type="button" aria-label={`Remove ${x.prefix} series`} onClick={() => onChange(series.filter((_, j) => j !== i))} /></li>
+          ))}
+        </ul>
+      ) : <p className="muted small">No series set: staff can type any card no. (letters then numbers).</p>}
+      <div className="series-add">
+        <Field label="Letters"><input value={n.prefix} onChange={e => setN({ ...n, prefix: e.target.value.toUpperCase().replace(/[^A-Z]/g, '').slice(0, 3) })} placeholder="A" /></Field>
+        <Field label="From"><input inputMode="numeric" value={n.from} onChange={e => setN({ ...n, from: e.target.value.replace(/\D/g, '') })} /></Field>
+        <Field label="To"><input inputMode="numeric" value={n.to} onChange={e => setN({ ...n, to: e.target.value.replace(/\D/g, '') })} /></Field>
+        <Button type="button" icon="plus" onClick={add}>Add series</Button>
+      </div>
+      <p className="muted small">Remember to press “Save rules” below.</p>
+    </div>
   );
 }

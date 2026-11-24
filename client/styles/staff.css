@@ -196,3 +196,16 @@ html[data-theme='staff'] h1 { font-stretch: 85%; font-weight: 800; letter-spacin
 /* Walk-in: only after a search finds nobody */
 .walkin-link { justify-self: start; font-size: .875rem; }
 .walkin { padding: 14px; border-radius: var(--radius); background: var(--surface); }
+
+.card-box { display: grid; gap: 6px; padding: 14px; border-radius: var(--radius); background: var(--surface); border: 2px solid transparent; }
+.card-box > span { font-weight: 700; color: var(--ink-2); }
+.card-box input { font-size: 1.5rem !important; font-weight: 800; letter-spacing: .06em; text-transform: uppercase; }
+.card-box small { color: var(--muted); }
+.card-box.need { border-color: var(--accent); }
+.pick-no.card-no { font-size: 2.6rem; padding: 0 12px; color: var(--accent-text); }
+.pick-sub { color: var(--muted); font-weight: 700; }
+.or-no .card-no { font-size: 1.1rem; padding: 0 6px; color: var(--accent-text); }
+.or-no small { display: block; font-size: .75rem; color: var(--muted); font-weight: 600; }
+.verify .avatar-img { border-radius: 14px; }
+.find-input.upper { text-transform: uppercase; }
+.find-input.upper::placeholder { text-transform: none; }

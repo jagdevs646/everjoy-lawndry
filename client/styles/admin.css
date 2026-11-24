@@ -191,3 +191,12 @@ html[data-theme='admin'] h1, html[data-theme='admin'] h2 { letter-spacing: -.01e
 .mini-date { display: grid; gap: 4px; font-size: .85rem; color: var(--muted); }
 .mini-table caption { text-align: left; color: var(--muted); font-size: .85rem; padding-bottom: 4px; }
 .ledger td small.bad, .ledger td .bad { color: var(--bad); }
+
+.who-cell { display: flex; align-items: center; gap: 10px; }
+.series-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.series-list li { display: flex; align-items: center; gap: 8px; }
+.series-add { display: grid; grid-template-columns: 90px 1fr 1fr auto; gap: 8px; align-items: end; }
+@media (max-width: 560px) { .series-add { grid-template-columns: 1fr 1fr; } }
+.mail-ok { display: flex; gap: 6px; align-items: center; color: var(--good); font-weight: 600; }
+.mail-off { display: flex; gap: 6px; align-items: flex-start; color: var(--warn); font-weight: 600; }
+.ledger .card-no { font-size: .85rem; padding: 0 6px; }

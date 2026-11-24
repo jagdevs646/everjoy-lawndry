@@ -1,4 +1,4 @@
-import { apiUrl, authHeaders, bumpSession, clearExportsFolder, EXPORTS_DIR, getToken, isApp, serverAddress, sessionGeneration, setToken } from './platform';
+import { apiUrl, authHeaders, bumpSession, clearExportsFolder, EXPORTS_DIR, getToken, isApp, serverAddress, sessionGeneration, setDeviceToken, setToken } from './platform';
 
 export type Role = 'ADMIN' | 'STAFF' | 'STUDENT';
 export type User = { id: number; role: Role; name: string; login_id: string; must_change_password: boolean; student_status?: string };
@@ -8,21 +8,26 @@ export type Order = {
   weight_kg: number; clothes_count: number; service: 'REGULAR' | 'EXPRESS'; note?: string | null; status: OrderStatus;
   within_kg: number; extra_kg: number; amount: number; payment_status: 'NONE' | 'DUE' | 'PAID' | 'WAIVED'; paid_method?: string | null; paid_ref?: string | null; paid_at?: string | null;
   received_at: string; expected_at: string; ready_at?: string | null; delivered_at?: string | null; returned_count?: number | null; cancel_reason?: string | null;
-  received_by_name?: string; delivered_by_name?: string | null; late?: number; qr_token?: string;
+  received_by_name?: string; delivered_by_name?: string | null; late?: number; qr_key?: string | null;
   events?: { type: string; note: string | null; at: string; by_name: string | null; by_role: Role | null }[];
-  via?: 'QR' | 'NUMBER';
+  via?: 'QR' | 'NUMBER' | 'CARD';
   service_id?: number | null; service_name?: string | null; unit?: 'KG' | 'PIECE' | null; rate?: number | null; charge_note?: string | null; customer_kind?: 'HOSTELER' | 'WALKIN';
+  tag_no?: string | null; student_photo?: string | null;
 };
 export type Student = {
   id: number; name: string; mobile: string; login_id: string; active: number; created_at: string; id_card_no: string; hostel_id: number; hostel_name: string;
   room_no: string; status: 'PENDING' | 'ACTIVE' | 'REJECTED' | 'SUSPENDED'; review_note?: string | null; reviewed_at?: string | null; reviewed_by_name?: string | null;
   month_orders?: number; month_kg?: number; open_orders?: number;
-  kind?: 'HOSTELER' | 'WALKIN'; valid_until?: string | null; claimable?: number;
+  kind?: 'HOSTELER' | 'WALKIN'; valid_until?: string | null; valid_from?: string | null; claimable?: number;
+  photo?: string | null; email?: string | null; email_verified_at?: string | null;
   pending_hostel_id?: number | null; pending_hostel_name?: string | null; pending_room_no?: string | null; change_requested_at?: string | null;
 };
 export type Plan = { hosteler: boolean; label: string };
 export type Service = { id: number; name: string; unit: 'KG' | 'PIECE'; rate: number; hosteler_rate: number; uses_allowance: number; active: number; sort: number };
 export type PaymentInfo = { upi_id: string; upi_name: string; has_upi_qr: boolean };
+/** The server asks for the code it emailed before signing in. */
+export type OtpStart = { otp_required: true; challenge: string; email_hint: string; purpose: 'LOGIN' | 'CLAIM' | 'SIGNUP' };
+export type SignedIn = { user: User; claimed?: boolean };
 export type Usage = { month: string; orders: number; kg: number; active: number; order_limit: number; kg_limit: number; kg_left: number | null; orders_left: number | null };
 export type Hostel = { id: number; name: string; active?: number; students?: number };
 export type Announcement = { id: number; title: string; body: string; created_at: string; expires_on: string | null; hostel_id: number | null; hostel_name: string | null; created_by_name?: string; expired?: number };
@@ -69,10 +74,12 @@ export async function api<T = unknown>(path: string, init: { method?: string; bo
   const type = res.headers.get('content-type') || '';
   if (!type.includes('application/json')) throw new ApiError(res.status, 'The laundry server sent an unexpected reply. Check the server address.');
   const data = await res.json();
-  // A successful sign-in, sign-up or password change starts a new session (new cookie or token).
-  if (/^\/auth\/(login|signup|password)$/.test(path)) {
-    if (isApp && data && typeof data.token === 'string') await setToken(data.token);
+  // A successful sign-in, sign-up, email code or password change starts a new session (new cookie or token).
+  // "Check your email for a code" is not a session yet.
+  if (/^\/auth\/(login|signup|password|otp)$/.test(path) && data && !data.otp_required) {
+    if (isApp && typeof data.token === 'string') await setToken(data.token);
     else bumpSession();
+    if (isApp && typeof data.deviceToken === 'string') await setDeviceToken(data.deviceToken);
   }
   return data as T;
 }

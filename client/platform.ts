@@ -31,6 +31,9 @@ let token: string | null = null;
 let generation = 0;
 
 const TOKEN_KEY = 'ej-token';
+/** App only: proof this phone already confirmed an email code (the website keeps it in an httpOnly cookie). */
+const DEVICE_KEY = 'ej-device';
+let deviceToken: string | null = null;
 
 /** Load the saved server address and token before the first render. No-op on the website. */
 export async function initPlatform() {
@@ -40,6 +43,7 @@ export async function initPlatform() {
   else if (saved) await Preferences.remove({ key: 'ej-server' });   // a production build drops any old override
   // get() pairs with set() (which stores JSON); the low-level getItem() would return the JSON-quoted text.
   try { const v = await SecureStorage.get(TOKEN_KEY, false, false); token = typeof v === 'string' && v ? v : null; } catch { token = null; }
+  try { const d = await SecureStorage.get(DEVICE_KEY, false, false); deviceToken = typeof d === 'string' && d ? d : null; } catch { deviceToken = null; }
   // Early test builds kept the token in plain Preferences: move it into secure storage once.
   const legacy = (await Preferences.get({ key: TOKEN_KEY })).value;
   if (legacy) {
@@ -110,8 +114,19 @@ export function authHeaders(): Record<string, string> {
   if (isApp) {
     h['x-ej-client'] = 'app';
     if (token) h.Authorization = `Bearer ${token}`;
+    if (deviceToken) h['x-ej-device'] = deviceToken;
   }
   return h;
+}
+
+/** Remember that this phone confirmed an email code (app only). */
+export async function setDeviceToken(t: string | null) {
+  deviceToken = t;
+  if (!isApp) return;
+  try {
+    if (t) await SecureStorage.set(DEVICE_KEY, t, false, false, KeychainAccess.whenUnlockedThisDeviceOnly);
+    else await SecureStorage.remove(DEVICE_KEY, false);
+  } catch { /* the code is simply asked again next time */ }
 }
 
 /** Check a server address answers like an Everjoy server before saving it. */

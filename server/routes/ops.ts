@@ -4,7 +4,9 @@ import bcrypt from 'bcryptjs';
 import { z } from 'zod';
 import { db, insertId, logActivity, notify } from '../db.js';
 import { AuthedRequest, requireRole } from '../auth.js';
-import { cancelOrder, correctOrder, createOrder, deliverOrder, getOrderRow, getSettings, listServices, monthUsage, orderInput, planStatus, quote, recordPayment, setStatus } from '../rules.js';
+import { addEvent, cancelOrder, cardInUse, checkCard, correctOrder, createOrder, deliverOrder, getOrderRow, getSettings, listServices, monthUsage, orderInput, planStatus, quote, recordPayment, setStatus } from '../rules.js';
+import { photoUpload, savePhoto } from '../files.js';
+import { checkStudentEmail } from '../otp.js';
 import { announcementsFor, complaintDetail, findOrderByCode, listComplaints, listOrders, listStudents, orderDetail, studentProfile } from '../queries.js';
 import { dayKey, handle, HttpError, MAX_ID, nowIso, parse, startOfLocalDayIso, zDate, zId, zText } from '../util.js';
 import { normaliseLogin, zIdCard, zMobile, zRoom } from './public.js';
@@ -71,13 +73,14 @@ async function pickSettings() {
     monthly_kg_limit: s.monthly_kg_limit, monthly_order_limit: s.monthly_order_limit, max_active_orders: s.max_active_orders,
     allow_paid_extra: s.allow_paid_extra, extra_rate_per_kg: s.extra_rate_per_kg,
     upi_id: s.upi_id, upi_name: s.upi_name, has_upi_qr: !!s.upi_qr_file,
+    card_required: s.card_required, card_series: s.card_series, semester_start: s.semester_start, semester_end: s.semester_end,
   };
 }
 
 /* ---------------------------------------------------------------- students */
 
 router.get('/ops/students', handle(async (req, res) => {
-  const q = parse(z.object({ q: z.string().optional(), status: z.enum(['PENDING', 'ACTIVE', 'REJECTED', 'SUSPENDED']).optional().or(z.literal('')), hostelId: z.coerce.number().int().positive().max(MAX_ID).optional(), plan: z.enum(['EXPIRED', 'VALID', 'WALKIN', '']).optional(), limit: z.coerce.number().int().optional(), offset: z.coerce.number().int().min(0).optional() }), req.query);
+  const q = parse(z.object({ q: z.string().optional(), status: z.enum(['PENDING', 'ACTIVE', 'REJECTED', 'SUSPENDED']).optional().or(z.literal('')), hostelId: z.coerce.number().int().positive().max(MAX_ID).optional(), plan: z.enum(['EXPIRED', 'VALID', 'UPCOMING', 'WALKIN', '']).optional(), limit: z.coerce.number().int().optional(), offset: z.coerce.number().int().min(0).optional() }), req.query);
   res.json(await listStudents({ ...q, status: q.status || undefined }));
 }));
 
@@ -92,10 +95,10 @@ router.get('/ops/students/lookup', handle(async (req, res) => {
 }));
 
 async function counterCard(id: number) {
-  const open = await db.all(`SELECT id, order_no, status, clothes_count, weight_kg, amount, payment_status, received_at, expected_at, service_name FROM orders WHERE student_id = ? AND status IN ('RECEIVED','WASHING','READY') ORDER BY id`, [id]);
+  const open = await db.all(`SELECT id, order_no, status, clothes_count, weight_kg, amount, payment_status, received_at, expected_at, service_name, tag_no FROM orders WHERE student_id = ? AND status IN ('RECEIVED','WASHING','READY') ORDER BY id`, [id]);
   const profile = await studentProfile(id);
   const usage = await monthUsage(id);
-  return { ...profile, plan: planStatus({ kind: String(profile.kind), valid_until: (profile.valid_until as string | null) ?? null }), usage, open };
+  return { ...profile, plan: planStatus({ kind: String(profile.kind), valid_until: (profile.valid_until as string | null) ?? null, valid_from: (profile.valid_from as string | null) ?? null }), usage, open };
 }
 
 router.get('/ops/students/:id', handle(async (req, res) => {
@@ -110,16 +113,28 @@ router.patch('/ops/students/:id', handle(async (req, res) => {
   const before = await studentProfile(id);
   const b = parse(z.object({
     name: zText(2, 80), idCardNo: zIdCard, mobile: zMobile, hostelId: z.coerce.number().int().positive().max(MAX_ID), roomNo: zRoom,
-    // Hostel plan end date: admin only (staff edits leave it as it is).
+    validFrom: z.union([z.literal(''), z.null(), zDate]).optional(),
     validUntil: z.union([z.literal(''), z.null(), zDate]).optional(),
+    email: z.union([z.literal(''), z.string().trim().toLowerCase().max(120).email('Enter a valid email')]).optional(),
   }), req.body);
-  if (b.validUntil !== undefined && !isAdmin(req)) throw new HttpError(403, 'Only the admin can change a hostel plan date.');
+  if (b.validFrom && b.validUntil && b.validFrom > b.validUntil) throw new HttpError(400, 'The plan start must be before its end.');
+  const emailChanged = b.email !== undefined && (b.email || null) !== (((before.email as string | null) ?? null)?.toLowerCase() ?? null);
+  if (emailChanged && b.email) {
+    await checkStudentEmail(b.email);
+    if (await db.get('SELECT 1 AS ok FROM students WHERE lower(email) = ? AND user_id != ?', [b.email, id])) throw new HttpError(409, 'This email is already used by another account.');
+  }
   if (!(await db.get('SELECT 1 FROM hostels WHERE id = ?', [b.hostelId]))) throw new HttpError(400, 'Choose a hostel.');
   if (b.idCardNo !== before.id_card_no && (await db.get('SELECT 1 FROM users WHERE login_id = ? AND id != ?', [b.idCardNo, id]))) throw new HttpError(409, 'Another account already uses that ID card no.');
   await db.tx(async () => {
     await db.run('UPDATE users SET name = ?, mobile = ?, login_id = ? WHERE id = ?', [b.name, b.mobile, b.idCardNo, id]);
     await db.run('UPDATE students SET id_card_no = ?, hostel_id = ?, room_no = ? WHERE user_id = ?', [b.idCardNo, b.hostelId, b.roomNo, id]);
     if (b.validUntil !== undefined) await db.run('UPDATE students SET valid_until = ? WHERE user_id = ?', [b.validUntil || null, id]);
+    if (b.validFrom !== undefined) await db.run('UPDATE students SET valid_from = ? WHERE user_id = ?', [b.validFrom || null, id]);
+    // A new email must be confirmed again with a code; the old trusted devices are signed out.
+    if (emailChanged) {
+      await db.run('UPDATE students SET email = ?, email_verified_at = NULL WHERE user_id = ?', [b.email || null, id]);
+      await db.run('UPDATE users SET token_version = token_version + 1 WHERE id = ?', [id]);
+    }
     // Staff set the hostel/room themselves: a change the student asked for earlier no longer applies.
     if (b.hostelId !== Number(before.hostel_id) || b.roomNo !== before.room_no) {
       await db.run('UPDATE students SET pending_hostel_id = NULL, pending_room_no = NULL, change_requested_at = NULL WHERE user_id = ?', [id]);
@@ -140,8 +155,8 @@ router.post('/ops/students/:id/review', handle(async (req, res) => {
     const status = b.decision === 'APPROVE' ? 'ACTIVE' : 'REJECTED';
     await db.run('UPDATE students SET status = ?, review_note = ?, reviewed_by = ?, reviewed_at = ? WHERE user_id = ?', [status, b.note || null, actor(req).id, nowIso(), id]);
     // Approved hostelers get the current semester's plan end date, if the admin has set one.
-    const { semester_end: semesterEnd } = await getSettings();
-    if (status === 'ACTIVE' && semesterEnd && !s.valid_until) await db.run('UPDATE students SET valid_until = ? WHERE user_id = ?', [semesterEnd, id]);
+    const { semester_start: semesterStart, semester_end: semesterEnd } = await getSettings();
+    if (status === 'ACTIVE' && semesterEnd && !s.valid_until) await db.run('UPDATE students SET valid_from = ?, valid_until = ? WHERE user_id = ?', [semesterStart || null, semesterEnd, id]);
     await notify(id, status === 'ACTIVE' ? 'Registration approved 🎉' : 'Registration needs a fix', status === 'ACTIVE' ? 'You can now give laundry at the counter. Your digital slips will appear here.' : `Reason: ${b.note}. Update your details in Profile and resubmit.`);
     await logActivity(actor(req).id, status === 'ACTIVE' ? 'STUDENT_APPROVED' : 'STUDENT_REJECTED', 'student', s.id_card_no, b.note);
   });
@@ -322,6 +337,49 @@ router.patch('/ops/orders/:id', handle(async (req, res) => {
     await correctOrder(actor(req).id, id, b.weightKg, b.clothesCount, b.reason);
   });
   res.json(await orderDetail(id));
+}));
+
+/** Change the basket card on an order that hasn't been collected (wrong card typed, card lost). */
+router.patch('/ops/orders/:id/card', handle(async (req, res) => {
+  const id = parse(zId, req.params.id);
+  const b = parse(z.object({ tagNo: z.string().trim().max(20) }), req.body);
+  const s = await getSettings();
+  const card = checkCard(s, b.tagNo);
+  await db.tx(async () => {
+    await db.lockRow('orders', id);
+    const o = await getOrderRow(id);
+    if (!['RECEIVED', 'WASHING', 'READY'].includes(o.status)) throw new HttpError(409, `${o.order_no} is ${o.status.toLowerCase()}; its card can't be changed.`);
+    if (card) {
+      const busy = await cardInUse(card, id);
+      if (busy) throw new HttpError(409, `Card ${card} is still on ${busy.order_no}. Use another card.`, { code: 'CARD_IN_USE' });
+    }
+    await db.run('UPDATE orders SET tag_no = ?, updated_at = ? WHERE id = ?', [card, nowIso(), id]);
+    await addEvent(id, 'CARD', card ? `Basket card ${card}` : 'Basket card removed', actor(req).id);
+    await logActivity(actor(req).id, 'ORDER_CARD', 'order', o.order_no, card ?? 'removed');
+  });
+  res.json(await orderDetail(id));
+}));
+
+/* ------------------------------------------------------------------ photos */
+
+/** Staff take or upload the student's photo at the counter (also after approval). */
+router.post('/ops/students/:id/photo', photoUpload.single('photo'), handle(async (req, res) => {
+  const id = parse(zId, req.params.id);
+  if (!req.file) throw new HttpError(400, 'Choose a photo.');
+  const before = await studentProfile(id);
+  const name = await savePhoto(req.file);
+  await db.run('UPDATE users SET photo = ? WHERE id = ?', [name, id]);
+  if (before.photo) await db.run('DELETE FROM files WHERE name = ?', [before.photo]);
+  await logActivity(actor(req).id, 'PHOTO_SET', 'student', before.id_card_no);
+  res.json(await counterCard(id));
+}));
+router.delete('/ops/students/:id/photo', handle(async (req, res) => {
+  const id = parse(zId, req.params.id);
+  const before = await studentProfile(id);
+  await db.run('UPDATE users SET photo = NULL WHERE id = ?', [id]);
+  if (before.photo) await db.run('DELETE FROM files WHERE name = ?', [before.photo]);
+  await logActivity(actor(req).id, 'PHOTO_REMOVED', 'student', before.id_card_no);
+  res.json(await counterCard(id));
 }));
 
 /* -------------------------------------------------------------- complaints */

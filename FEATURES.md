@@ -111,6 +111,16 @@ One website for everyone. After signing in, each role gets its own look:
 | **Walk-in customers** | Staff | Not shown anywhere as a feature: when a counter search finds nobody, a small *Serve without registration* link appears. Name + mobile is enough; they pay normal prices, and the same mobile finds them next time. They cannot sign in. |
 | **Multiple services** | Everyone | Washing, washing + ironing, ironing only, dry cleaning (editable). Each has its own price and its own slip. Reports and the Excel register show the service of each order. |
 
+### Added on 25 November 2026
+
+| Feature | Who | What it does |
+|---|---|---|
+| **Profile photo** | Student, staff | Students add a photo of their face before approval. Staff compare it with the person at approval, drop-off and pickup (big photo on the pickup screen). After approval the photo is locked and only staff can change it; staff can take one with the phone camera at the counter. |
+| **Semester hostel plan** | Staff, admin, student | Each student's plan has a start and end date, normally a semester: **Jan–Jun** or **Jul–Dec**. Staff set it per student (one-tap semester buttons), the admin sets it for everyone or one hostel (Students → Plan dates), and the Excel import has **Valid From / Valid Until** columns. Outside the dates the student pays normal prices. The student sees "Hostel plan Jan 2027 – Jun 2027" on Home and Profile. |
+| **Email code on new devices** | Student | The first time a student signs in on a phone or browser, a 6-digit code is emailed to their **university email**. Once typed, the device is trusted for 30 days or until sign-out. New registrations confirm their email the same way. Imported students set up their account with an emailed code, with no staff approval. The import also lists a claim code for each student, a fallback for when email codes are off. A student without an email on file adds one by typing the code sent to it. Ten wrong codes lock that email out of new codes for an hour. The admin can restrict addresses to the university domain. Needs Brevo set up on Render (see SECURITY-TODO.md). |
+| **No screenshots of QR codes** | Student | The slip QR **changes every 30 seconds**, so a screenshot or a photo of it stops working within about two minutes. The QR is signed with a key derived on the server, so even the old fixed QR can't be used to make one. Phones with a wrong clock use the server's time. On the Android app, screenshots and screen recording are blocked while a slip or ID QR is open. |
+| **Basket card no.** | Staff, admin, student | The physical cards on the baskets (A1002, A628…) are typed at drop-off, next to the order no., which stays as it is. A card can be on only one basket until it is collected, then it's free for the next one. At pickup, staff type the card no. to find the basket. The admin sets the card series in use (e.g. A1–A3000) and whether a card is required. The student sees the card no. on their slip, and the register export has a **Card No** column. Staff can change the card on an open order. |
+
 ---
 
 ## Android and iPhone apps

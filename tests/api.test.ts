@@ -1,16 +1,29 @@
+import crypto from 'node:crypto';
 import request from 'supertest';
 import { beforeAll, describe, expect, it } from 'vitest';
 import ExcelJS from 'exceljs';
 import { createApp } from '../server/app.js';
+import { outbox } from '../server/mail.js';
 
 const app = await createApp();
 type Agent = ReturnType<typeof request.agent>;
 
-/** A signed-in browser: keeps the session cookie and sends the CSRF header. */
+/** The 6-digit code in the newest email (to this address, if given). Tests run without a real mail service. */
+function codeFor(email?: string) {
+  const m = [...outbox].reverse().find(x => !email || x.to === email);
+  expect(m, `no email${email ? ` to ${email}` : ''}`).toBeTruthy();
+  return /(\d{6})/.exec(m!.subject)![1];
+}
+
+/** A signed-in browser: keeps the session cookie and sends the CSRF header. Types the email code when asked. */
 async function signIn(loginId: string, password: string): Promise<Agent> {
   const a = request.agent(app);
-  const res = await a.post('/api/auth/login').set('x-ej', '1').send({ loginId, password });
+  let res = await a.post('/api/auth/login').set('x-ej', '1').send({ loginId, password });
   expect(res.status, res.body.error).toBe(200);
+  if (res.body.otp_required) {
+    res = await a.post('/api/auth/otp').set('x-ej', '1').send({ challenge: res.body.challenge, code: codeFor() });
+    expect(res.status, res.body.error).toBe(200);
+  }
   return a;
 }
 /** A one-sheet .xlsx with a header row taken from the first row's keys. */
@@ -33,12 +46,15 @@ let seq = 100;
 /** Self sign-up, then the counter approves after checking the university portal. */
 async function newStudent(approve = true) {
   const idCardNo = `TST${++seq}`;
+  const email = `tst${seq}@uni.test`;
   const a = request.agent(app);
-  const res = await post(a, '/api/auth/signup', { idCardNo, name: `Student ${seq}`, mobile: `98765${String(seq).padStart(5, '0')}`, hostelId, roomNo: `${seq}`, password: 'secret12' });
+  const started = await post(a, '/api/auth/signup', { idCardNo, name: `Student ${seq}`, mobile: `98765${String(seq).padStart(5, '0')}`, email, hostelId, roomNo: `${seq}`, password: 'secret12' });
+  expect(started.status, started.body.error).toBe(202);   // the account is made once the emailed code is typed
+  const res = await post(a, '/api/auth/otp', { challenge: started.body.challenge, code: codeFor(email) });
   expect(res.status, res.body.error).toBe(201);
   const id = res.body.user.id as number;
   if (approve) expect((await post(staff, `/api/ops/students/${id}/review`, { decision: 'APPROVE' })).status).toBe(200);
-  return { agent: a, id, idCardNo };
+  return { agent: a, id, idCardNo, email };
 }
 const order = (studentId: number, weightKg = 4, clothesCount = 10, extra: object = {}) =>
   post(staff, '/api/ops/orders', { studentId, weightKg, clothesCount, service: 'REGULAR', ...extra });
@@ -78,7 +94,7 @@ describe('security', () => {
     const a = await newStudent();
     const b = await newStudent();
     const o = await order(a.id);
-    expect((await a.agent.get(`/api/me/orders/${o.body.id}`)).body.qr_token).toBeTruthy();
+    expect((await a.agent.get(`/api/me/orders/${o.body.id}`)).body.qr_key).toBeTruthy();
     expect((await b.agent.get(`/api/me/orders/${o.body.id}`)).status).toBe(404);
     expect((await staff.get(`/api/ops/orders/${o.body.id}`)).body.qr_token).toBeUndefined();
   });
@@ -154,8 +170,16 @@ describe('pickup with the digital slip', () => {
     const s = await newStudent();
     const o = await order(s.id, 3, 12);
     const slip = await s.agent.get(`/api/me/orders/${o.body.id}`);
-    expect((await post(staff, '/api/ops/scan', { code: 'EJ:not-a-real-token' })).status).toBe(404);
-    const scanned = await post(staff, '/api/ops/scan', { code: `EJ:${slip.body.qr_token}` });
+    // The slip QR changes every 30 s (HMAC of the order's secret token); the old fixed QR is refused.
+    // The phone gets a derived key, never the order's secret token.
+    expect(slip.body.qr_token).toBeUndefined();
+    expect(slip.body.qr_key).toBeTruthy();
+    const qr = (step: number) => `EJ2:${o.body.id}.${step}.${crypto.createHmac('sha256', slip.body.qr_key).update(`${o.body.id}.${step}`).digest('base64url').slice(0, 16)}`;
+    const now = Math.floor(Date.now() / 30_000);
+    expect((await post(staff, '/api/ops/scan', { code: 'EJ:some-old-fixed-qr' })).status).toBe(409);
+    expect((await post(staff, '/api/ops/scan', { code: `EJ2:${o.body.id}.${now}.AAAAAAAAAAAAAAAA` })).status).toBe(404);
+    expect((await post(staff, '/api/ops/scan', { code: qr(now - 20) })).status).toBe(409);   // a 10-minute-old screenshot
+    const scanned = await post(staff, '/api/ops/scan', { code: qr(now) });
     expect(scanned.body.order_no).toBe(o.body.order_no);
     expect(scanned.body.via).toBe('QR');
     await post(staff, '/api/ops/orders/status', { ids: [o.body.id], status: 'READY' });
@@ -258,8 +282,12 @@ describe('complaints, announcements, export', () => {
 });
 
 describe('Android / iOS app sign-in', () => {
-  const appLogin = (loginId: string, password: string) =>
-    request(app).post('/api/auth/login').set({ 'x-ej': '1', 'x-ej-client': 'app' }).send({ loginId, password });
+  const appLogin = async (loginId: string, password: string) => {
+    const h = { 'x-ej': '1', 'x-ej-client': 'app' };
+    const res = await request(app).post('/api/auth/login').set(h).send({ loginId, password });
+    if (!res.body.otp_required) return res;
+    return request(app).post('/api/auth/otp').set(h).send({ challenge: res.body.challenge, code: codeFor() });
+  };
 
   it('gives the app a bearer token instead of a cookie, and the token works', async () => {
     const s = await newStudent();
@@ -435,7 +463,14 @@ describe('services, plans and walk-ins', () => {
     expect(o.status, o.body.error).toBe(201);
     expect(o.body.amount).toBe(120);   // wash & fold at ₹30/kg
     expect(o.body.charge_note).toContain('plan ended');
-    expect((await staff.patch(`/api/ops/students/${s.id}`).set('x-ej', '1').send({ name: 'X Y', idCardNo: s.idCardNo, mobile: '9876500998', hostelId, roomNo: '1', validUntil: '' })).status).toBe(403);
+    // Staff enter each student's semester (Jan–Jun or Jul–Dec). A plan that hasn't started yet means normal prices too.
+    const year = new Date().getFullYear() + 1;
+    const dated = await staff.patch(`/api/ops/students/${s.id}`).set('x-ej', '1').send({ name: 'X Y', idCardNo: s.idCardNo, mobile: '9876500998', hostelId, roomNo: '1', validFrom: `${year}-01-01`, validUntil: `${year}-06-30` });
+    expect(dated.status, dated.body.error).toBe(200);
+    expect(dated.body.plan).toMatchObject({ hosteler: false });
+    expect(dated.body.plan.label).toContain(`starts 1 Jan ${year}`);
+    const bad = await staff.patch(`/api/ops/students/${s.id}`).set('x-ej', '1').send({ name: 'X Y', idCardNo: s.idCardNo, mobile: '9876500998', hostelId, roomNo: '1', validFrom: `${year}-07-01`, validUntil: `${year}-06-30` });
+    expect(bad.status).toBe(400);
   });
 
   it('staff can serve an unregistered walk-in, who pays normal prices', async () => {
@@ -475,7 +510,7 @@ describe('Excel import', () => {
     expect(res.status).toBe(200);
     const wb = new ExcelJS.Workbook();
     await wb.xlsx.load(res.body as Buffer as unknown as ArrayBuffer);
-    expect((wb.worksheets[0].getRow(1).values as unknown[]).slice(1)).toEqual(['ID Card No', 'Full Name', 'Mobile', 'Hostel', 'Room', 'Valid Until']);
+    expect((wb.worksheets[0].getRow(1).values as unknown[]).slice(1)).toEqual(['ID Card No', 'Full Name', 'Mobile', 'University Email', 'Hostel', 'Room', 'Valid From', 'Valid Until']);
   });
 
   it('imports nothing if any row is wrong, and lists the rows', async () => {
@@ -618,7 +653,9 @@ describe('security audit fixes', () => {
 
   it('signing out cancels the token on the server', async () => {
     const s = await newStudent();
-    const res = await request(app).post('/api/auth/login').set({ 'x-ej': '1', 'x-ej-client': 'app' }).send({ loginId: s.idCardNo, password: 'secret12' });
+    const h = { 'x-ej': '1', 'x-ej-client': 'app' };
+    const started = await request(app).post('/api/auth/login').set(h).send({ loginId: s.idCardNo, password: 'secret12' });
+    const res = await request(app).post('/api/auth/otp').set(h).send({ challenge: started.body.challenge, code: codeFor(s.email) });
     const bearer = { Authorization: `Bearer ${res.body.token}`, 'x-ej': '1' };
     expect((await request(app).get('/api/me/home').set(bearer)).status).toBe(200);
     await request(app).post('/api/auth/logout').set(bearer);
@@ -627,7 +664,12 @@ describe('security audit fixes', () => {
 
   it('only wrong passwords count toward the login limit', async () => {
     const s = await newStudent();
-    for (let i = 0; i < 10; i++) expect((await request(app).post('/api/auth/login').set('x-ej', '1').send({ loginId: s.idCardNo, password: 'secret12' })).status).toBe(200);
+    const device = await signIn(s.idCardNo, 'secret12');   // this browser is trusted now: no more email codes
+    for (let i = 0; i < 10; i++) {
+      const r = await device.post('/api/auth/login').set('x-ej', '1').send({ loginId: s.idCardNo, password: 'secret12' });
+      expect(r.status).toBe(200);
+      expect(r.body.user).toBeTruthy();
+    }
   });
 
   it('sends a strict content security policy', async () => {
@@ -672,5 +714,157 @@ describe('upload hardening', () => {
   it('login ids and passwords have a maximum length', async () => {
     const r = await request(app).post('/api/auth/login').set('x-ej', '1').send({ loginId: 'A'.repeat(5000), password: 'x' });
     expect(r.status).toBe(400);
+  });
+});
+
+describe('university email codes', () => {
+  it('a new browser needs the emailed code; a trusted one does not', async () => {
+    const s = await newStudent();
+    const fresh = request.agent(app);
+    const first = await post(fresh, '/api/auth/login', { loginId: s.idCardNo, password: 'secret12' });
+    expect(first.body).toMatchObject({ otp_required: true });
+    expect(first.body.email_hint).toMatch(/^ts•+@uni\.test$/);
+    expect(first.body.user).toBeUndefined();
+    expect((await fresh.get('/api/me/home')).status).toBe(401);   // no session before the code
+    const right = codeFor(s.email);
+    const wrong = await post(fresh, '/api/auth/otp', { challenge: first.body.challenge, code: right === '000000' ? '111111' : '000000' });
+    expect(wrong.status).toBe(400);
+    const ok = await post(fresh, '/api/auth/otp', { challenge: first.body.challenge, code: right });
+    expect(ok.status, ok.body.error).toBe(200);
+    expect((await post(fresh, '/api/auth/otp', { challenge: first.body.challenge, code: right })).status).toBe(410);   // single use
+    const again = await post(fresh, '/api/auth/login', { loginId: s.idCardNo, password: 'secret12' });
+    expect(again.body.user).toBeTruthy();   // trusted browser: password only
+  });
+
+  it('five wrong codes end the challenge', async () => {
+    const s = await newStudent();
+    const fresh = request.agent(app);
+    const first = await post(fresh, '/api/auth/login', { loginId: s.idCardNo, password: 'secret12' });
+    const right = codeFor(s.email);
+    const bad = right === '123456' ? '654321' : '123456';
+    for (let i = 0; i < 5; i++) await post(fresh, '/api/auth/otp', { challenge: first.body.challenge, code: bad });
+    expect((await post(fresh, '/api/auth/otp', { challenge: first.body.challenge, code: right })).status).toBe(429);
+  });
+
+  it('only university addresses when the admin sets a domain', async () => {
+    await put(admin, '/api/admin/settings', { student_email_domain: 'uni.test' });
+    const r = await post(request.agent(app), '/api/auth/signup', { idCardNo: 'DOM001', name: 'Dom One', mobile: '9811177001', email: 'dom@gmail.com', hostelId, roomNo: '1', password: 'secret12' });
+    expect(r.status).toBe(400);
+    expect(r.body.error).toContain('uni.test');
+    await put(admin, '/api/admin/settings', { student_email_domain: '' });
+  });
+
+  it('imported students with a university email set up their account with an emailed code (no approval needed)', async () => {
+    const up = await admin.post('/api/admin/import/students').set('x-ej', '1').attach('file', await xlsx([
+      { 'ID Card No': 'OTP001', 'Full Name': 'Mail Student', 'Mobile': '9811188001', 'University Email': 'mail.student@uni.test', 'Hostel': 'Test Hostel', 'Room': '3', 'Valid From': '2026-07-01', 'Valid Until': '2026-12-31' },
+    ]), { filename: 's.xlsx' });
+    expect(up.status, JSON.stringify(up.body)).toBe(200);
+    expect(up.body.codes).toHaveLength(1);   // a claim code too, in case email codes are switched off
+    const a = request.agent(app);
+    const started = await post(a, '/api/auth/signup', { idCardNo: 'OTP001', name: 'Mail Student', mobile: '9811188001', hostelId, roomNo: '3', password: 'mypass12' });
+    expect(started.status, started.body.error).toBe(202);
+    expect(started.body.purpose).toBe('CLAIM');
+    const done = await post(a, '/api/auth/otp', { challenge: started.body.challenge, code: codeFor('mail.student@uni.test') });
+    expect(done.status, done.body.error).toBe(200);
+    expect(done.body.user.student_status).toBe('ACTIVE');
+    const card = (await staff.get('/api/ops/students?q=OTP001')).body.rows[0];
+    expect(card).toMatchObject({ valid_from: '2026-07-01', valid_until: '2026-12-31', claimable: 0, email: 'mail.student@uni.test' });
+    expect(card.email_verified_at).toBeTruthy();
+  });
+});
+
+describe('profile photo', () => {
+  const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0, 16, 0x4a, 0x46, 0x49, 0x46, 0, 1, 1, 0, 0, 1, 0, 1, 0, 0, 0xff, 0xd9]);
+  it('student adds a photo before approval; after approval only staff can change it', async () => {
+    const s = await newStudent(false);
+    const up = await s.agent.post('/api/me/photo').set('x-ej', '1').attach('photo', jpeg, { filename: 'me.jpg', contentType: 'image/jpeg' });
+    expect(up.status, up.body.error).toBe(200);
+    expect(up.body.photo).toBeTruthy();
+    expect((await s.agent.get(`/api/files/${up.body.photo}`)).status).toBe(200);
+    expect((await staff.get(`/api/files/${up.body.photo}`)).status).toBe(200);
+    const other = await newStudent();
+    expect((await other.agent.get(`/api/files/${up.body.photo}`)).status).toBe(403);
+    await post(staff, `/api/ops/students/${s.id}/review`, { decision: 'APPROVE' });
+    expect((await s.agent.post('/api/me/photo').set('x-ej', '1').attach('photo', jpeg, { filename: 'me.jpg', contentType: 'image/jpeg' })).status).toBe(403);
+    const byStaff = await staff.post(`/api/ops/students/${s.id}/photo`).set('x-ej', '1').attach('photo', jpeg, { filename: 'c.jpg', contentType: 'image/jpeg' });
+    expect(byStaff.status, byStaff.body.error).toBe(200);
+    expect(byStaff.body.photo).not.toBe(up.body.photo);
+    expect((await staff.get(`/api/files/${up.body.photo}`)).status).toBe(404);   // the old photo is deleted
+  });
+});
+
+describe('basket card no.', () => {
+  it('cards follow the admin series, are never on two open orders, and find the basket at pickup', async () => {
+    await put(admin, '/api/admin/settings', { card_series: [{ prefix: 'A', from: 1, to: 3000 }], card_required: true });
+    const s = await newStudent();
+    expect((await order(s.id, 2, 4)).status).toBe(422);                         // card needed
+    expect((await order(s.id, 2, 4, { tagNo: 'B12' })).status).toBe(422);       // not in a series
+    expect((await order(s.id, 2, 4, { tagNo: 'A5000' })).status).toBe(422);
+    const o1 = await order(s.id, 2, 4, { tagNo: 'a 1002' });
+    expect(o1.status, o1.body.error).toBe(201);
+    const t = await newStudent();
+    const clash = await order(t.id, 2, 4, { tagNo: 'A1002' });
+    expect(clash.status).toBe(409);
+    expect(clash.body.error).toContain(o1.body.order_no);
+    const found = await post(staff, '/api/ops/scan', { code: 'A1002' });
+    expect(found.body).toMatchObject({ id: o1.body.id, via: 'CARD', tag_no: 'A1002' });
+    expect((await staff.get('/api/ops/orders?q=a1002')).body.rows[0].id).toBe(o1.body.id);
+    const slip = await s.agent.get(`/api/me/orders/${o1.body.id}`);
+    expect(slip.body.tag_no).toBe('A1002');
+    // Collected: the card goes back on the shelf and can be given to the next basket.
+    await post(staff, `/api/ops/orders/${o1.body.id}/deliver`, { returnedCount: 4 });
+    const reuse = await order(t.id, 2, 4, { tagNo: 'A1002' });
+    expect(reuse.status, reuse.body.error).toBe(201);
+    // Wrong card typed: staff change it.
+    const moved = await staff.patch(`/api/ops/orders/${reuse.body.id}/card`).set('x-ej', '1').send({ tagNo: 'A7' });
+    expect(moved.body.tag_no).toBe('A7');
+    await put(admin, '/api/admin/settings', { card_series: [], card_required: false });
+  });
+});
+
+describe('round 2 review fixes', () => {
+  it('a new code does not give new tries', async () => {
+    const s = await newStudent();
+    const fresh = request.agent(app);
+    const first = await post(fresh, '/api/auth/login', { loginId: s.idCardNo, password: 'secret12' });
+    const bad = codeFor(s.email) === '123456' ? '654321' : '123456';
+    for (let i = 0; i < 4; i++) await post(fresh, '/api/auth/otp', { challenge: first.body.challenge, code: bad });
+    // resend needs 30 s; simulate it by moving the last send back
+    const { db } = await import('../server/db.js');
+    await db.run('UPDATE login_challenges SET last_sent_at = ? WHERE id = ?', [new Date(Date.now() - 60_000).toISOString(), first.body.challenge]);
+    expect((await post(fresh, '/api/auth/otp/resend', { challenge: first.body.challenge })).status).toBe(200);
+    expect((await post(fresh, '/api/auth/otp', { challenge: first.body.challenge, code: bad })).status).toBe(400);
+    expect((await post(fresh, '/api/auth/otp', { challenge: first.body.challenge, code: codeFor(s.email) })).status).toBe(429);   // 5 tries used up
+  });
+
+  it('a student adds their email only by typing the code sent to it', async () => {
+    const up = await admin.post('/api/admin/import/students').set('x-ej', '1').attach('file', await xlsx([
+      { 'ID Card No': 'NOMAIL1', 'Full Name': 'No Mail', 'Mobile': '9811199001', 'Hostel': 'Test Hostel', 'Room': '4' },
+    ]), { filename: 's.xlsx' });
+    const code = up.body.codes[0].code;
+    const a = request.agent(app);
+    const claimed = await post(a, '/api/auth/signup', { idCardNo: 'NOMAIL1', name: 'No Mail', mobile: '9811199001', hostelId, roomNo: '4', password: 'nomail12', claimCode: code });
+    expect(claimed.status, claimed.body.error).toBe(200);
+    const asked = await a.put('/api/me/email').set('x-ej', '1').send({ email: 'no.mail@uni.test' });
+    expect(asked.status, asked.body.error).toBe(202);
+    expect((await a.get('/api/auth/me')).body.profile.email).toBeNull();   // not saved yet
+    const done = await post(a, '/api/auth/otp', { challenge: asked.body.challenge, code: codeFor('no.mail@uni.test') });
+    expect(done.status, done.body.error).toBe(200);
+    expect((await a.get('/api/auth/me')).body.profile).toMatchObject({ email: 'no.mail@uni.test' });
+  });
+
+  it('A012 and A12 are the same card; digits that match both a card and an order are not guessed', async () => {
+    await put(admin, '/api/admin/settings', { card_series: [], card_required: false });
+    const s = await newStudent();
+    const t = await newStudent();
+    const o1 = await order(s.id, 2, 3, { tagNo: 'A012' });
+    expect(o1.body.tag_no).toBe('A12');
+    expect((await order(t.id, 2, 3, { tagNo: 'A12' })).status).toBe(409);
+    const n = Number(o1.body.order_no.slice(3)) - 1;   // an order no. that exists
+    const o2 = await order(t.id, 2, 3, { tagNo: String(n) });
+    expect(o2.status, o2.body.error).toBe(201);
+    expect((await post(staff, '/api/ops/scan', { code: String(n) })).status).toBe(409);
+    expect((await post(staff, '/api/ops/scan', { code: `EJ-${n}` })).body.order_no).toBe(`EJ-${n}`);
+    expect((await put(admin, '/api/admin/settings', { card_series: [{ prefix: 'EJ', from: 1, to: 9 }] })).status).toBe(400);
   });
 });

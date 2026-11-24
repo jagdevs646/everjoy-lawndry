@@ -166,3 +166,63 @@ export function useFormAction() {
   }, []);
   return { busy, error, setError, submit };
 }
+
+/* -------------------------------------------------------------- semesters */
+
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+/** "2027-06-30" → "Jun 2027" */
+export const monthYear = (d: string) => `${MONTHS[Number(d.slice(5, 7)) - 1]} ${d.slice(0, 4)}`;
+
+/** Semesters run January–June and July–December. The current one and the next two, for quick picking. */
+export function semesterOptions(today = todayKey()) {
+  const y = Number(today.slice(0, 4));
+  const firstHalf = Number(today.slice(5, 7)) <= 6;
+  const list: [number, 1 | 2][] = firstHalf ? [[y, 1], [y, 2], [y + 1, 1]] : [[y, 2], [y + 1, 1], [y + 1, 2]];
+  return list.map(([yr, h]) => ({
+    label: h === 1 ? `Jan–Jun ${yr}` : `Jul–Dec ${yr}`,
+    from: h === 1 ? `${yr}-01-01` : `${yr}-07-01`,
+    until: h === 1 ? `${yr}-06-30` : `${yr}-12-31`,
+  }));
+}
+
+/** "Jan 2027 – Jun 2027", "till Jun 2027", or '' */
+export function planPeriod(from?: string | null, until?: string | null) {
+  if (from && until) return `${monthYear(from)} – ${monthYear(until)}`;
+  if (until) return `till ${monthYear(until)}`;
+  if (from) return `from ${monthYear(from)}`;
+  return '';
+}
+
+/**
+ * Shrink a camera photo before upload (longest side 1600 px, JPEG): faster on campus data and
+ * keeps the database small. Falls back to the original if the browser can't decode it (e.g. HEIC).
+ */
+export async function shrinkPhoto(file: File, longest = 1600): Promise<Blob> {
+  try {
+    const bitmap = await createImageBitmap(file);
+    const scale = Math.min(1, longest / Math.max(bitmap.width, bitmap.height));
+    if (scale === 1 && file.size < 900_000) return file;
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.round(bitmap.width * scale);
+    canvas.height = Math.round(bitmap.height * scale);
+    canvas.getContext('2d')!.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+    const blob = await new Promise<Blob | null>(r => canvas.toBlob(r, 'image/jpeg', 0.82));
+    return blob && blob.size < file.size ? blob : file;
+  } catch {
+    return file;
+  }
+}
+
+/* ----------------------------------------------------------- server clock */
+
+/**
+ * How far this phone's clock is from the server's. The slip QR is time-based, so a phone set a few
+ * minutes wrong still makes a QR the counter accepts. Kept on the phone for offline use.
+ */
+let clockOffset = (() => { try { return Number(localStorage.getItem('ej-clock-offset')) || 0; } catch { return 0; } })();
+export function noteServerTime(serverMs: unknown) {
+  if (typeof serverMs !== 'number' || !Number.isFinite(serverMs)) return;
+  clockOffset = serverMs - Date.now();
+  try { localStorage.setItem('ej-clock-offset', String(Math.round(clockOffset))); } catch { /* storage blocked */ }
+}
+export const serverNow = () => Date.now() + clockOffset;

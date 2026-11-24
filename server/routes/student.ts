@@ -3,6 +3,8 @@ import { z } from 'zod';
 import { db, insertId, logActivity } from '../db.js';
 import { AuthedRequest, requireRole } from '../auth.js';
 import { photoUpload, savePhoto } from '../files.js';
+import { checkStudentEmail, startChallenge } from '../otp.js';
+import { slipKey } from '../auth.js';
 import { getSettings, listServices, monthUsage, planStatus } from '../rules.js';
 import { announcementsFor, complaintDetail, listComplaints, orderDetail, studentProfile } from '../queries.js';
 import { HttpError, handle, nowIso, parse, zId, zText } from '../util.js';
@@ -17,7 +19,13 @@ export const COMPLAINT_CATEGORIES = ['Missing clothes', 'Damaged clothes', 'Wron
 
 /** Student-facing order fields: own orders only, includes the QR token for the digital slip. */
 const MY_ORDER_COLS = `id, order_no, weight_kg, clothes_count, service, note, status, within_kg, extra_kg, amount, payment_status, paid_method, paid_at,
-  qr_token, received_at, expected_at, ready_at, delivered_at, returned_count, cancel_reason, hostel_name, room_no, service_name, unit, rate, charge_note`;
+  qr_token, received_at, expected_at, ready_at, delivered_at, returned_count, cancel_reason, hostel_name, room_no, service_name, unit, rate, charge_note, tag_no`;
+
+/** Never send the order's QR token to the phone: send the derived key that signs the rotating QR instead. */
+const withSlipKey = <T extends Record<string, unknown>>(o: T) => {
+  const { qr_token: token, ...rest } = o as T & { qr_token?: string | null };
+  return { ...rest, qr_key: token && ['RECEIVED', 'WASHING', 'READY'].includes(String(o.status)) ? slipKey(token) : null };
+};
 
 router.get('/me/home', handle(async (req, res) => {
   const user = me(req);
@@ -32,10 +40,11 @@ router.get('/me/home', handle(async (req, res) => {
   const services = await listServices();
   res.json({
     profile,
-    plan: planStatus({ kind: String(profile.kind), valid_until: (profile.valid_until as string | null) ?? null }),
+    plan: planStatus({ kind: String(profile.kind), valid_until: (profile.valid_until as string | null) ?? null, valid_from: (profile.valid_from as string | null) ?? null }),
     services,
     usage,
-    open,
+    open: (open as Record<string, unknown>[]).map(withSlipKey),
+    server_time: Date.now(),   // phones with a wrong clock still make a valid slip QR
     due,
     unread,
     open_complaints: openComplaints,
@@ -54,7 +63,7 @@ router.get('/me/orders', handle(async (req, res) => {
   const q = parse(z.object({ limit: z.coerce.number().int().min(1).max(100).default(30), offset: z.coerce.number().int().min(0).default(0) }), req.query);
   const rows = await db.all(`SELECT ${MY_ORDER_COLS} FROM orders WHERE student_id = ? ORDER BY id DESC LIMIT ? OFFSET ?`, [user.id, q.limit, q.offset]);
   const total = (await db.get<{ c: number }>('SELECT COUNT(*) AS c FROM orders WHERE student_id = ?', [user.id]))!.c;
-  res.json({ rows, total });
+  res.json({ rows: (rows as Record<string, unknown>[]).map(withSlipKey), total });
 }));
 
 router.get('/me/orders/:id', handle(async (req, res) => {
@@ -62,7 +71,7 @@ router.get('/me/orders/:id', handle(async (req, res) => {
   const id = parse(zId, req.params.id);
   const d = await orderDetail(id, { includeQr: true });
   if (d.student_id !== user.id) throw new HttpError(404, 'Order not found.');   // 404, not 403: don't confirm other students' orders exist
-  res.json(d);
+  res.json({ ...withSlipKey(d), server_time: Date.now() });
 }));
 
 router.patch('/me/profile', handle(async (req, res) => {
@@ -141,4 +150,38 @@ router.post('/me/complaints', activeOnly, photoUpload.single('photo'), handle(as
     return newId;
   });
   res.status(201).json(await complaintDetail(id));
+}));
+
+/* ------------------------------------------------------------------ photo */
+
+/**
+ * The student's own photo. They can add it until staff approve the account (staff compare it with the
+ * face at the counter); after that only staff can change it, so an approved account can't swap faces.
+ */
+router.post('/me/photo', photoUpload.single('photo'), handle(async (req, res) => {
+  const user = me(req);
+  if (!req.file) throw new HttpError(400, 'Choose a photo.');
+  const p = await studentProfile(user.id);
+  if (p.status === 'ACTIVE' && p.photo) throw new HttpError(403, 'Your photo is locked after approval. Ask at the counter to change it.');
+  if (p.status === 'SUSPENDED') throw new HttpError(403, 'Your account is on hold.');
+  const name = await savePhoto(req.file);
+  await db.run('UPDATE users SET photo = ? WHERE id = ?', [name, user.id]);
+  if (p.photo) await db.run('DELETE FROM files WHERE name = ?', [p.photo]);
+  await logActivity(user.id, 'PHOTO_ADDED', 'student', p.id_card_no);
+  res.json(await studentProfile(user.id));
+}));
+
+/**
+ * A student without an email on file adds one. It is saved only after they type the code sent to it,
+ * so a typo can't lock them out and nobody can point the codes at someone else's inbox.
+ */
+router.put('/me/email', handle(async (req, res) => {
+  const user = me(req);
+  const b = parse(z.object({ email: z.string().trim().toLowerCase().max(120).email('Enter your university email address') }), req.body);
+  const p = await studentProfile(user.id);
+  if (p.email) throw new HttpError(403, 'To change your email, ask at the counter.');
+  await checkStudentEmail(b.email);
+  if (await db.get('SELECT 1 AS ok FROM students WHERE lower(email) = ? AND user_id != ?', [b.email, user.id])) throw new HttpError(409, 'This email is already used by another account.');
+  const tv = (await db.get<{ token_version: number }>('SELECT token_version FROM users WHERE id = ?', [user.id]))!.token_version;
+  res.status(202).json(await startChallenge('EMAIL', b.email, user.id, { email: b.email, v: tv }));
 }));

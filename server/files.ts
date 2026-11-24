@@ -53,9 +53,12 @@ export const serveFile = handle(async (req, res) => {
   const user = (req as AuthedRequest).user;
   if (!user) throw new HttpError(401, 'Please sign in.');
   const name = path.basename(String(req.params.name));
-  const owner = await db.get<{ student_id: number }>('SELECT student_id FROM complaints WHERE photo = ?', [name]);
-  if (!owner) throw new HttpError(404, 'File not found.');
-  if (user.role === 'STUDENT' && owner.student_id !== user.id) throw new HttpError(403, 'You do not have access to this file.');
+  // Complaint photos: the student who raised it, and staff. Profile photos: the person themself, and staff.
+  const complaint = await db.get<{ student_id: number }>('SELECT student_id FROM complaints WHERE photo = ?', [name]);
+  const profile = complaint ? undefined : await db.get<{ id: number }>('SELECT id FROM users WHERE photo = ?', [name]);
+  const ownerId = complaint?.student_id ?? profile?.id;
+  if (ownerId === undefined) throw new HttpError(404, 'File not found.');
+  if (user.role === 'STUDENT' && ownerId !== user.id) throw new HttpError(403, 'You do not have access to this file.');
   const row = await db.get<{ mime: string; data: Buffer | Uint8Array }>('SELECT mime, data FROM files WHERE name = ?', [name]);
   if (row) {
     res.setHeader('Cache-Control', 'private, max-age=3600');

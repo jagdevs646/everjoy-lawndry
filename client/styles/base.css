@@ -244,3 +244,19 @@ img { max-width: 100%; }
 .upi-qr p small { color: #5b5b5b; }
 .upi-qr .qr-img { border-radius: 6px; }
 .upi-qr .upi-hint { color: #5b5b5b; font-size: .8125rem; max-width: 32ch; }
+
+.avatar-img { object-fit: cover; background: var(--surface-2, #eee); }
+.slip-qr-live { display: grid; justify-items: center; gap: 8px; }
+.qr-timer { position: relative; display: block; width: 100%; max-width: 240px; padding-top: 8px; font-size: .75rem; color: var(--muted); text-align: center; }
+.qr-timer i { position: absolute; top: 0; left: 0; height: 3px; border-radius: 3px; background: var(--accent); transition: width 1s linear; }
+.otp-input { font-size: 1.75rem !important; letter-spacing: .5em; text-align: center; font-variant-numeric: tabular-nums; }
+.card-no { display: inline-block; padding: 2px 10px; border: 2px solid currentColor; border-radius: 6px; font-weight: 800; letter-spacing: .04em; font-variant-numeric: tabular-nums; }
+.semester-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.semester-chips button { padding: 6px 12px; border-radius: 999px; border: 1.5px solid var(--line, #ccc); background: transparent; color: inherit; font-weight: 600; font-size: .875rem; }
+.semester-chips button.on { border-color: var(--accent); background: var(--accent-soft); }
+.photo-row { display: flex; align-items: center; gap: 14px; }
+.photo-row .stack { gap: 6px; }
+
+.plan-fields { border: 1px solid var(--line, #ddd); border-radius: var(--radius-sm, 10px); padding: 10px 12px 12px; display: grid; gap: 10px; }
+.plan-fields legend { padding: 0 6px; font-weight: 700; font-size: .875rem; }
+label.btn { cursor: pointer; }

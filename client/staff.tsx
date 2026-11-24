@@ -3,7 +3,7 @@ import { Announcement, api, ApiError, Order, Service, Student, User } from './ap
 import { ChangePassword } from './auth';
 import { go, kg, plural, requestId, rupees, toast, useAction, useFormAction, useLoad, useRoute, useScrollTop, when } from './lib';
 import { ComplaintsBoard, CounterStudent, HandOver, OpsSettings, OrderSheet, serviceLine, StudentFacts, StudentLine, StudentSheet } from './ops';
-import { Brand, Button, Empty, ErrorNote, Field, Icon, IconName, Loading, PayPill, Scanner, Segmented, Sheet, StatusPill, Stepper } from './ui';
+import { Avatar, Brand, Button, Empty, ErrorNote, Field, Icon, IconName, Loading, PayPill, Scanner, Segmented, Sheet, StatusPill, Stepper } from './ui';
 
 type Summary = {
   today: { received: number; kg: number; clothes: number; delivered: number; collected: number };
@@ -185,6 +185,7 @@ function OrderForm({ student, settings, services, onChangeStudent, onStudent, on
   const [count, setCount] = useState('');
   const [express, setExpress] = useState(false);
   const [note, setNote] = useState('');
+  const [tag, setTag] = useState('');
   const [acceptExtra, setAcceptExtra] = useState(false);
   const [quote, setQuote] = useState<Quote | null>(null);
   const [quoteError, setQuoteError] = useState('');
@@ -206,7 +207,9 @@ function OrderForm({ student, settings, services, onChangeStudent, onStudent, on
   // A different weight or service is a new question: ask again before charging extra.
   useEffect(() => { setAcceptExtra(false); }, [w, serviceId, student.id]);
 
-  const body = () => ({ studentId: student.id, serviceId: service?.id, weightKg: needsWeight ? w : (w || 0), clothesCount: c, express, acceptExtra });
+  const body = () => ({ studentId: student.id, serviceId: service?.id, weightKg: needsWeight ? w : (w || 0), clothesCount: c, express, acceptExtra, tagNo: tag });
+  const cardNeeded = !!settings?.card_required;
+  const cardExample = settings?.card_series?.[0] ? `${settings.card_series[0].prefix}${settings.card_series[0].from}` : 'A1002';
   // Live rule check: the same server function that saves the order.
   useEffect(() => {
     setQuote(null); setQuoteError(''); setOver(null);
@@ -219,7 +222,7 @@ function OrderForm({ student, settings, services, onChangeStudent, onStudent, on
     }, 300);
     return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [w, c, express, serviceId, acceptExtra, student.id, student.status, ready]);
+  }, [w, c, express, serviceId, acceptExtra, tag, student.id, student.status, ready]);
 
   const take = async (e: FormEvent) => {
     e.preventDefault();
@@ -242,7 +245,7 @@ function OrderForm({ student, settings, services, onChangeStudent, onStudent, on
   return (
     <form className="order-form" onSubmit={take}>
       <div className="who">
-        <StudentLine o={{ student_name: student.name, id_card_no: walkIn ? 'walk-in' : student.id_card_no, hostel_name: walkIn ? student.mobile : student.hostel_name, room_no: walkIn ? '-' : student.room_no, mobile: student.mobile }} />
+        <StudentLine o={{ student_name: student.name, id_card_no: walkIn ? 'walk-in' : student.id_card_no, hostel_name: walkIn ? student.mobile : student.hostel_name, room_no: walkIn ? '-' : student.room_no, mobile: student.mobile, student_photo: student.photo }} photoSize={56} />
         <div className="who-actions">
           <Button size="sm" type="button" onClick={() => openStudent(student.id)}>Details</Button>
           <Button size="sm" type="button" icon="swap" onClick={onChangeStudent}>Change</Button>
@@ -252,7 +255,7 @@ function OrderForm({ student, settings, services, onChangeStudent, onStudent, on
       {hosteler && <p className="who-usage">This month: {plural(student.usage.orders, 'order')}, {kg(student.usage.kg)}{student.usage.kg_limit ? ` of ${kg(student.usage.kg_limit)}` : ''}. {student.open.length ? `${plural(student.open.length, 'order')} in progress.` : 'Nothing in progress.'}</p>}
       {student.open.length > 0 && (
         <ul className="who-open">
-          {student.open.map(o => <li key={o.id}><button type="button" onClick={() => openOrder(o.id)}><b>{o.order_no}</b><span>{o.service_name ? `${o.service_name}, ` : ''}{o.clothes_count} clothes</span><StatusPill status={o.status} /></button></li>)}
+          {student.open.map(o => <li key={o.id}><button type="button" onClick={() => openOrder(o.id)}><b>{o.tag_no ?? o.order_no}</b><span>{o.service_name ? `${o.service_name}, ` : ''}{o.clothes_count} clothes</span><StatusPill status={o.status} /></button></li>)}
         </ul>
       )}
 
@@ -288,6 +291,11 @@ function OrderForm({ student, settings, services, onChangeStudent, onStudent, on
               <small>{service?.unit === 'PIECE' ? `${price(service)}, count every piece` : 'Count every piece'}</small>
             </div>
           </div>
+          <label className={`card-box${cardNeeded && !tag ? ' need' : ''}`}>
+            <span>Basket card no.{cardNeeded ? '' : ' (optional)'}</span>
+            <input value={tag} onChange={e => setTag(e.target.value.toUpperCase().replace(/\s/g, ''))} placeholder={cardExample} autoCapitalize="characters" autoComplete="off" spellCheck={false} maxLength={12} aria-label="Basket card no." />
+            <small>The card hung on this basket. Used to find it at pickup.</small>
+          </label>
           {settings?.express_enabled && (
             <Segmented label="Speed" value={express ? 'EXPRESS' : 'REGULAR'} onChange={v => setExpress(v === 'EXPRESS')} options={[{ value: 'REGULAR', label: 'Regular' }, { value: 'EXPRESS', label: `Express, ${rupees(settings.express_fee)}` }]} />
           )}
@@ -332,7 +340,7 @@ function OrderForm({ student, settings, services, onChangeStudent, onStudent, on
             </div>
           )}
           {error && <ErrorNote error={error} />}
-          <Button tone="primary" size="lg" block busy={busy} disabled={!quote || !!quoteError}>Take order: {c || 0} clothes{w ? `, ${kg(w)}` : ''}</Button>
+          <Button tone="primary" size="lg" block busy={busy} disabled={!quote || !!quoteError || (cardNeeded && !tag)}>Take order{tag ? ` on card ${tag}` : ''}: {c || 0} clothes{w ? `, ${kg(w)}` : ''}</Button>
         </>
       )}
     </form>
@@ -344,8 +352,14 @@ function Created({ o, onNext, onOpen }: { o: Order; onNext: () => void; onOpen: 
   useEffect(() => { next.current?.focus(); }, []);
   return (
     <div className="sf-page created" role="status">
-      <p className="created-label">Order taken. Write this on the bag tag:</p>
-      <p className="created-no">{o.order_no}</p>
+      {o.tag_no ? <>
+        <p className="created-label">Order taken on basket card</p>
+        <p className="created-no">{o.tag_no}</p>
+        <p className="created-sub">Order no. {o.order_no}</p>
+      </> : <>
+        <p className="created-label">Order taken. Write this on the bag tag:</p>
+        <p className="created-no">{o.order_no}</p>
+      </>}
       <p className="created-meta">{o.student_name}{o.customer_kind === 'WALKIN' ? '' : `, room ${o.room_no}`}. {serviceLine(o)}: {plural(o.clothes_count, 'piece')}{Number(o.weight_kg) > 0 ? `, ${kg(o.weight_kg)}` : ''}{o.amount ? `. ${rupees(o.amount)} due at pickup` : ''}.</p>
       <p className="created-sub">{o.customer_kind === 'WALKIN' ? 'Walk-in: tell them the order no. They show it at pickup.' : 'The digital slip is already on the student’s phone.'}</p>
       <Button ref={next} tone="primary" size="lg" block icon="plus" onClick={onNext}>Next student</Button>
@@ -389,7 +403,7 @@ function Pickup({ settings, onDone, openOrder }: { settings?: OpsSettings; onDon
           {scan ? <Scanner hint="Scan the QR on the student’s slip" onResult={lookup} /> : <Button size="lg" block icon="camera" onClick={() => setScan(true)}>Scan slip QR</Button>}
           <form className="find-row" onSubmit={e => { e.preventDefault(); void lookup(code); }}>
             <label className="sr-only" htmlFor="orderno">Order number</label>
-            <input id="orderno" className="find-input" value={code} onChange={e => setCode(e.target.value)} placeholder="or type order no., e.g. 1042" inputMode="numeric" autoComplete="off" />
+            <input id="orderno" className="find-input upper" value={code} onChange={e => setCode(e.target.value)} placeholder="or type card no. (A1002) or order no." autoCapitalize="characters" autoComplete="off" spellCheck={false} />
             <Button tone="primary" size="lg" busy={busy} icon="search" aria-label="Find order" />
           </form>
           {error && <ErrorNote error={error} />}
@@ -404,7 +418,8 @@ function Pickup({ settings, onDone, openOrder }: { settings?: OpsSettings; onDon
       ) : (
         <div className="stack">
           <div className="pick-head">
-            <span className="pick-no">{found.order_no}</span>
+            {found.tag_no && <span className="pick-no card-no">{found.tag_no}</span>}
+            <span className={found.tag_no ? 'pick-sub' : 'pick-no'}>{found.order_no}</span>
             <StatusPill status={found.status} late={found.late} />
             <PayPill o={found} />
           </div>
@@ -414,9 +429,11 @@ function Pickup({ settings, onDone, openOrder }: { settings?: OpsSettings; onDon
             <div className="stop-box"><Icon name="x" size={28} /><b>This order was cancelled</b><p>{found.cancel_reason}</p></div>
           ) : (
             <>
-              <div className={`verify${found.via === 'NUMBER' ? ' strict' : ''}`}>
-                <StudentLine o={found} />
-                <p>{found.via === 'QR' ? 'Slip QR verified. Check the face matches the ID card.' : 'Typed order no.: check the student’s physical ID card before handing over.'}</p>
+              <div className={`verify${found.via !== 'QR' ? ' strict' : ''}`}>
+                <StudentLine o={found} photoSize={96} />
+                <p>{found.via === 'QR' ? 'Slip QR verified. Check the face matches the photo and the ID card.'
+                  : found.via === 'CARD' ? `Found by card ${found.tag_no}: check the person matches the photo and their ID card before handing over.`
+                  : 'Typed order no.: check the student’s physical ID card before handing over.'}</p>
               </div>
               <HandOver o={found} payFirst={settings?.pay_before_pickup ?? true} onDone={o => { setHanded(o); onDone(); }} />
             </>
@@ -434,7 +451,7 @@ function OrderRow({ o, onOpen, selectable, selected, onSelect }: { o: Order; onO
     <li className={`order-row${selected ? ' sel' : ''}${o.late ? ' late' : ''}`}>
       {selectable && <label className="row-check"><input type="checkbox" checked={!!selected} onChange={e => onSelect?.(e.target.checked)} aria-label={`Select ${o.order_no}`} /></label>}
       <button onClick={onOpen}>
-        <span className="or-no">{o.order_no}</span>
+        <span className="or-no">{o.tag_no ? <span className="card-no">{o.tag_no}</span> : o.order_no}{o.tag_no && <small>{o.order_no}</small>}</span>
         <span className="or-who"><b>{o.student_name}</b><small>{o.hostel_name}, room {o.room_no}</small></span>
         <span className="or-load">{o.clothes_count}<small>pcs</small></span>
         <span className="or-load">{Number(o.weight_kg).toFixed(1)}<small>kg</small></span>
@@ -520,7 +537,7 @@ function Students({ openStudent, pending, roomChanges }: { openStudent: (id: num
         <ul className="student-rows">
           {list.data.rows.map(s => (
             <li key={s.id}><button onClick={() => openStudent(s.id)}>
-              <span className="avatar">{s.name.split(' ').map(x => x[0]).slice(0, 2).join('')}</span>
+              <Avatar name={s.name} photo={s.photo} size={40} />
               <span className="sr-who"><b>{s.name}</b><small>{view === 'ROOMS' ? `${s.hostel_name} ${s.room_no} → ${s.pending_hostel_name} ${s.pending_room_no}` : `${s.id_card_no}, ${s.hostel_name}, room ${s.room_no}`}</small></span>
               {view === 'ROOMS' ? <span className="pill acc-pending">Check</span> : s.status !== 'ACTIVE' ? <span className={`pill acc-${s.status.toLowerCase()}`}>{s.status === 'PENDING' ? 'Check' : s.status.toLowerCase()}</span> : <small className="sr-month">{s.month_orders} this month</small>}
               <Icon name="next" size={18} />

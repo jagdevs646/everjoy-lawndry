@@ -1,10 +1,53 @@
-import { FormEvent, useState } from 'react';
-import { api, ApiError, Hostel, User } from './api';
+import { FormEvent, useEffect, useState } from 'react';
+import { api, ApiError, Hostel, OtpStart, SignedIn, User } from './api';
 import { go, toast, useFormAction, useLoad, useRoute } from './lib';
 import { builtInServer, canChangeServer, isApp, probeServer, serverAddress, setServer } from './platform';
 import { Brand, Button, ErrorNote, Field, Icon, Sheet } from './ui';
 
-type Info = { hostels: Hostel[]; max_kg_per_order: number; counter_hours: string };
+type Info = { hostels: Hostel[]; max_kg_per_order: number; counter_hours: string; email_codes?: boolean; email_domain?: string };
+
+/**
+ * "Check your email": the 6-digit code the server sent to the student's university email.
+ * Used after the password on a new phone/browser, when setting up an imported account, and to finish registration.
+ */
+export function OtpStep({ start, onDone, onBack }: { start: OtpStart; onDone: (r: SignedIn) => void; onBack: () => void }) {
+  const [challenge, setChallenge] = useState(start);
+  const [code, setCode] = useState('');
+  const [wait, setWait] = useState(30);
+  const { busy, error, setError, submit } = useFormAction();
+  const resend = useFormAction();
+  useEffect(() => {
+    if (wait <= 0) return;
+    const t = window.setTimeout(() => setWait(w => w - 1), 1000);
+    return () => window.clearTimeout(t);
+  }, [wait]);
+  const verify = async (e?: FormEvent) => {
+    e?.preventDefault();
+    const r = await submit(() => api<SignedIn>('/auth/otp', { body: { challenge: challenge.challenge, code } }));
+    if (r) onDone(r);
+  };
+  const again = async () => {
+    setError('');
+    const r = await resend.submit(() => api<OtpStart>('/auth/otp/resend', { body: { challenge: challenge.challenge } }), 'New code sent');
+    if (r) { setChallenge(r); setCode(''); setWait(30); }
+  };
+  const what = start.purpose === 'LOGIN' ? 'This is a new phone or browser for your account.' : start.purpose === 'CLAIM' ? 'Your account was added by the laundry office.' : 'One last step to register.';
+  return (
+    <form className="auth-card" onSubmit={verify} noValidate>
+      <button type="button" className="auth-back" onClick={onBack}><Icon name="back" size={18} />Back</button>
+      <h1>Check your email</h1>
+      <p className="lede">{what} We sent a 6-digit code to <b>{challenge.email_hint}</b>.</p>
+      <Field label="Code from the email" hint="It works for 10 minutes. Check the spam folder too.">
+        <input className="otp-input" value={code} onChange={e => { const v = e.target.value.replace(/\D/g, '').slice(0, 6); setCode(v); }}
+          inputMode="numeric" autoComplete="one-time-code" autoFocus aria-label="6-digit code" />
+      </Field>
+      {(error || resend.error) && <ErrorNote error={error || resend.error} />}
+      <Button tone="primary" size="lg" block busy={busy} disabled={code.length !== 6}>Continue</Button>
+      <Button type="button" tone="plain" block busy={resend.busy} disabled={wait > 0} onClick={again}>{wait > 0 ? `Send a new code in ${wait} s` : 'Send a new code'}</Button>
+      <p className="auth-foot">Wrong email or no access to it? Ask at the laundry counter; staff can update your email.</p>
+    </form>
+  );
+}
 
 export function PublicApp({ onSignedIn }: { onSignedIn: (u: User) => void }) {
   const [page] = useRoute();
@@ -38,12 +81,16 @@ export function PublicApp({ onSignedIn }: { onSignedIn: (u: User) => void }) {
 function SignIn({ onSignedIn, counterHours }: { onSignedIn: (u: User) => void; counterHours?: string }) {
   const [loginId, setLoginId] = useState('');
   const [password, setPassword] = useState('');
+  const [otp, setOtp] = useState<OtpStart | null>(null);
   const { busy, error, submit: send } = useFormAction();
   const submit = async (e: FormEvent) => {
     e.preventDefault();
-    const r = await send(() => api<{ user: User }>('/auth/login', { body: { loginId, password } }));
-    if (r) onSignedIn(r.user);
+    const r = await send(() => api<SignedIn | OtpStart>('/auth/login', { body: { loginId, password } }));
+    if (!r) return;
+    if ('otp_required' in r) { setOtp(r); return; }
+    onSignedIn(r.user);
   };
+  if (otp) return <OtpStep start={otp} onDone={r => onSignedIn(r.user)} onBack={() => { setOtp(null); setPassword(''); }} />;
   return (
     <form className="auth-card" onSubmit={submit} noValidate>
       <h1>Sign in</h1>
@@ -63,26 +110,31 @@ function SignIn({ onSignedIn, counterHours }: { onSignedIn: (u: User) => void; c
 }
 
 function Register({ info, onSignedIn }: { info?: Info; onSignedIn: (u: User) => void }) {
-  const [f, setF] = useState({ idCardNo: '', name: '', mobile: '', hostelId: '', roomNo: '', password: '', confirm: '', claimCode: '' });
+  const [f, setF] = useState({ idCardNo: '', name: '', mobile: '', email: '', hostelId: '', roomNo: '', password: '', confirm: '', claimCode: '' });
   const [needsCode, setNeedsCode] = useState(false);
+  const [otp, setOtp] = useState<OtpStart | null>(null);
+  const finish = (r: SignedIn) => { if (r.claimed) toast('Your account is ready. The laundry office already checked your details.'); go(''); onSignedIn(r.user); };
   const { busy, error, setError, submit: send } = useFormAction();
   const set = (k: keyof typeof f) => (e: { target: { value: string } }) => setF({ ...f, [k]: e.target.value });
   const submit = async (e: FormEvent) => {
     e.preventDefault();
     if (f.password !== f.confirm) return setError('The two passwords do not match.');
-    const r = await send(() => api<{ user: User; claimed?: boolean }>('/auth/signup', { body: f }).catch((err: ApiError) => {
+    const r = await send(() => api<SignedIn | OtpStart>('/auth/signup', { body: f }).catch((err: ApiError) => {
       if (err.details?.code === 'CLAIM_CODE') setNeedsCode(true);
       throw err;
     }));
-    if (r) { if (r.claimed) toast('Your account is ready. The laundry office already checked your details.'); go(''); onSignedIn(r.user); }
+    if (!r) return;
+    if ('otp_required' in r) { setOtp(r); return; }
+    finish(r);
   };
+  if (otp) return <OtpStep start={otp} onDone={finish} onBack={() => setOtp(null)} />;
   const noHostels = info && info.hostels.length === 0;
   return (
     <form className="auth-card" onSubmit={submit} noValidate>
       <a className="auth-back" href="#/"><Icon name="back" size={18} />Sign in</a>
       <h1>Register</h1>
       <p className="lede">Fill this once. Then show your ID card at the counter and staff will approve you.</p>
-      <p className="muted small">Already added by the laundry office? Use the same ID card no. and mobile number they have, enter the claim code they gave you, and choose your password.</p>
+      <p className="muted small">Already added by the laundry office? Use the same ID card no. and mobile number they have and choose your password. We email a code to your university email (or enter the claim code the office gave you).</p>
       {noHostels && <ErrorNote error="Registration opens once the laundry office adds the hostel list. Please check back soon." />}
       <Field label="ID card no." hint="Exactly as printed on your university ID card">
         <input value={f.idCardNo} onChange={set('idCardNo')} autoCapitalize="characters" spellCheck={false} autoComplete="username" required />
@@ -92,6 +144,10 @@ function Register({ info, onSignedIn }: { info?: Info; onSignedIn: (u: User) => 
       </Field>
       <Field label="Mobile number">
         <input value={f.mobile} onChange={set('mobile')} inputMode="tel" autoComplete="tel-national" placeholder="10 digits" required />
+      </Field>
+      <Field label={info?.email_codes ? 'University email' : 'University email (optional)'} hint={`A code is sent here to confirm it's you${info?.email_domain ? `. Must end with @${info.email_domain.replace(/^@/, '')}` : ''}. Added by the office? Leave it empty.`}>
+        <input type="email" value={f.email} onChange={set('email')} inputMode="email" autoComplete="email" autoCapitalize="none" spellCheck={false}
+          placeholder={info?.email_domain ? `name@${info.email_domain.replace(/^@/, '')}` : 'name@university.edu'} />
       </Field>
       <div className="field-row">
         <Field label="Hostel">

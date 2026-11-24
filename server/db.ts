@@ -446,7 +446,12 @@ export async function migrate() {
     ['orders', 'plan_hosteler', 'INTEGER'],
     ['users', 'password_expires_at', 'TEXT'],                     // temporary passwords stop working after this
     ['students', 'claim_hash', 'TEXT'],                            // imported account: sha256 of the one-time claim code
-    ['students', 'claim_expires_at', 'TEXT'],                         // 1 = hostel prices when taken (kept for corrections)
+    ['students', 'claim_expires_at', 'TEXT'],
+    ['users', 'photo', 'TEXT'],                                     // profile photo (files table name)
+    ['students', 'email', 'TEXT'],                                  // university email: sign-in codes are sent here
+    ['students', 'email_verified_at', 'TEXT'],
+    ['students', 'valid_from', 'TEXT'],                             // hostel plan start (semester), YYYY-MM-DD
+    ['orders', 'tag_no', 'TEXT'],                                   // basket card no. (A1002…), reused once the order is collected                         // 1 = hostel prices when taken (kept for corrections)
   ] as const;
   for (const [table, column, def] of add) {
     try {
@@ -455,6 +460,20 @@ export async function migrate() {
       if (!/duplicate column|already exists/i.test(String((e as Error).message))) throw e;
     }
   }
+
+  // Sign-in codes waiting for the student to type them (see otp.ts).
+  await db.driver.script(`CREATE TABLE IF NOT EXISTS login_challenges (
+    id TEXT PRIMARY KEY, purpose TEXT NOT NULL, user_id INTEGER, email TEXT NOT NULL, code_hash TEXT NOT NULL, payload TEXT,
+    attempts INTEGER NOT NULL DEFAULT 0, sends INTEGER NOT NULL DEFAULT 1, last_sent_at TEXT NOT NULL, expires_at TEXT NOT NULL, created_at TEXT NOT NULL)`);
+  // One basket card can be on only one order that hasn't been collected yet (both SQLite and Postgres support this).
+  await db.driver.script(`CREATE UNIQUE INDEX IF NOT EXISTS idx_orders_open_tag ON orders (tag_no) WHERE tag_no IS NOT NULL AND status IN ('RECEIVED','WASHING','READY')`);
+  // One account per university email (emails are new in this version, so no existing rows clash).
+  await db.driver.script('DROP INDEX IF EXISTS idx_students_email');
+  await db.driver.script('CREATE UNIQUE INDEX IF NOT EXISTS idx_students_email_u ON students (lower(email)) WHERE email IS NOT NULL');
+  // Wrong email codes per address, kept across challenges and restarts (stops slow guessing).
+  await db.driver.script('CREATE TABLE IF NOT EXISTS otp_failures (email TEXT PRIMARY KEY, failures INTEGER NOT NULL DEFAULT 0, locked_until TEXT, updated_at TEXT NOT NULL)');
+  // Emails sent per day and kind, so registrations can't use up the quota needed for sign-in codes.
+  await db.driver.script('CREATE TABLE IF NOT EXISTS mail_counts (day TEXT NOT NULL, kind TEXT NOT NULL, n INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (day, kind))');
 
   // Default services the first time (admin edits names and prices in Rules & pricing).
   const count = await db.get<{ c: number }>('SELECT COUNT(*) AS c FROM services');

@@ -2,8 +2,9 @@ import { ButtonHTMLAttributes, ReactNode, Ref, useEffect, useId, useRef, useStat
 import { createPortal } from 'react-dom';
 import QRCode from 'qrcode';
 import { api, blobUrl, fileObjectUrl, type Order, type OrderStatus, type PaymentInfo } from './api';
-import { isApp } from './platform';
-import { useToasts } from './lib';
+import { registerPlugin } from '@capacitor/core';
+import { isApp, platformName } from './platform';
+import { serverNow, useToasts } from './lib';
 
 /* ------------------------------------------------------------------ icons */
 
@@ -230,7 +231,83 @@ export function Photo({ name, alt }: { name: string; alt: string }) {
   return isApp ? img : <a href={src} target="_blank" rel="noreferrer">{img}</a>;
 }
 
+/* ---------------------------------------------------------------- avatar */
+
+/** Profile photo of an account holder, or their initials when there is none. */
+export function Avatar({ name, photo, size = 40, className = '' }: { name: string; photo?: string | null; size?: number; className?: string }) {
+  const [src, setSrc] = useState('');
+  useEffect(() => {
+    if (!photo) { setSrc(''); return; }
+    if (!isApp) { setSrc(`/api/files/${encodeURIComponent(photo)}`); return; }
+    let url = '';
+    let live = true;
+    fileObjectUrl(photo).then(u => { url = u; if (live) setSrc(u); else URL.revokeObjectURL(u); }).catch(() => live && setSrc(''));
+    return () => { live = false; if (url) URL.revokeObjectURL(url); };
+  }, [photo]);
+  const style = { width: size, height: size, fontSize: Math.max(11, size * 0.34) };
+  if (src) return <img className={`avatar avatar-img ${className}`} src={src} alt={`Photo of ${name}`} style={style} />;
+  return <span className={`avatar ${className}`} style={style} aria-hidden="true">{(name || '?').split(/\s+/).map(x => x[0]).slice(0, 2).join('').toUpperCase()}</span>;
+}
+
+/* --------------------------------------------------------- privacy screen */
+
+const PrivacyScreen = registerPlugin<{ enable(): Promise<void>; disable(): Promise<void> }>('PrivacyScreen');
+/**
+ * While a slip or ID QR is on screen, the Android app blocks screenshots and screen recording
+ * (and hides the screen in the recent-apps view). The website and iPhone can't block screenshots;
+ * there the slip QR changes every 30 s instead, so a screenshot stops working.
+ */
+export function useNoScreenshots(active = true) {
+  useEffect(() => {
+    if (!active || !isApp || platformName !== 'android') return;
+    PrivacyScreen.enable().catch(() => {});
+    return () => { PrivacyScreen.disable().catch(() => {}); };
+  }, [active]);
+}
+
 /* ------------------------------------------------------------- QR + scan */
+
+const QR_STEP = 30;
+const b64url = (buf: ArrayBuffer) => btoa(String.fromCharCode(...new Uint8Array(buf))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+
+/**
+ * The slip QR for pickup. It changes every 30 seconds (signed with the order's secret token, which
+ * only this account has), so a screenshot sent to someone else stops working within about two minutes.
+ */
+export function SlipQr({ orderId, slipKey, size = 220 }: { orderId: number; slipKey: string; size?: number }) {
+  const [text, setText] = useState('');
+  const [left, setLeft] = useState(QR_STEP);
+  const [failed, setFailed] = useState(false);
+  useEffect(() => {
+    const subtle = globalThis.crypto?.subtle;
+    if (!subtle) { setFailed(true); return; }
+    let live = true;
+    let shown = -1;
+    let timer = 0;
+    const enc = new TextEncoder();
+    subtle.importKey('raw', enc.encode(slipKey), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']).then(key => {
+      const tick = async () => {
+        const now = serverNow() / 1000;
+        setLeft(QR_STEP - Math.floor(now % QR_STEP));
+        const step = Math.floor(now / QR_STEP);
+        if (step === shown) return;
+        shown = step;
+        const sig = b64url(await subtle.sign('HMAC', key, enc.encode(`${orderId}.${step}`))).slice(0, 16);
+        if (live) setText(`EJ2:${orderId}.${step}.${sig}`);
+      };
+      void tick();
+      timer = window.setInterval(() => void tick(), 1000);
+    }).catch(() => live && setFailed(true));
+    return () => { live = false; window.clearInterval(timer); };
+  }, [orderId, slipKey]);
+  if (failed) return <p className="muted small">The slip QR needs a secure (https) page. Tell staff your basket card no. and show your ID card.</p>;
+  return (
+    <div className="slip-qr-live">
+      {text ? <QrImage text={text} size={size} /> : <div className="qr-img" style={{ width: size, height: size }} />}
+      <span className="qr-timer" aria-live="off"><i style={{ width: `${(left / QR_STEP) * 100}%` }} />Changes in {left} s · screenshots don't work</span>
+    </div>
+  );
+}
 
 export function QrImage({ text, size = 240, dark = '#1B2A4A' }: { text: string; size?: number; dark?: string }) {
   const [src, setSrc] = useState('');

@@ -2,11 +2,12 @@
 import { FormEvent, useState } from 'react';
 import { api, Complaint, Hostel, Order, Plan, Service, Student, Usage } from './api';
 import { eventLabel } from './student';
-import { ago, kg, plural, rupees, toast, useAction, useFormAction, useLoad, when } from './lib';
-import { Button, Empty, ErrorNote, Field, Icon, Loading, PayPill, Photo, Segmented, Sheet, StatusPill, Stepper, UpiQr } from './ui';
+import { ago, kg, planPeriod, plural, rupees, semesterOptions, shrinkPhoto, toast, useAction, useFormAction, useLoad, when } from './lib';
+import { Avatar, Button, Empty, ErrorNote, Field, Icon, Loading, PayPill, Photo, Segmented, Sheet, StatusPill, Stepper, UpiQr } from './ui';
 
 export type OpsSettings = { max_kg_per_order: number; express_enabled: boolean; express_fee: number; pay_before_pickup: boolean; monthly_kg_limit: number; monthly_order_limit: number; max_active_orders: number;
-  allow_paid_extra: boolean; extra_rate_per_kg: number; upi_id: string; upi_name: string; has_upi_qr: boolean };
+  allow_paid_extra: boolean; extra_rate_per_kg: number; upi_id: string; upi_name: string; has_upi_qr: boolean;
+  card_required?: boolean; card_series?: { prefix: string; from: number; to: number }[]; semester_start?: string; semester_end?: string };
 export type CounterStudent = Student & { usage: Usage; open: Order[]; orders?: Order[]; plan: Plan };
 export type { Service };
 
@@ -19,7 +20,7 @@ const isOpen = (o: Order) => ['RECEIVED', 'WASHING', 'READY'].includes(o.status)
 
 export function OrderSheet({ id, close, onChanged, isAdmin, payFirst }: { id: number; close: () => void; onChanged?: () => void; isAdmin: boolean; payFirst: boolean }) {
   const d = useLoad(() => api<Order>(`/ops/orders/${id}`), [id]);
-  const [mode, setMode] = useState<'view' | 'handover' | 'fix' | 'cancel' | 'pay' | 'waive'>('view');
+  const [mode, setMode] = useState<'view' | 'handover' | 'fix' | 'cancel' | 'pay' | 'waive' | 'card'>('view');
   const { busy, run } = useAction();
   const changed = (o: Order) => { d.set(o); setMode('view'); onChanged?.(); };
   const setStatus = async (status: string) => {
@@ -30,6 +31,8 @@ export function OrderSheet({ id, close, onChanged, isAdmin, payFirst }: { id: nu
     <Sheet title={o ? o.order_no : 'Order'} onClose={close} size="md" className="order-sheet">
       {!o ? (d.error ? <ErrorNote error={d.error} retry={d.reload} /> : <Loading />) : mode === 'handover' ? (
         <HandOver o={o} payFirst={payFirst} onDone={changed} onCancel={() => setMode('view')} />
+      ) : mode === 'card' ? (
+        <ChangeCard o={o} onDone={changed} onCancel={() => setMode('view')} />
       ) : mode === 'fix' ? (
         <FixOrder o={o} onDone={changed} onCancel={() => setMode('view')} />
       ) : mode === 'cancel' || mode === 'waive' ? (
@@ -45,6 +48,7 @@ export function OrderSheet({ id, close, onChanged, isAdmin, payFirst }: { id: nu
           </div>
           <StudentLine o={o} />
           <dl className="facts">
+            <div><dt>Basket card</dt><dd className="big">{o.tag_no ? <span className="card-no">{o.tag_no}</span> : <span className="muted">None</span>}</dd></div>
             <div><dt>Clothes</dt><dd className="big">{o.clothes_count}{o.returned_count != null ? <small> / {o.returned_count} returned</small> : null}</dd></div>
             <div><dt>Weight</dt><dd className="big">{kg(o.weight_kg)}</dd></div>
             <div><dt>Received</dt><dd>{when(o.received_at, 'short')}<small>{o.received_by_name}</small></dd></div>
@@ -65,6 +69,7 @@ export function OrderSheet({ id, close, onChanged, isAdmin, payFirst }: { id: nu
               <Button tone="primary" size="lg" block icon="check" onClick={() => setMode('handover')}>Hand over to student</Button>
               <div className="minor-actions">
                 {o.payment_status === 'DUE' && <Button size="sm" icon="rupee" onClick={() => setMode('pay')}>Record payment</Button>}
+                <Button size="sm" icon="tag" onClick={() => setMode('card')}>{o.tag_no ? 'Change card' : 'Add card'}</Button>
                 {(isAdmin || o.status === 'RECEIVED') && <Button size="sm" icon="edit" onClick={() => setMode('fix')}>Correct weight or count</Button>}
                 {(isAdmin || o.status === 'RECEIVED') && <Button size="sm" tone="danger" icon="x" onClick={() => setMode('cancel')}>Cancel order</Button>}
                 {isAdmin && o.payment_status === 'DUE' && <Button size="sm" onClick={() => setMode('waive')}>Waive payment</Button>}
@@ -81,10 +86,10 @@ export function OrderSheet({ id, close, onChanged, isAdmin, payFirst }: { id: nu
   );
 }
 
-export function StudentLine({ o }: { o: Pick<Order, 'student_name' | 'id_card_no' | 'hostel_name' | 'room_no' | 'mobile'> }) {
+export function StudentLine({ o, photoSize = 44 }: { o: Pick<Order, 'student_name' | 'id_card_no' | 'hostel_name' | 'room_no' | 'mobile' | 'student_photo'>; photoSize?: number }) {
   return (
     <div className="student-line">
-      <span className="avatar" aria-hidden="true">{(o.student_name || '?').split(' ').map(x => x[0]).slice(0, 2).join('')}</span>
+      <Avatar name={o.student_name || '?'} photo={o.student_photo} size={photoSize} />
       <span><b>{o.student_name}</b><small>ID {o.id_card_no}, {o.hostel_name}, room {o.room_no}</small></span>
       {o.mobile && <a className="icon-btn" href={`tel:${o.mobile}`} aria-label={`Call ${o.student_name}`}><Icon name="phone" /></a>}
     </div>
@@ -134,6 +139,26 @@ export function HandOver({ o, payFirst, onDone, onCancel }: { o: Order; payFirst
         Hand over {plural(Number(count) || 0, 'piece')}{needsPay ? `, ${rupees(o.amount)} received` : ''}
       </Button>
       {onCancel && <Button tone="plain" block type="button" onClick={onCancel}>Back</Button>}
+    </form>
+  );
+}
+
+function ChangeCard({ o, onDone, onCancel }: { o: Order; onDone: (o: Order) => void; onCancel: () => void }) {
+  const [tag, setTag] = useState(o.tag_no ?? '');
+  const { busy, error, submit } = useFormAction();
+  const save = async (e: FormEvent) => {
+    e.preventDefault();
+    const r = await submit(() => api<Order>(`/ops/orders/${o.id}/card`, { method: 'PATCH', body: { tagNo: tag } }), 'Card updated');
+    if (r) onDone(r);
+  };
+  return (
+    <form className="stack" onSubmit={save}>
+      <Field label="Basket card no." hint="The card tied to this basket, e.g. A1002">
+        <input value={tag} onChange={e => setTag(e.target.value.toUpperCase())} autoCapitalize="characters" autoFocus />
+      </Field>
+      {error && <ErrorNote error={error} />}
+      <Button tone="primary" block busy={busy}>Save card</Button>
+      <Button tone="plain" block type="button" onClick={onCancel}>Back</Button>
     </form>
   );
 }
@@ -232,6 +257,7 @@ export function StudentSheet({ id, close, onChanged, isAdmin, onOpenOrder }: { i
         <StudentReason s={s} kind={mode} onDone={done} onCancel={() => setMode('view')} />
       ) : (
         <div className="stack">
+          <StudentPhoto s={s} onChanged={n => done({ ...s, ...n })} />
           <StudentFacts s={s} />
           {s.status === 'PENDING' && (
             <div className="approve-box">
@@ -288,8 +314,9 @@ export function StudentFacts({ s }: { s: CounterStudent }) {
       <div><dt>ID card no.</dt><dd className="big">{s.id_card_no}</dd></div>
       <div><dt>Account</dt><dd><span className={`pill acc-${s.status.toLowerCase()}`}>{label[s.status]}</span></dd></div>
       <div><dt>Hostel</dt><dd>{s.kind === 'WALKIN' ? 'Walk-in customer' : <>{s.hostel_name}, room {s.room_no}</>}</dd></div>
-      <div><dt>Plan</dt><dd>{s.plan.hosteler ? 'Hosteler' : <span className="pill pay-due">Normal prices</span>}<small>{s.plan.label}</small></dd></div>
+      <div><dt>Hostel plan</dt><dd>{s.plan.hosteler ? (planPeriod(s.valid_from, s.valid_until) || 'Valid') : <span className="pill pay-due">Normal prices</span>}<small>{s.plan.label}</small></dd></div>
       <div><dt>Mobile</dt><dd><a href={`tel:${s.mobile}`}>{s.mobile}</a></dd></div>
+      {s.kind !== 'WALKIN' && <div><dt>University email</dt><dd>{s.email ? <>{s.email}<small>{s.email_verified_at ? 'Confirmed with a code' : 'Not confirmed yet'}</small></> : <span className="muted">Not given</span>}</dd></div>}
       <div><dt>This month</dt><dd>{plural(s.usage.orders, 'order')}, {kg(s.usage.kg)}{s.usage.kg_limit ? <small>{kg(s.usage.kg_left)} left of {kg(s.usage.kg_limit)}</small> : null}</dd></div>
       <div><dt>Registered</dt><dd>{when(s.created_at, 'date')}{s.reviewed_by_name ? <small>Checked by {s.reviewed_by_name}</small> : null}</dd></div>
     </dl>
@@ -298,7 +325,9 @@ export function StudentFacts({ s }: { s: CounterStudent }) {
 
 function EditStudent({ s, isAdmin, onDone, onCancel }: { s: CounterStudent; isAdmin: boolean; onDone: (s: CounterStudent) => void; onCancel: () => void }) {
   const hostels = useLoad(() => api<{ hostels: Hostel[] }>('/public/info'), []);
-  const [f, setF] = useState<Record<string, string>>({ name: s.name, idCardNo: s.id_card_no, mobile: s.mobile, hostelId: String(s.hostel_id), roomNo: s.room_no, ...(isAdmin ? { validUntil: s.valid_until ?? '' } : {}) });
+  void isAdmin;
+  const [f, setF] = useState<Record<string, string>>({ name: s.name, idCardNo: s.id_card_no, mobile: s.mobile, hostelId: String(s.hostel_id), roomNo: s.room_no,
+    validFrom: s.valid_from ?? '', validUntil: s.valid_until ?? '', email: s.email ?? '' });
   const { busy, error, submit } = useFormAction();
   const save = async (e: FormEvent) => {
     e.preventDefault();
@@ -318,7 +347,18 @@ function EditStudent({ s, isAdmin, onDone, onCancel }: { s: CounterStudent; isAd
         </Field>
         <Field label="Room no."><input value={f.roomNo} onChange={e => setF({ ...f, roomNo: e.target.value })} /></Field>
       </div>
-      {isAdmin && s.kind !== 'WALKIN' && <Field label="Hostel plan valid till" hint="After this date the student pays normal prices. Leave empty for no end date."><input type="date" value={f.validUntil} onChange={e => setF({ ...f, validUntil: e.target.value })} /></Field>}
+      {s.kind !== 'WALKIN' && <>
+        <Field label="University email" hint="Sign-in codes go here. Changing it signs the student out on all phones."><input type="email" value={f.email} onChange={e => setF({ ...f, email: e.target.value })} inputMode="email" autoCapitalize="none" /></Field>
+        <fieldset className="plan-fields">
+          <legend>Hostel plan (semester)</legend>
+          <SemesterChips from={f.validFrom} until={f.validUntil} onPick={(from, until) => setF({ ...f, validFrom: from, validUntil: until })} />
+          <div className="field-row">
+            <Field label="From"><input type="date" value={f.validFrom} onChange={e => setF({ ...f, validFrom: e.target.value })} /></Field>
+            <Field label="Till"><input type="date" value={f.validUntil} onChange={e => setF({ ...f, validUntil: e.target.value })} /></Field>
+          </div>
+          <p className="muted small">Outside these dates the student pays normal prices. Leave both empty for no dates.</p>
+        </fieldset>
+      </>}
       {error && <ErrorNote error={error} />}
       <Button tone="primary" block busy={busy}>Save details</Button>
       <Button tone="plain" block type="button" onClick={onCancel}>Back</Button>
@@ -432,3 +472,48 @@ function ComplaintSheet({ id, close, onChanged, onOpenOrder }: { id: number; clo
 }
 
 export const copyText = async (t: string) => { try { await navigator.clipboard.writeText(t); toast('Copied'); } catch { /* clipboard blocked */ } };
+
+/** Quick buttons for the January–June and July–December semesters. */
+export function SemesterChips({ from, until, onPick }: { from: string; until: string; onPick: (from: string, until: string) => void }) {
+  return (
+    <div className="semester-chips" role="group" aria-label="Semester">
+      {semesterOptions().map(o => (
+        <button type="button" key={o.label} className={o.from === from && o.until === until ? 'on' : ''} onClick={() => onPick(o.from, o.until)}>{o.label}</button>
+      ))}
+    </div>
+  );
+}
+
+/**
+ * The student's photo at the counter. Staff compare it with the person at drop-off and pickup,
+ * and can take a new one (front camera on a phone) or upload one at any time.
+ */
+function StudentPhoto({ s, onChanged }: { s: CounterStudent; onChanged: (s: CounterStudent) => void }) {
+  const { busy, run } = useAction();
+  const pick = async (file: File | undefined) => {
+    if (!file) return;
+    const small = await shrinkPhoto(file, 900);
+    const form = new FormData();
+    form.append('photo', small, 'photo.jpg');
+    const r = await run(() => api<CounterStudent>(`/ops/students/${s.id}/photo`, { form }), 'Photo saved');
+    if (r) onChanged(r);
+  };
+  const remove = async () => {
+    if (!window.confirm('Remove this photo?')) return;
+    const r = await run(() => api<CounterStudent>(`/ops/students/${s.id}/photo`, { method: 'DELETE' }), 'Photo removed');
+    if (r) onChanged(r);
+  };
+  return (
+    <div className="photo-row">
+      <Avatar name={s.name} photo={s.photo} size={88} />
+      <div className="stack">
+        {!s.photo && <p className="muted small">No photo yet. Take one so the counter can recognise {s.name.split(' ')[0]} at pickup.</p>}
+        <label className={`btn btn-quiet btn-sm${busy ? ' is-busy' : ''}`}>
+          <Icon name="camera" size={18} /><span>{s.photo ? 'New photo' : 'Take photo'}</span>
+          <input type="file" accept="image/*" capture="user" hidden onChange={e => { void pick(e.target.files?.[0]); e.target.value = ''; }} />
+        </label>
+        {s.photo && <Button size="sm" tone="plain" type="button" onClick={remove}>Remove</Button>}
+      </div>
+    </div>
+  );
+}

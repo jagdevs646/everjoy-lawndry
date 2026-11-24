@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import { z } from 'zod';
 import { db, insertId, logActivity, nextCounter, notify } from './db.js';
 import { HttpError, MAX_ID, dayKey, monthKey, nowIso, parse, round2 } from './util.js';
+import { slipKey } from './auth.js';
 
 /* ---------------------------------------------------------------- settings */
 
@@ -20,7 +21,17 @@ export const settingsSchema = z.object({
   upi_id: z.string().trim().max(80),
   upi_name: z.string().trim().max(80),
   upi_qr_file: z.string().trim().max(80),                           // uploaded UPI QR image (files table), '' = none
-  semester_end: z.union([z.literal(''), z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Use a date like 2027-05-31')]), // given to newly approved students
+  semester_start: z.union([z.literal(''), z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Use a date like 2027-01-01')]), // given to newly approved students
+  semester_end: z.union([z.literal(''), z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Use a date like 2027-06-30')]), // given to newly approved students
+  student_email_otp: z.boolean(),                                   // new phones/browsers need a code from the university email
+  student_email_domain: z.string().trim().toLowerCase().max(80).regex(/^@?[a-z0-9.-]*$/, 'Enter a domain like university.edu.in'),
+  card_required: z.boolean(),                                       // a basket card no. is needed for every order
+  card_series: z.array(z.object({
+    prefix: z.string().trim().toUpperCase().regex(/^[A-Z]{0,3}$/, 'Card letters: up to 3 letters (or none)')
+      .refine(v => v !== 'EJ', 'EJ is used for order numbers. Choose other letters for cards.'),
+    from: z.coerce.number().int().min(0).max(999999),
+    to: z.coerce.number().int().min(0).max(999999),
+  }).refine(s => s.from <= s.to, 'In a card series, "from" must not be bigger than "to"')).max(20),
   counter_hours: z.string().trim().max(120),
 });
 export type Settings = z.infer<typeof settingsSchema>;
@@ -40,7 +51,12 @@ export const defaultSettings: Settings = {
   upi_id: '',
   upi_name: 'Everjoy Lawndry',
   upi_qr_file: '',
+  semester_start: '',
   semester_end: '',
+  student_email_otp: true,
+  student_email_domain: '',
+  card_required: false,
+  card_series: [],
   counter_hours: 'Mon–Sat, 8:00 AM – 7:00 PM',
 };
 
@@ -57,12 +73,14 @@ export async function saveSettings(actorId: number, input: unknown): Promise<Set
   return db.tx(async () => {
     const before = await getSettings();
     const next = parse(settingsSchema, { ...before, ...(input as object) });
+    if (next.semester_start && next.semester_end && next.semester_start > next.semester_end) throw new HttpError(400, 'The semester start must be before its end.');
     const changed = (Object.keys(next) as (keyof Settings)[]).filter(k => JSON.stringify(next[k]) !== JSON.stringify(before[k]));
     for (const k of changed) {
       await db.run('INSERT INTO settings (key, value, updated_at, updated_by) VALUES (?,?,?,?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at, updated_by = excluded.updated_by',
         [k, JSON.stringify(next[k]), nowIso(), actorId]);
     }
-    if (changed.length) await logActivity(actorId, 'SETTINGS_CHANGED', 'settings', null, changed.map(k => `${k}: ${before[k]} → ${next[k]}`).join('; '));
+    const show = (v: unknown) => (typeof v === 'object' && v !== null ? JSON.stringify(v) : String(v));
+    if (changed.length) await logActivity(actorId, 'SETTINGS_CHANGED', 'settings', null, changed.map(k => `${k}: ${show(before[k])} → ${show(next[k])}`).join('; '));
     return next;
   });
 }
@@ -120,6 +138,48 @@ export async function monthUsage(studentId: number, excludeOrderId = 0) {
 
 /* ------------------------------------------------------------------- quote */
 
+/* ------------------------------------------------------------ basket cards */
+
+/** "a 1002", "A-1002" → "A1002". */
+export const normaliseCard = (v: string) => v.trim().toUpperCase().replace(/[\s-]/g, '').replace(/^([A-Z]{0,3})0+(?=\d)/, '$1');   // A012 = A12
+
+/**
+ * Check a basket card no. against the admin's card series (if any). Returns the clean card no.,
+ * or null when none was given and none is required.
+ */
+export function checkCard(s: Settings, raw: string | undefined | null) {
+  const v = normaliseCard(String(raw ?? ''));
+  if (!v) {
+    if (s.card_required) throw new HttpError(422, 'Enter the basket card no. (e.g. A1002).');
+    return null;
+  }
+  if (!/^[A-Z]{0,3}\d{1,6}$/.test(v)) throw new HttpError(422, `“${v}” doesn't look like a card no. Use letters then numbers, e.g. A1002.`);
+  if (s.card_series.length) {
+    const m = /^([A-Z]{0,3})(\d+)$/.exec(v)!;
+    const n = Number(m[2]);
+    const ok = s.card_series.some(x => x.prefix === m[1] && n >= x.from && n <= x.to);
+    if (!ok) throw new HttpError(422, `Card ${v} is not in the card series set by the admin (${s.card_series.map(x => `${x.prefix}${x.from}–${x.prefix}${x.to}`).join(', ')}).`);
+  }
+  return v;
+}
+
+/** Which open order (if any) is using this card right now. */
+export async function cardInUse(card: string, exceptOrderId = 0) {
+  return db.get<{ id: number; order_no: string; status: string }>(
+    `SELECT id, order_no, status FROM orders WHERE tag_no = ? AND status IN ('RECEIVED','WASHING','READY') AND id != ?`, [card, exceptOrderId]);
+}
+
+/* -------------------------------------------------------- rotating slip QR */
+
+/**
+ * The slip QR changes every 30 seconds: EJ2:<order id>.<time step>.<signature>. The signature is an
+ * HMAC keyed by the order's secret QR token, which only the student's phone has. A screenshot stops
+ * working within about two minutes, so it can't be passed around to collect someone's laundry.
+ */
+export const QR_STEP_SECONDS = 30;
+export const qrSignature = (qrToken: string, orderId: number, step: number) =>
+  crypto.createHmac('sha256', slipKey(qrToken)).update(`${orderId}.${step}`).digest('base64url').slice(0, 16);
+
 export const orderInput = z.object({
   studentId: z.coerce.number().int().positive().max(MAX_ID),
   serviceId: z.coerce.number().int().positive().max(MAX_ID).optional(),
@@ -129,23 +189,34 @@ export const orderInput = z.object({
   service: z.enum(['REGULAR', 'EXPRESS']).optional(),   // older clients: EXPRESS = express
   acceptExtra: z.boolean().default(false),               // staff chose "charge for the extra kg"
   note: z.string().trim().max(200).optional().default(''),
+  tagNo: z.string().trim().max(20).optional().default(''), // basket card no. written on the physical card
 });
 export type OrderInput = z.input<typeof orderInput>;
 
-type StudentRow = { id: number; name: string; mobile: string; active: number; status: string; room_no: string; hostel_name: string; id_card_no: string; kind: string; valid_until: string | null };
+type StudentRow = { id: number; name: string; mobile: string; active: number; status: string; room_no: string; hostel_name: string; id_card_no: string; kind: string; valid_until: string | null; valid_from: string | null };
 
 export async function studentForOrder(studentId: number): Promise<StudentRow> {
-  const s = await db.get<StudentRow>(`SELECT u.id, u.name, u.mobile, u.active, st.status, st.room_no, st.id_card_no, st.kind, st.valid_until, h.name AS hostel_name
+  const s = await db.get<StudentRow>(`SELECT u.id, u.name, u.mobile, u.active, st.status, st.room_no, st.id_card_no, st.kind, st.valid_until, st.valid_from, h.name AS hostel_name
     FROM users u JOIN students st ON st.user_id = u.id JOIN hostels h ON h.id = st.hostel_id WHERE u.id = ?`, [studentId]);
   if (!s) throw new HttpError(404, 'Student not found.');
   return s;
 }
 
 /** A current hosteler gets the hostel prices and the free washing allowance. */
-export function planStatus(s: { kind: string; valid_until: string | null }) {
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+/** "2027-06-30" → "30 Jun 2027" */
+export const niceDate = (d: string) => `${Number(d.slice(8, 10))} ${MONTHS[Number(d.slice(5, 7)) - 1]} ${d.slice(0, 4)}`;
+
+/** A current hosteler (inside the plan's dates) gets the hostel prices and the free washing allowance. */
+export function planStatus(s: { kind: string; valid_until: string | null; valid_from?: string | null }) {
   if (s.kind === 'WALKIN') return { hosteler: false, label: 'Walk-in customer, normal prices' };
-  if (s.valid_until && s.valid_until < dayKey()) return { hosteler: false, label: `Hostel plan ended ${s.valid_until}, normal prices` };
-  return { hosteler: true, label: s.valid_until ? `Hostel plan valid till ${s.valid_until}` : 'Hostel plan' };
+  const today = dayKey();
+  const from = s.valid_from || null;
+  const until = s.valid_until || null;
+  if (from && from > today) return { hosteler: false, label: `Hostel plan starts ${niceDate(from)}, normal prices till then` };
+  if (until && until < today) return { hosteler: false, label: `Hostel plan ended ${niceDate(until)}, normal prices` };
+  if (from && until) return { hosteler: true, label: `Hostel plan ${niceDate(from)} – ${niceDate(until)}` };
+  return { hosteler: true, label: until ? `Hostel plan valid till ${niceDate(until)}` : 'Hostel plan' };
 }
 
 /**
@@ -170,6 +241,13 @@ export async function quote(raw: OrderInput, excludeOrderId = 0, snapshot?: Pric
   // A correction keeps the order's own service even if the admin has hidden it since.
   if (!current.active && !excludeOrderId) throw new HttpError(422, `${current.name} is not offered right now.`);
   const service = snapshot?.unit ? { ...current, unit: snapshot.unit } : current;
+
+  // Basket card: right format, in the admin's series, and not on another order that isn't collected yet.
+  const tagNo = excludeOrderId ? null : checkCard(s, input.tagNo);
+  if (tagNo) {
+    const busy = await cardInUse(tagNo);
+    if (busy) throw new HttpError(409, `Card ${tagNo} is still on ${busy.order_no} (${busy.status.toLowerCase()}, not collected). Use another card.`, { code: 'CARD_IN_USE' });
+  }
 
   const express = input.express ?? input.service === 'EXPRESS';
   if (express && !s.express_enabled) throw new HttpError(422, 'Express service is switched off.');
@@ -228,6 +306,7 @@ export async function quote(raw: OrderInput, excludeOrderId = 0, snapshot?: Pric
   return {
     student: { id: student.id, name: student.name, id_card_no: student.id_card_no, hostel_name: student.hostel_name, room_no: student.room_no, mobile: student.mobile },
     plan,
+    tag_no: tagNo,
     service: { id: service.id, name: service.name, unit: service.unit, rate: unitRate },
     weight_kg: weight,
     clothes_count: input.clothesCount,
@@ -266,13 +345,13 @@ export async function createOrder(actorId: number, input: OrderInput, requestId?
     const note = String(orderInput.parse(input).note || '') || null;
     const id = await insertId(`INSERT INTO orders (order_no, student_id, hostel_name, room_no, mobile, weight_kg, clothes_count, service, note,
         within_kg, extra_kg, amount, payment_status, qr_token, request_id, received_by, received_at, day_key, month_key, expected_at, updated_at,
-        service_id, service_name, unit, rate, charge_note, plan_hosteler)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, [
+        service_id, service_name, unit, rate, charge_note, plan_hosteler, tag_no)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, [
       no, q.student.id, q.student.hostel_name, q.student.room_no, q.student.mobile, q.weight_kg, q.clothes_count, q.express ? 'EXPRESS' : 'REGULAR', note,
       q.within_kg, q.extra_kg, q.amount, q.amount > 0 ? 'DUE' : 'NONE', token, requestId ?? null, actorId, at, dayKey(), monthKey(), q.expected_at, at,
-      q.service.id, q.service.name, q.service.unit, q.service.rate, q.charge_note, q.plan.hosteler ? 1 : 0,
+      q.service.id, q.service.name, q.service.unit, q.service.rate, q.charge_note, q.plan.hosteler ? 1 : 0, q.tag_no,
     ]);
-    const what = `${q.service.name}, ${q.clothes_count} clothes${q.weight_kg ? `, ${q.weight_kg} kg` : ''}`;
+    const what = `${q.service.name}, ${q.clothes_count} clothes${q.weight_kg ? `, ${q.weight_kg} kg` : ''}${q.tag_no ? `, card ${q.tag_no}` : ''}`;
     await addEvent(id, 'RECEIVED', what, actorId);
     await notify(q.student.id, `Order ${no} received`, `${what}. Your digital slip is ready — keep it till pickup.${q.amount > 0 ? ` Amount due ₹${q.amount}.` : ''}`, id);
     await logActivity(actorId, 'ORDER_CREATED', 'order', no, `${q.student.id_card_no}, ${what}${q.amount ? `, ₹${q.amount}` : ''}`);
