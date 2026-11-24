@@ -8,10 +8,14 @@ import { Avatar, Brand, Button, Empty, ErrorNote, Field, Icon, IconButton, IconN
 type Home = {
   profile: Student; plan?: Plan; services?: Service[]; usage: Usage; open: Order[]; due: number; unread: number; open_complaints: number; announcements: Announcement[];
   info: { max_kg_per_order: number; counter_hours: string; upi_id: string; upi_name: string; pay_before_pickup: boolean; express_enabled: boolean; express_fee: number;
-    monthly_kg_limit: number; monthly_order_limit: number; allow_paid_extra?: boolean; extra_rate_per_kg: number; has_upi_qr?: boolean };
+    monthly_kg_limit: number; monthly_order_limit: number; allow_paid_extra?: boolean; extra_rate_per_kg: number; has_upi_qr?: boolean;
+    dropoff_from?: string; dropoff_to?: string; pickup_from?: string; pickup_to?: string };
 };
 /** A copy saved by an older version of the app may not have the plan yet. */
 const planOf = (h: Home): Plan => h.plan ?? { hosteler: true, label: 'Hostel plan' };
+
+/** "19:00" → "7:00 PM" */
+const t12 = (hhmm: string) => { const [h, m] = hhmm.split(':').map(Number); return `${((h + 11) % 12) + 1}:${String(m).padStart(2, '0')} ${h < 12 ? 'AM' : 'PM'}`; };
 
 const cacheKey = (id: number) => `ej-home-${id}`;
 function readCache(id: number): Home | undefined { try { return JSON.parse(localStorage.getItem(cacheKey(id)) || 'null') ?? undefined; } catch { return undefined; } }
@@ -103,6 +107,7 @@ function HomePage({ home }: { home: Home }) {
         </>
       )}
 
+      {info.dropoff_from && <p className="timings-line"><Icon name="clock" size={16} />Give laundry {t12(info.dropoff_from)}–{t12(info.dropoff_to!)} · Collect {t12(info.pickup_from!)}–{t12(info.pickup_to!)}</p>}
       {home.due > 0 && <PayDue amount={home.due} info={info} orders={open.filter(o => o.payment_status === 'DUE')} />}
 
       {p.status === 'ACTIVE' && planOf(home).hosteler && <MonthUsage usage={usage} info={info} />}
@@ -225,6 +230,8 @@ function Slip({ id, cached, close }: { id: number; cached?: Order[]; close: () =
             </header>
             {live && order.qr_key ? (
               <div className="slip-qr"><SlipQr orderId={order.id} slipKey={order.qr_key} size={220} /></div>
+            ) : live ? (
+              <p className="slip-noqr">The QR could not load. Pull down to refresh, or update the app. At the counter you can also give your basket card no. and show your ID card.</p>
             ) : (
               <div className={`slip-stamp ${order.status === 'CANCELLED' ? 'void' : ''}`}>{order.status === 'CANCELLED' ? 'Cancelled' : `Collected ${when(order.delivered_at, 'short')}`}</div>
             )}
@@ -318,7 +325,7 @@ function Help({ home }: { home: Home }) {
         <dt>Can I pay by UPI?</dt><dd>{home.info.upi_id || home.info.has_upi_qr ? 'Yes. Tap “Pay by UPI” on Home to see the QR, pay, and show the payment screen at the counter. Cash also works.' : 'Pay in cash at the counter.'}</dd>
         <dt>My phone is dead at pickup</dt><dd>Tell staff your order number and show your ID card. They can find the order without the QR.</dd>
         <dt>I forgot my password</dt><dd>Ask at the counter. Staff give you a temporary password, and you choose a new one after signing in.</dd>
-        <dt>Counter timings</dt><dd>{home.info.counter_hours}</dd>
+        <dt>Counter timings</dt><dd>{home.info.dropoff_from ? <>Give laundry: {t12(home.info.dropoff_from)}–{t12(home.info.dropoff_to!)}. Collect: {t12(home.info.pickup_from!)}–{t12(home.info.pickup_to!)}. </> : null}{home.info.counter_hours}</dd>
       </dl>
       {sub === 'new' && list.data && <NewComplaint categories={list.data.categories} orderId={orderId} close={() => back('help')} onDone={() => { void list.reload(); back('help'); }} />}
     </div>

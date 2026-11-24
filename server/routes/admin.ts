@@ -14,7 +14,7 @@ import { readUpload, writeXlsx, XLSX_TYPE } from '../sheets.js';
 import { mailConfigured } from '../mail.js';
 import { checkStudentEmail } from '../otp.js';
 import { announcementsFor, listOrders } from '../queries.js';
-import { dayKey, handle, HttpError, likeContains, nowIso, parse, startOfLocalDayIso, zDate, zId, zText } from '../util.js';
+import { addDays, dayKey, handle, HttpError, likeContains, localDateTimeIso, nowIso, parse, startOfLocalDayIso, weekStart, zDate, zId, zText } from '../util.js';
 import { normaliseLogin, zIdCard, zMobile, zPassword, zRoom } from './public.js';
 import { tempPassword, tempPasswordExpiry } from './ops.js';
 import { claimHash } from './public.js';
@@ -312,8 +312,13 @@ router.get('/admin/activity', handle(async (req, res) => {
   const like = likeContains(q.q ?? '');
   const where = q.q ? `WHERE LOWER(a.action) LIKE LOWER(?) ESCAPE '\\' OR LOWER(a.entity_id) LIKE LOWER(?) ESCAPE '\\' OR LOWER(a.detail) LIKE LOWER(?) ESCAPE '\\' OR LOWER(u.name) LIKE LOWER(?) ESCAPE '\\'` : '';
   // limit and offset are integers checked by zod above, so they are safe to put in the SQL.
-  res.json({ rows: await db.all(`SELECT a.id, a.action, a.entity, a.entity_id, a.detail, a.created_at, u.name AS actor_name, u.role AS actor_role
-    FROM activity a LEFT JOIN users u ON u.id = a.actor_id ${where} ORDER BY a.id DESC LIMIT ${q.limit} OFFSET ${q.offset}`, q.q ? [like, like, like, like] : []) });
+  const params = q.q ? [like, like, like, like] : [];
+  const [rows, total] = await Promise.all([
+    db.all(`SELECT a.id, a.action, a.entity, a.entity_id, a.detail, a.created_at, u.name AS actor_name, u.role AS actor_role
+      FROM activity a LEFT JOIN users u ON u.id = a.actor_id ${where} ORDER BY a.id DESC LIMIT ${q.limit} OFFSET ${q.offset}`, params),
+    db.get<{ c: number }>(`SELECT COUNT(*) AS c FROM activity a LEFT JOIN users u ON u.id = a.actor_id ${where}`, params),
+  ]);
+  res.json({ rows, total: Number(total?.c ?? 0) });
 }));
 
 /** Blob columns (photos in the files table) become base64 text so the backup is plain JSON. */
@@ -664,3 +669,159 @@ function shiftDayKey(key: string, days: number) {
   d.setUTCDate(d.getUTCDate() + days);
   return d.toISOString().slice(0, 10);
 }
+
+/* --------------------------------------------------------------- charts */
+
+type By = 'day' | 'week' | 'month';
+const bucketOf = (day: string, by: By) => (by === 'day' ? day : by === 'week' ? weekStart(day) : day.slice(0, 7));
+/** The buckets to show, oldest first: 14 days, 12 weeks or 12 months up to today. */
+function buckets(by: By) {
+  const today = dayKey();
+  if (by === 'day') return Array.from({ length: 14 }, (_, i) => addDays(today, i - 13));
+  if (by === 'week') return Array.from({ length: 12 }, (_, i) => addDays(weekStart(today), (i - 11) * 7));
+  const [y, m] = today.split('-').map(Number);
+  return Array.from({ length: 12 }, (_, i) => { const d = new Date(Date.UTC(y, m - 1 - (11 - i), 1)); return d.toISOString().slice(0, 7); });
+}
+const firstDay = (b: string, by: By) => (by === 'month' ? `${b}-01` : b);
+
+/** Orders per day (last 14 days), per week (last 12) or per month (last 12). */
+router.get('/admin/trend', handle(async (req, res) => {
+  const by = parse(z.enum(['day', 'week', 'month']).default('day'), req.query.by);
+  const keys = buckets(by);
+  const rows = await db.all<{ day: string; orders: number; kg: number }>(
+    `SELECT day_key AS day, COUNT(*) AS orders, COALESCE(SUM(weight_kg), 0) AS kg FROM orders WHERE day_key >= ? AND status != 'CANCELLED' GROUP BY day_key`, [firstDay(keys[0], by)]);
+  const sum = new Map(keys.map(k => [k, { key: k, orders: 0, kg: 0 }]));
+  for (const r of rows) { const b = sum.get(bucketOf(r.day, by)); if (b) { b.orders += Number(r.orders); b.kg += Number(r.kg); } }
+  res.json({ by, rows: [...sum.values()].map(b => ({ ...b, kg: Math.round(b.kg * 10) / 10 })) });
+}));
+
+/* ---------------------------------------------------------------- stats */
+
+const hoursBetween = (a?: string | null, b?: string | null) => (a && b ? (Date.parse(b) - Date.parse(a)) / 3600_000 : null);
+const avg = (xs: (number | null)[]) => { const v = xs.filter((x): x is number => x !== null && Number.isFinite(x) && x >= 0); return v.length ? Math.round((v.reduce((a, b) => a + b, 0) / v.length) * 10) / 10 : null; };
+
+/**
+ * How fast and how well the laundry works in a period:
+ * turnaround per service and per staff member (drop-off → ready → collected), on-time share,
+ * and complaints (over time, per 100 orders, by type, time to resolve, students who complain often).
+ */
+router.get('/admin/stats', handle(async (req, res) => {
+  const q = parse(z.object({ from: zDate, to: zDate, by: z.enum(['day', 'week', 'month']).default('day') })
+    .refine(x => x.from <= x.to, 'Start date must be before end date'), req.query);
+  const fromIso = localDateTimeIso(q.from, '00:00');
+  const toIso = localDateTimeIso(addDays(q.to, 1), '00:00');
+  const [orders, readyEvents, staff, complaints] = await Promise.all([
+    db.all<{ id: number; service_name: string | null; received_at: string; ready_at: string | null; delivered_at: string | null; expected_at: string; received_by: number; delivered_by: number | null; student_id: number }>(
+      `SELECT id, service_name, received_at, ready_at, delivered_at, expected_at, received_by, delivered_by, student_id FROM orders
+       WHERE day_key BETWEEN ? AND ? AND status != 'CANCELLED' LIMIT 50000`, [q.from, q.to]),
+    db.all<{ order_id: number; by_user: number | null; at: string }>(
+      `SELECT e.order_id, e.by_user, e.at FROM order_events e JOIN orders o ON o.id = e.order_id
+       WHERE e.type = 'READY' AND o.day_key BETWEEN ? AND ? ORDER BY e.id`, [q.from, q.to]),
+    db.all<{ id: number; name: string }>(`SELECT id, name FROM users WHERE role IN ('STAFF','ADMIN')`),
+    db.all<{ id: number; student_id: number; category: string; status: string; created_at: string; resolved_at: string | null; name: string; id_card_no: string }>(
+      `SELECT c.id, c.student_id, c.category, c.status, c.created_at, u.name, st.id_card_no,
+        (SELECT MAX(cu.at) FROM complaint_updates cu WHERE cu.complaint_id = c.id AND cu.status = 'RESOLVED') AS resolved_at
+       FROM complaints c JOIN users u ON u.id = c.student_id JOIN students st ON st.user_id = c.student_id
+       WHERE c.created_at >= ? AND c.created_at < ?`, [fromIso, toIso]),
+  ]);
+
+  // Turnaround per service
+  const byServiceMap = new Map<string, typeof orders>();
+  for (const o of orders) { const k = o.service_name || 'Wash & fold'; byServiceMap.set(k, [...(byServiceMap.get(k) ?? []), o]); }
+  const turnaround = (list: typeof orders) => {
+    const readyList = list.filter(o => o.ready_at);
+    return {
+      orders: list.length,
+      ready: readyList.length,
+      collected: list.filter(o => o.delivered_at).length,
+      to_ready_h: avg(list.map(o => hoursBetween(o.received_at, o.ready_at))),
+      wait_h: avg(list.map(o => hoursBetween(o.ready_at, o.delivered_at))),
+      total_h: avg(list.map(o => hoursBetween(o.received_at, o.delivered_at))),
+      on_time: readyList.length ? Math.round((readyList.filter(o => o.ready_at! <= o.expected_at).length / readyList.length) * 100) : null,
+    };
+  };
+  const byService = [...byServiceMap.entries()].map(([name, list]) => ({ name, ...turnaround(list) })).sort((a, b) => b.orders - a.orders);
+
+  // Per staff member: who took orders, who marked them ready (and how fast), who handed them over
+  const lastReady = new Map<number, number | null>();
+  for (const e of readyEvents) lastReady.set(e.order_id, e.by_user);
+  const names = new Map(staff.map(s => [s.id, s.name]));
+  const people = new Map<string, { name: string; taken: number; marked_ready: number; ready_h: (number | null)[]; handed_over: number; wait_h: (number | null)[] }>();
+  const person = (id: number | null) => {
+    const key = id === null ? 'auto' : String(id);
+    if (!people.has(key)) people.set(key, { name: id === null ? 'Automatic' : names.get(id) ?? 'Former staff', taken: 0, marked_ready: 0, ready_h: [], handed_over: 0, wait_h: [] });
+    return people.get(key)!;
+  };
+  for (const o of orders) {
+    person(o.received_by).taken++;
+    if (lastReady.has(o.id) && o.ready_at) { const p = person(lastReady.get(o.id) ?? null); p.marked_ready++; p.ready_h.push(hoursBetween(o.received_at, o.ready_at)); }
+    if (o.delivered_by && o.delivered_at) { const p = person(o.delivered_by); p.handed_over++; p.wait_h.push(hoursBetween(o.ready_at, o.delivered_at)); }
+  }
+  const byStaff = [...people.values()].map(p => ({ name: p.name, taken: p.taken, marked_ready: p.marked_ready, to_ready_h: avg(p.ready_h), handed_over: p.handed_over, wait_h: avg(p.wait_h) }))
+    .sort((a, b) => (b.taken + b.marked_ready + b.handed_over) - (a.taken + a.marked_ready + a.handed_over));
+
+  // Complaints
+  const dayOf = (iso: string) => dayKey(new Date(iso));
+  const keys: string[] = [];
+  for (let d = q.from; d <= q.to && keys.length < 400; d = addDays(d, 1)) { const b = bucketOf(d, q.by); if (!keys.includes(b)) keys.push(b); }
+  const series = new Map(keys.map(k => [k, 0]));
+  for (const c of complaints) { const b = bucketOf(dayOf(c.created_at), q.by); series.set(b, (series.get(b) ?? 0) + 1); }
+  const perStudent = new Map<number, { name: string; id_card_no: string; complaints: number }>();
+  for (const c of complaints) { const p = perStudent.get(c.student_id) ?? { name: c.name, id_card_no: c.id_card_no, complaints: 0 }; p.complaints++; perStudent.set(c.student_id, p); }
+  const categories = new Map<string, number>();
+  for (const c of complaints) categories.set(c.category, (categories.get(c.category) ?? 0) + 1);
+  const customers = new Set(orders.map(o => o.student_id)).size;
+  res.json({
+    from: q.from, to: q.to, by: q.by,
+    overall: turnaround(orders),
+    byService,
+    byStaff,
+    complaints: {
+      total: complaints.length,
+      open: complaints.filter(c => c.status !== 'RESOLVED').length,
+      per_100_orders: orders.length ? Math.round((complaints.length / orders.length) * 1000) / 10 : null,
+      students: perStudent.size,
+      share_of_customers: customers ? Math.round((perStudent.size / customers) * 1000) / 10 : null,
+      resolve_h: avg(complaints.map(c => hoursBetween(c.created_at, c.resolved_at))),
+      series: [...series.entries()].map(([key, count]) => ({ key, count })),
+      byCategory: [...categories.entries()].map(([name, count]) => ({ name, count })).sort((a, b) => b.count - a.count),
+      repeat: [...perStudent.values()].filter(p => p.complaints >= 2).sort((a, b) => b.complaints - a.complaints).slice(0, 10),
+    },
+  });
+}));
+
+/* ----------------------------------------------------- students who left */
+
+/**
+ * Remove students who have left the hostel from the student list. Their account is switched off and
+ * signed out, but their orders, payments and complaints stay in the register. They can be restored.
+ */
+router.post('/admin/students/leave', handle(async (req, res) => {
+  const b = parse(z.object({ ids: z.array(zId).min(1).max(2000), note: z.string().trim().max(200).optional().default('') }), req.body);
+  const blocked: string[] = [];
+  let changed = 0;
+  await db.tx(async () => {
+    for (const id of b.ids) {
+      const s = await db.get<{ name: string; id_card_no: string; left_at: string | null }>('SELECT u.name, st.id_card_no, st.left_at FROM students st JOIN users u ON u.id = st.user_id WHERE st.user_id = ?', [id]);
+      if (!s || s.left_at) continue;
+      const busy = await db.get<{ c: number }>(`SELECT COUNT(*) AS c FROM orders WHERE student_id = ? AND (status IN ('RECEIVED','WASHING','READY') OR payment_status = 'DUE')`, [id]);
+      if (Number(busy?.c)) { blocked.push(`${s.name} (${s.id_card_no})`); continue; }
+      await db.run('UPDATE students SET left_at = ?, pending_hostel_id = NULL, pending_room_no = NULL, change_requested_at = NULL WHERE user_id = ?', [nowIso(), id]);
+      await db.run('UPDATE users SET active = 0, token_version = token_version + 1 WHERE id = ?', [id]);
+      await logActivity(actor(req).id, 'STUDENT_LEFT', 'student', s.id_card_no, b.note || 'Left the hostel');
+      changed++;
+    }
+  });
+  res.json({ changed, blocked });
+}));
+
+router.post('/admin/students/:id/restore', handle(async (req, res) => {
+  const id = parse(zId, req.params.id);
+  const s = await db.get<{ id_card_no: string; left_at: string | null }>('SELECT id_card_no, left_at FROM students WHERE user_id = ?', [id]);
+  if (!s) throw new HttpError(404, 'Student not found.');
+  if (!s.left_at) throw new HttpError(409, 'This student is on the list already.');
+  await db.run('UPDATE students SET left_at = NULL WHERE user_id = ?', [id]);
+  await db.run('UPDATE users SET active = 1 WHERE id = ?', [id]);
+  await logActivity(actor(req).id, 'STUDENT_RESTORED', 'student', s.id_card_no);
+  res.json({ ok: true });
+}));

@@ -19,14 +19,14 @@ export type Student = {
   room_no: string; status: 'PENDING' | 'ACTIVE' | 'REJECTED' | 'SUSPENDED'; review_note?: string | null; reviewed_at?: string | null; reviewed_by_name?: string | null;
   month_orders?: number; month_kg?: number; open_orders?: number;
   kind?: 'HOSTELER' | 'WALKIN'; valid_until?: string | null; valid_from?: string | null; claimable?: number;
-  photo?: string | null; email?: string | null; email_verified_at?: string | null;
+  photo?: string | null; email?: string | null; email_verified_at?: string | null; left_at?: string | null;
   pending_hostel_id?: number | null; pending_hostel_name?: string | null; pending_room_no?: string | null; change_requested_at?: string | null;
 };
 export type Plan = { hosteler: boolean; label: string };
 export type Service = { id: number; name: string; unit: 'KG' | 'PIECE'; rate: number; hosteler_rate: number; uses_allowance: number; active: number; sort: number };
 export type PaymentInfo = { upi_id: string; upi_name: string; has_upi_qr: boolean };
 /** The server asks for the code it emailed before signing in. */
-export type OtpStart = { otp_required: true; challenge: string; email_hint: string; purpose: 'LOGIN' | 'CLAIM' | 'SIGNUP' };
+export type OtpStart = { otp_required: true; challenge: string; email_hint: string; purpose: 'LOGIN' | 'CLAIM' | 'SIGNUP' | 'EMAIL' | 'RESET' };
 export type SignedIn = { user: User; claimed?: boolean };
 export type Usage = { month: string; orders: number; kg: number; active: number; order_limit: number; kg_limit: number; kg_left: number | null; orders_left: number | null };
 export type Hostel = { id: number; name: string; active?: number; students?: number };

@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 import { z } from 'zod';
 import { db, insertId, logActivity, nextCounter, notify } from './db.js';
-import { HttpError, MAX_ID, dayKey, monthKey, nowIso, parse, round2 } from './util.js';
+import { HttpError, MAX_ID, addDays, dayKey, localDateTimeIso, monthKey, nowIso, parse, round2 } from './util.js';
 import { slipKey } from './auth.js';
 
 /* ---------------------------------------------------------------- settings */
@@ -33,6 +33,15 @@ export const settingsSchema = z.object({
     to: z.coerce.number().int().min(0).max(999999),
   }).refine(s => s.from <= s.to, 'In a card series, "from" must not be bigger than "to"')).max(20),
   counter_hours: z.string().trim().max(120),
+  // Counter timings (campus time). Students give laundry in the drop-off hours and collect in the pickup hours.
+  dropoff_from: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, 'Use a time like 18:00'),
+  dropoff_to: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, 'Use a time like 20:00'),
+  pickup_from: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, 'Use a time like 19:00'),
+  pickup_to: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, 'Use a time like 21:00'),
+  ready_after_days: z.coerce.number().int().min(0).max(14),          // regular: ready on day of drop-off + N, at pickup time
+  express_ready_after_days: z.coerce.number().int().min(0).max(14),
+  auto_status: z.boolean(),                                           // move orders to washing / ready by themselves
+  auto_washing_hours: z.coerce.number().min(1).max(168),             // "washing" this long after drop-off
 });
 export type Settings = z.infer<typeof settingsSchema>;
 
@@ -58,7 +67,23 @@ export const defaultSettings: Settings = {
   card_required: false,
   card_series: [],
   counter_hours: 'Mon–Sat, 8:00 AM – 7:00 PM',
+  dropoff_from: '18:00',
+  dropoff_to: '20:00',
+  pickup_from: '19:00',
+  pickup_to: '21:00',
+  ready_after_days: 2,
+  express_ready_after_days: 1,
+  auto_status: true,
+  auto_washing_hours: 24,
 };
+
+/** When an order taken now will be ready: N days after today, at the start of pickup hours. */
+export function readyTime(s: Settings, express: boolean, now = new Date()) {
+  const days = express ? s.express_ready_after_days : s.ready_after_days;
+  let at = localDateTimeIso(addDays(dayKey(now), days), s.pickup_from);
+  if (Date.parse(at) <= now.getTime()) at = localDateTimeIso(addDays(dayKey(now), days + 1), s.pickup_from);
+  return at;
+}
 
 export async function getSettings(): Promise<Settings> {
   const rows = await db.all<{ key: string; value: string }>('SELECT key, value FROM settings');
@@ -236,7 +261,8 @@ export async function quote(raw: OrderInput, excludeOrderId = 0, snapshot?: Pric
   const s = await getSettings();
   const student = await studentForOrder(input.studentId);
   if (student.status === 'PENDING') throw new HttpError(409, `${student.name}'s registration is not approved yet. Verify the ID card and approve first.`);
-  if (student.status !== 'ACTIVE' || !student.active) throw new HttpError(409, `${student.name}'s account is ${student.status.toLowerCase()}. Orders cannot be taken.`);
+  if (!student.active) throw new HttpError(409, `${student.name}'s account is switched off (removed from the hostel list). The admin can restore it under Students → Left hostel.`);
+  if (student.status !== 'ACTIVE') throw new HttpError(409, `${student.name}'s account is ${student.status.toLowerCase()}. Orders cannot be taken.`);
   const current = await getService(input.serviceId);
   // A correction keeps the order's own service even if the admin has hidden it since.
   if (!current.active && !excludeOrderId) throw new HttpError(422, `${current.name} is not offered right now.`);
@@ -302,7 +328,7 @@ export async function quote(raw: OrderInput, excludeOrderId = 0, snapshot?: Pric
   const extraCharge = round2(extra * s.extra_rate_per_kg);
   const expressFee = express ? s.express_fee : 0;
   const amount = round2(base + extraCharge + expressFee);
-  const hours = express ? s.express_turnaround_hours : s.regular_turnaround_hours;
+  const expectedAt = readyTime(s, express);
   return {
     student: { id: student.id, name: student.name, id_card_no: student.id_card_no, hostel_name: student.hostel_name, room_no: student.room_no, mobile: student.mobile },
     plan,
@@ -316,7 +342,7 @@ export async function quote(raw: OrderInput, excludeOrderId = 0, snapshot?: Pric
     amount,
     breakdown: { service: base, extra: extraCharge, express: expressFee },
     charge_note: notes.join('; ') || null,
-    expected_at: new Date(Date.now() + hours * 3600_000).toISOString(),
+    expected_at: expectedAt,
     usage_after: {
       orders: usage.orders + (within > 0 ? 1 : 0),
       kg: round2(usage.kg + within),
@@ -459,4 +485,50 @@ export async function correctOrder(actorId: number, id: number, weightKg: number
     await notify(o.student_id, `${o.order_no} details corrected`, `Now ${q.clothes_count} clothes, ${q.weight_kg} kg. Reason: ${reason}`, id);
     await logActivity(actorId, 'ORDER_CORRECTED', 'order', o.order_no, detail);
   });
+}
+
+
+/* --------------------------------------------------------- automatic status */
+
+/**
+ * Orders move along by themselves (admin can switch this off): "washing" once they have been at the
+ * counter for the set hours, and "ready for pickup" at their ready time (pickup hours on the ready day).
+ * Staff can still change a status by hand at any time. Each order changes only once per step, even if
+ * two servers or requests run this at the same moment.
+ */
+export async function runAutoAdvance(now = new Date()) {
+  const s = await getSettings();
+  if (!s.auto_status) return { washing: 0, ready: 0 };
+  const at = now.toISOString();
+  let washing = 0;
+  let ready = 0;
+  const toReady = await db.all<{ id: number; order_no: string; student_id: number; payment_status: string; amount: number }>(
+    `SELECT id, order_no, student_id, payment_status, amount FROM orders WHERE status IN ('RECEIVED','WASHING') AND expected_at <= ? ORDER BY id LIMIT 500`, [at]);
+  for (const o of toReady) {
+    const r = await db.run(`UPDATE orders SET status = 'READY', ready_at = ?, updated_at = ? WHERE id = ? AND status IN ('RECEIVED','WASHING')`, [at, at, o.id]);
+    if (r.changes !== 1) continue;
+    ready++;
+    await addEvent(o.id, 'READY', 'Automatic: ready time reached', null);
+    await notify(o.student_id, `${o.order_no} is ready for pickup`, `Collect it in pickup hours (${s.pickup_from}–${s.pickup_to}) with your slip QR.${o.payment_status === 'DUE' ? ` Please pay ₹${o.amount} before pickup.` : ''}`, o.id);
+  }
+  const washingBefore = new Date(now.getTime() - s.auto_washing_hours * 3600_000).toISOString();
+  const toWash = await db.all<{ id: number }>(`SELECT id FROM orders WHERE status = 'RECEIVED' AND received_at <= ? ORDER BY id LIMIT 500`, [washingBefore]);
+  for (const o of toWash) {
+    const r = await db.run(`UPDATE orders SET status = 'WASHING', updated_at = ? WHERE id = ? AND status = 'RECEIVED'`, [at, o.id]);
+    if (r.changes !== 1) continue;
+    washing++;
+    await addEvent(o.id, 'WASHING', 'Automatic', null);
+  }
+  if (washing || ready) await logActivity(null, 'AUTO_STATUS', 'order', null, `${washing} to washing, ${ready} ready for pickup`);
+  return { washing, ready };
+}
+
+let lastAuto = 0;
+let autoRunning = false;
+/** Run the automatic step at most once a minute (called on requests, so it also works when the free server just woke up). */
+export function maybeAutoAdvance() {
+  if (autoRunning || Date.now() - lastAuto < 60_000) return;
+  lastAuto = Date.now();
+  autoRunning = true;
+  runAutoAdvance().catch(e => console.error('Automatic status step failed:', (e as Error).message)).finally(() => { autoRunning = false; });
 }

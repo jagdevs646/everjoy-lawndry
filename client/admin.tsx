@@ -23,6 +23,7 @@ const NAV: { key: string; label: string; icon: IconName }[] = [
   { key: 'students', label: 'Students', icon: 'users' },
   { key: 'complaints', label: 'Complaints', icon: 'help' },
   { key: 'notices', label: 'Notices', icon: 'megaphone' },
+  { key: 'stats', label: 'Stats', icon: 'clock' },
   { key: 'reports', label: 'Reports', icon: 'download' },
   { key: 'staff', label: 'Staff', icon: 'card' },
   { key: 'settings', label: 'Rules & pricing', icon: 'sliders' },
@@ -72,6 +73,7 @@ export function AdminApp({ user, onSignOut, onUser, onCounter }: { user: User; o
           {current.key === 'students' && <Students open={open} />}
           {current.key === 'complaints' && <div className="ad-narrow"><ComplaintsBoard onOpenOrder={setOrderId} /></div>}
           {current.key === 'notices' && <Notices />}
+          {current.key === 'stats' && <Stats />}
           {current.key === 'reports' && <Reports />}
           {current.key === 'staff' && <Staff me={user} />}
           {current.key === 'settings' && <Settings />}
@@ -119,8 +121,7 @@ function OverviewPage(_: { open: Openers }) {
 
       <div className="ad-grid">
         <section className="ad-card chart-card">
-          <h2>Orders per day, last 14 days</h2>
-          <DayBars days={o.days} />
+          <OrdersTrend />
         </section>
         <section className="ad-card">
           <h2>Needs attention</h2>
@@ -166,7 +167,33 @@ function OverviewPage(_: { open: Openers }) {
 }
 
 /** Single-series bar chart. One hue; the title names the series; hover or focus a bar for its numbers. */
-function DayBars({ days }: { days: Overview['days'] }) {
+type By = 'day' | 'week' | 'month';
+const BY_TITLE: Record<By, string> = { day: 'Orders per day, last 14 days', week: 'Orders per week, last 12 weeks', month: 'Orders per month, last 12 months' };
+
+/** The orders chart on the overview: daily, weekly or monthly. */
+function OrdersTrend() {
+  const [by, setBy] = useState<By>('day');
+  const t = useLoad(() => api<{ rows: { key: string; orders: number; kg: number }[] }>(`/admin/trend?by=${by}`), [by], { every: 120_000 });
+  return (
+    <>
+      <div className="row-between chart-head">
+        <h2>{BY_TITLE[by]}</h2>
+        <Segmented label="Show" value={by} onChange={setBy} options={[{ value: 'day', label: 'Daily' }, { value: 'week', label: 'Weekly' }, { value: 'month', label: 'Monthly' }]} />
+      </div>
+      {t.data ? <DayBars days={t.data.rows.map(r => ({ day: r.key, orders: r.orders, kg: r.kg }))} by={by} /> : t.error ? <ErrorNote error={t.error} retry={t.reload} /> : <Loading />}
+    </>
+  );
+}
+
+/** Label for a chart bucket: "24 Nov", "w/c 18 Nov", "Nov 26". */
+function bucketLabel(key: string, by: By, short = false) {
+  if (by === 'month') { const d = new Date(`${key}-01T12:00:00`); return d.toLocaleDateString('en-IN', { month: 'short', year: short ? '2-digit' : 'numeric' }); }
+  const d = new Date(`${key}T12:00:00`);
+  const t = d.toLocaleDateString('en-IN', { day: 'numeric', month: 'short' });
+  return by === 'week' && !short ? `Week of ${t}` : t;
+}
+
+function DayBars({ days, by = 'day', unit = 'order' }: { days: Overview['days']; by?: By; unit?: 'order' | 'complaint' }) {
   const [hover, setHover] = useState<number | null>(null);
   // Draw at the real pixel width so tick text stays readable on phones.
   const box = useRef<HTMLDivElement>(null);
@@ -184,8 +211,8 @@ function DayBars({ days }: { days: Overview['days'] }) {
   const bw = (W - pad.l - pad.r) / days.length;
   const every = bw < 26 ? 3 : bw < 44 ? 2 : 1;
   const y = (v: number) => pad.t + (H - pad.t - pad.b) * (1 - v / nice);
-  const label = (d: string) => new Date(`${d}T12:00:00`).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' });
-  const wk = (d: string) => new Date(`${d}T12:00:00`).toLocaleDateString('en-IN', { weekday: 'short' });
+  const label = (d: string) => bucketLabel(d, by, true);
+  const wk = (d: string) => (by === 'day' ? new Date(`${d}T12:00:00`).toLocaleDateString('en-IN', { weekday: 'short' }) : '');
   const h = hover !== null ? days[hover] : null;
   return (
     <div className="daybars" ref={box}>
@@ -200,13 +227,13 @@ function DayBars({ days }: { days: Overview['days'] }) {
             <g key={d.day} onMouseEnter={() => setHover(i)} onMouseLeave={() => setHover(null)} onFocus={() => setHover(i)} onBlur={() => setHover(null)} tabIndex={0} className="bar-hit">
               <rect x={pad.l + i * bw} y={pad.t} width={bw} height={H - pad.t - pad.b} fill="transparent" />
               {d.orders > 0 && <path className={`bar${hover === i ? ' on' : ''}`} d={`M${x},${H - pad.b} V${top + r} Q${x},${top} ${x + r},${top} H${x + bw - 4 - r} Q${x + bw - 4},${top} ${x + bw - 4},${top + r} V${H - pad.b} Z`} />}
-              {(days.length - 1 - i) % every === 0 && <text x={pad.l + i * bw + bw / 2} y={H - 8} className="tick" textAnchor="middle">{i === days.length - 1 ? 'Today' : label(d.day)}</text>}
+              {(days.length - 1 - i) % every === 0 && <text x={pad.l + i * bw + bw / 2} y={H - 8} className="tick" textAnchor="middle">{i === days.length - 1 ? (by === 'day' ? 'Today' : by === 'week' ? 'This week' : 'This month') : label(d.day)}</text>}
             </g>
           );
         })}
         <line x1={pad.l} x2={W - pad.r} y1={H - pad.b} y2={H - pad.b} className="base" />
       </svg>
-      <p className="daybars-tip" aria-live="polite">{h ? <><b>{wk(h.day)} {label(h.day)}</b>: {plural(h.orders, 'order')}, {kg(h.kg)}</> : <>Total {days.reduce((a, d) => a + d.orders, 0)} orders, {kg(days.reduce((a, d) => a + d.kg, 0))}. Hover a bar for the day.</>}</p>
+      <p className="daybars-tip" aria-live="polite">{h ? <><b>{by === 'day' ? `${wk(h.day)} ${label(h.day)}` : bucketLabel(h.day, by)}</b>: {plural(h.orders, unit)}{unit === 'order' ? `, ${kg(h.kg)}` : ''}</> : <>Total {plural(days.reduce((a, d) => a + d.orders, 0), unit)}{unit === 'order' ? `, ${kg(days.reduce((a, d) => a + d.kg, 0))}` : ''}. Hover a bar for details.</>}</p>
     </div>
   );
 }
@@ -221,6 +248,7 @@ export function actionText(a: string) {
     ANNOUNCEMENT_REMOVED: 'removed notice', COMPLAINT_RAISED: 'raised complaint', COMPLAINT_UPDATED: 'replied to complaint', EXPORTED: 'exported register', BACKUP_DOWNLOADED: 'downloaded backup', DEMO_SEEDED: 'loaded demo data',
     ROOM_CHANGE_REQUESTED: 'asked to change room:', ROOM_CHANGE_APPROVED: 'approved room change for', ROOM_CHANGE_REJECTED: 'turned down room change for', WALKIN_ADDED: 'served walk-in',
     PHOTO_ADDED: 'added own photo:', PHOTO_SET: 'took photo of', PHOTO_REMOVED: 'removed photo of', EMAIL_ADDED: 'added email:', ORDER_CARD: 'changed basket card of',
+    STUDENT_LEFT: 'removed (left hostel):', STUDENT_RESTORED: 'put back on the list:', AUTO_STATUS: 'moved orders automatically:', PASSWORD_RESET_BY_EMAIL: 'reset password by email code:',
     SERVICE_ADDED: 'added service', SERVICE_UPDATED: 'changed service', PLAN_DATES_SET: 'set hostel plan dates', STUDENTS_IMPORTED: 'imported students', STAFF_IMPORTED: 'imported staff', STUDENT_CLAIMED: 'set up imported account',
   } as Record<string, string>)[a] ?? a.toLowerCase().replace(/_/g, ' ');
 }
@@ -298,17 +326,44 @@ function Register({ open }: { open: Openers }) {
 function Students({ open }: { open: Openers }) {
   const [f, setF] = useState({ q: '', status: '', hostelId: '', plan: '' });
   const [sheet, setSheet] = useState<'import' | 'plan' | null>(null);
+  const [sel, setSel] = useState<Set<number>>(new Set());
+  const [temp, setTemp] = useState<{ name: string; pass: string } | null>(null);
   const hostels = useLoad(() => api<{ hostels: Hostel[] }>('/public/info'), []);
   const qs = new URLSearchParams(Object.entries({ ...f, limit: '300' }).filter(([, v]) => v)).toString();
   const list = useLoad(() => api<{ rows: Student[]; total: number }>(`/ops/students?${qs}`), [qs]);
+  const { busy, run } = useAction();
+  useEffect(() => setSel(new Set()), [qs]);
   const today = todayKey();
+  const leftView = f.status === 'LEFT';
   const set = (k: keyof typeof f) => (e: { target: { value: string } }) => setF({ ...f, [k]: e.target.value });
   const label: Record<string, string> = { ACTIVE: 'Approved', PENDING: 'Waiting', REJECTED: 'Rejected', SUSPENDED: 'On hold' };
+  const rows = list.data?.rows ?? [];
+  const allOn = rows.length > 0 && rows.every(r => sel.has(r.id));
+  const toggle = (id: number, on: boolean) => { const n = new Set(sel); if (on) n.add(id); else n.delete(id); setSel(n); };
+
+  const markLeft = async () => {
+    const n = sel.size;
+    if (!window.confirm(`Remove ${plural(n, 'student')} from the hostel list (left the hostel)? Their accounts are switched off; their orders and payments stay in the register. You can restore them later from “Left hostel”.`)) return;
+    const r = await run(() => api<{ changed: number; blocked: string[] }>('/admin/students/leave', { body: { ids: [...sel] } }));
+    if (!r) return;
+    toast(`${plural(r.changed, 'student')} removed from the list${r.blocked.length ? `. Not removed (laundry at the counter or money due): ${r.blocked.join(', ')}` : ''}`, r.blocked.length ? 'bad' : 'ok');
+    setSel(new Set());
+    void list.reload();
+  };
+  const restore = async (s: Student) => {
+    if (await run(() => api(`/admin/students/${s.id}/restore`, { method: 'POST' }), `${s.name} is back on the list`) !== undefined) void list.reload();
+  };
+  const reset = async (s: Student) => {
+    if (!window.confirm(`Give ${s.name} a new temporary password? Their old password stops working and they are signed out everywhere.`)) return;
+    const r = await run(() => api<{ tempPassword: string }>(`/ops/students/${s.id}/reset-password`, { method: 'POST' }));
+    if (r) setTemp({ name: s.name, pass: r.tempPassword });
+  };
+
   return (
     <div className="stack">
       <div className="filters">
         <input className="grow" value={f.q} onChange={set('q')} placeholder="Search name, ID card, mobile or room" aria-label="Search students" />
-        <select value={f.status} onChange={set('status')} aria-label="Account status"><option value="">Everyone</option><option value="PENDING">Waiting for approval</option><option value="ACTIVE">Approved</option><option value="REJECTED">Rejected</option><option value="SUSPENDED">On hold</option></select>
+        <select value={f.status} onChange={set('status')} aria-label="Account status"><option value="">Everyone on the list</option><option value="PENDING">Waiting for approval</option><option value="ACTIVE">Approved</option><option value="REJECTED">Rejected</option><option value="SUSPENDED">On hold</option><option value="LEFT">Left hostel (removed)</option></select>
         <select value={f.hostelId} onChange={set('hostelId')} aria-label="Hostel"><option value="">All hostels</option>{hostels.data?.hostels.map(h => <option key={h.id} value={h.id}>{h.name}</option>)}</select>
         <select value={f.plan} onChange={set('plan')} aria-label="Hostel plan"><option value="">Any plan</option><option value="VALID">Plan valid</option><option value="UPCOMING">Plan not started</option><option value="EXPIRED">Plan ended</option><option value="WALKIN">Walk-ins</option></select>
         <Button icon="clock" onClick={() => setSheet('plan')}>Plan dates</Button>
@@ -316,31 +371,46 @@ function Students({ open }: { open: Openers }) {
       </div>
       {sheet === 'import' && <ImportSheet type="students" close={() => setSheet(null)} onDone={() => void list.reload()} />}
       {sheet === 'plan' && <PlanDates hostels={hostels.data?.hostels ?? []} close={() => setSheet(null)} onDone={() => { setSheet(null); void list.reload(); }} />}
-      {!list.data ? <Loading /> : !list.data.rows.length ? <Empty icon="users" title="No students found">Students appear here after they register on the website.</Empty> : (
+      {temp && <div className="temp-pass" role="status"><span>Temporary password for {temp.name}</span><b>{temp.pass}</b><small>Tell them in person. It works for 7 days; they choose a new one at sign-in.</small></div>}
+      {!list.data ? <Loading /> : !rows.length ? <Empty icon="users" title={leftView ? 'Nobody has been removed' : 'No students found'}>{leftView ? 'Students you remove because they left the hostel appear here.' : 'Students appear here after they register or are added from Excel.'}</Empty> : (
         <>
-          <p className="muted small">{plural(list.data.total, 'student')}</p>
+          <div className="row-between">
+            <p className="muted small">{plural(list.data.total, 'student')}{leftView ? ' removed from the hostel list' : ''}</p>
+            {!leftView && <label className="select-all"><input type="checkbox" checked={allOn} onChange={e => setSel(e.target.checked ? new Set(rows.map(r => r.id)) : new Set())} />Select all shown</label>}
+          </div>
           <div className="ledger-wrap">
-            <table className="ledger">
-              <thead><tr><th>Name</th><th>ID card no.</th><th>Hostel, room</th><th>Mobile</th><th>Account</th><th>Hostel plan</th><th className="num">This month</th><th className="num">In progress</th></tr></thead>
+            <table className="ledger fit">
+              <thead><tr>{!leftView && <th className="check-col" />}<th>Name</th><th>ID card no., mobile</th><th>Hostel, room</th><th>Account</th><th>Hostel plan</th><th className="num">This month</th><th className="num">In progress</th><th /></tr></thead>
               <tbody>
-                {list.data.rows.map(s => (
-                  <tr key={s.id} onClick={() => open.student(s.id)} tabIndex={0} onKeyDown={e => e.key === 'Enter' && open.student(s.id)}>
-                    <td><span className="who-cell"><Avatar name={s.name} photo={s.photo} size={32} /><span><b>{s.name}</b><small>Joined {when(s.created_at, 'date')}</small></span></span></td>
-                    <td className="ord">{s.id_card_no}</td>
+                {rows.map(s => (
+                  <tr key={s.id} className={sel.has(s.id) ? 'sel' : ''} onClick={() => open.student(s.id)} tabIndex={0} onKeyDown={e => e.key === 'Enter' && open.student(s.id)}>
+                    {!leftView && <td className="check-col" onClick={e => e.stopPropagation()}><input type="checkbox" checked={sel.has(s.id)} onChange={e => toggle(s.id, e.target.checked)} aria-label={`Select ${s.name}`} /></td>}
+                    <td><span className="who-cell"><Avatar name={s.name} photo={s.photo} size={32} /><span><b>{s.name}</b><small>{s.left_at ? `Left ${when(s.left_at, 'date')}` : `Joined ${when(s.created_at, 'date')}`}</small></span></span></td>
+                    <td><span className="ord">{s.id_card_no}</span><small>{s.mobile}</small></td>
                     <td>{s.kind === 'WALKIN' ? <span className="muted">Walk-in</span> : <>{s.hostel_name}, {s.room_no}</>}{s.pending_hostel_id ? <small className="bad">Moving to {s.pending_hostel_name} {s.pending_room_no}</small> : null}</td>
-                    <td>{s.mobile}</td>
-                    <td><span className={`pill acc-${s.status.toLowerCase()}`}>{label[s.status]}</span>{s.claimable ? <small>Not signed in yet</small> : null}</td>
+                    <td>{s.left_at ? <span className="pill acc-suspended">Left hostel</span> : <span className={`pill acc-${s.status.toLowerCase()}`}>{label[s.status]}</span>}{s.claimable ? <small>Not signed in yet</small> : null}</td>
                     <td>{s.kind === 'WALKIN' ? <span className="muted">–</span> : s.valid_until || s.valid_from
                       ? <span className={(s.valid_until && s.valid_until < today) || (s.valid_from && s.valid_from > today) ? 'bad' : ''}>{planPeriod(s.valid_from, s.valid_until)}</span>
                       : <span className="muted">No dates</span>}</td>
                     <td className="num">{s.month_orders}<small>{kg(s.month_kg)}</small></td>
                     <td className="num">{s.open_orders || <span className="muted">–</span>}</td>
+                    <td className="row-actions" onClick={e => e.stopPropagation()}>
+                      {s.left_at ? <Button size="sm" busy={busy} onClick={() => restore(s)}>Restore</Button>
+                        : s.kind !== 'WALKIN' && <Button size="sm" icon="lock" busy={busy} onClick={() => reset(s)} title={`Reset ${s.name}'s password`} aria-label={`Reset ${s.name}'s password`}>Reset</Button>}
+                    </td>
                   </tr>
                 ))}
               </tbody>
             </table>
           </div>
         </>
+      )}
+      {sel.size > 0 && (
+        <div className="bulk-bar ad-bulk" role="region" aria-label="Selected students">
+          <span>{sel.size} selected</span>
+          <Button tone="danger" icon="x" busy={busy} onClick={markLeft}>Remove (left hostel)</Button>
+          <Button tone="plain" onClick={() => setSel(new Set())}>Clear</Button>
+        </div>
       )}
     </div>
   );
@@ -551,97 +621,176 @@ type Settings = {
   extra_rate_per_kg: number; express_enabled: boolean; express_fee: number; regular_turnaround_hours: number; express_turnaround_hours: number;
   pay_before_pickup: boolean; upi_id: string; upi_name: string; upi_qr_file?: string; semester_start: string; semester_end: string; counter_hours: string;
   student_email_otp: boolean; student_email_domain: string; card_required: boolean; card_series: { prefix: string; from: number; to: number }[];
+  dropoff_from: string; dropoff_to: string; pickup_from: string; pickup_to: string; ready_after_days: number; express_ready_after_days: number;
+  auto_status: boolean; auto_washing_hours: number;
 };
+
+const SETTING_TABS = [
+  { key: 'orders', label: 'Orders & limits' },
+  { key: 'timings', label: 'Timings' },
+  { key: 'services', label: 'Prices & services' },
+  { key: 'payments', label: 'Payments' },
+  { key: 'students', label: 'Students & sign-in' },
+  { key: 'cards', label: 'Basket cards' },
+] as const;
+type SettingTab = typeof SETTING_TABS[number]['key'];
+
+/** "19:00" → "7:00 PM" */
+const time12 = (hhmm: string) => { const [h, m] = hhmm.split(':').map(Number); return `${((h + 11) % 12) + 1}:${String(m).padStart(2, '0')} ${h < 12 ? 'AM' : 'PM'}`; };
 
 function Settings() {
   const s = useLoad(() => api<Settings>('/admin/settings'), []);
   const [draft, setDraft] = useState<Settings | null>(null);
+  const [tab, setTab] = useState<SettingTab>(() => { try { return (sessionStorage.getItem('ej-settings-tab') as SettingTab) || 'orders'; } catch { return 'orders'; } });
   const { busy, error, submit } = useFormAction();
   useEffect(() => { if (s.data) setDraft(d => d && JSON.stringify(d) !== JSON.stringify(s.data) && d.upi_qr_file !== s.data!.upi_qr_file ? { ...d, upi_qr_file: s.data!.upi_qr_file } : s.data!); }, [s.data]);
+  useEffect(() => { try { sessionStorage.setItem('ej-settings-tab', tab); } catch { /* ignore */ } }, [tab]);
   if (!draft) return <Loading />;
   const num = (k: keyof Settings) => (e: { target: { value: string } }) => setDraft({ ...draft, [k]: e.target.value as unknown as number });
+  const text = (k: keyof Settings) => (e: { target: { value: string } }) => setDraft({ ...draft, [k]: e.target.value });
   const dirty = JSON.stringify(draft) !== JSON.stringify(s.data);
   const save = async (e: FormEvent) => {
     e.preventDefault();
     const r = await submit(() => api<Settings>('/admin/settings', { method: 'PUT', body: draft }), 'Rules saved. They apply to new orders from now.');
     if (r) s.set(r);
   };
+  const example = (() => {
+    const d = new Date();
+    const fmt = (x: Date) => x.toLocaleDateString('en-IN', { weekday: 'short', day: 'numeric', month: 'short' });
+    const ready = new Date(d.getTime() + Number(draft.ready_after_days) * 86400_000);
+    return `Given on ${fmt(d)} → ready on ${fmt(ready)} from ${time12(draft.pickup_from)}`;
+  })();
+
   return (
-    <div className="settings">
-      <form className="stack" onSubmit={save}>
-        <section className="ad-card settings-group">
-          <h2>Each order</h2>
-          <div className="field-grid">
-            <Field label="Free kg per order" hint="For hostelers with a valid plan"><input type="number" step="0.5" min="0.5" value={draft.max_kg_per_order} onChange={num('max_kg_per_order')} /></Field>
-            <Field label="Orders a student can have in progress" hint="0 = no limit"><input type="number" min="0" value={draft.max_active_orders} onChange={num('max_active_orders')} /></Field>
-            <Field label="Regular ready time (hours)"><input type="number" min="1" value={draft.regular_turnaround_hours} onChange={num('regular_turnaround_hours')} /></Field>
+    <div className="settings-page">
+      <nav className="tabs" role="tablist" aria-label="Rules and pricing">
+        {SETTING_TABS.map(t => <button key={t.key} role="tab" aria-selected={tab === t.key} className={tab === t.key ? 'on' : ''} onClick={() => setTab(t.key)}>{t.label}</button>)}
+      </nav>
+
+      <form onSubmit={save} className="settings-form">
+        {tab === 'orders' && (
+          <div className="settings-cards">
+            <section className="ad-card settings-group">
+              <h2>Each order</h2>
+              <div className="field-grid">
+                <Field label="Free kg per order" hint="For hostelers with a valid plan"><input type="number" step="0.5" min="0.5" value={draft.max_kg_per_order} onChange={num('max_kg_per_order')} /></Field>
+                <Field label="Orders in progress per student" hint="0 = no limit"><input type="number" min="0" value={draft.max_active_orders} onChange={num('max_active_orders')} /></Field>
+              </div>
+            </section>
+            <section className="ad-card settings-group">
+              <h2>Free washing each month</h2>
+              <div className="field-grid">
+                <Field label="Free kg per month" hint="0 = no monthly limit"><input type="number" step="0.5" min="0" value={draft.monthly_kg_limit} onChange={num('monthly_kg_limit')} /></Field>
+                <Field label="Free orders per month" hint="0 = no limit"><input type="number" min="0" value={draft.monthly_order_limit} onChange={num('monthly_order_limit')} /></Field>
+              </div>
+            </section>
+            <section className="ad-card settings-group">
+              <h2>Over the free limit</h2>
+              <Switch checked={draft.allow_paid_extra} onChange={v => setDraft({ ...draft, allow_paid_extra: v })} label="Let students pay for extra kg" hint="The counter offers two choices: take clothes back, or charge for the extra kg. Off = only take clothes back." />
+              {draft.allow_paid_extra && <Field label="Price per extra kg (₹)"><input type="number" min="0" value={draft.extra_rate_per_kg} onChange={num('extra_rate_per_kg')} /></Field>}
+            </section>
+            <section className="ad-card settings-group">
+              <h2>Express</h2>
+              <Switch checked={draft.express_enabled} onChange={v => setDraft({ ...draft, express_enabled: v })} label="Offer express service" hint="Ready sooner for a fixed fee" />
+              {draft.express_enabled && (
+                <div className="field-grid">
+                  <Field label="Express fee per order (₹)"><input type="number" min="0" value={draft.express_fee} onChange={num('express_fee')} /></Field>
+                  <Field label="Express ready after (days)" hint="0 = same day"><input type="number" min="0" max="14" value={draft.express_ready_after_days} onChange={num('express_ready_after_days')} /></Field>
+                </div>
+              )}
+            </section>
           </div>
-        </section>
-        <section className="ad-card settings-group">
-          <h2>Free washing per student, each month</h2>
-          <div className="field-grid">
-            <Field label="Free kg per month" hint="0 = no monthly limit"><input type="number" step="0.5" min="0" value={draft.monthly_kg_limit} onChange={num('monthly_kg_limit')} /></Field>
-            <Field label="Free orders per month" hint="0 = no limit"><input type="number" min="0" value={draft.monthly_order_limit} onChange={num('monthly_order_limit')} /></Field>
+        )}
+
+        {tab === 'timings' && (
+          <div className="settings-cards">
+            <section className="ad-card settings-group">
+              <h2>Counter hours</h2>
+              <p className="muted small">Shown to students on their phones. Times are campus time.</p>
+              <div className="field-grid">
+                <Field label="Give laundry from"><input type="time" value={draft.dropoff_from} onChange={text('dropoff_from')} /></Field>
+                <Field label="Give laundry till"><input type="time" value={draft.dropoff_to} onChange={text('dropoff_to')} /></Field>
+                <Field label="Collect from"><input type="time" value={draft.pickup_from} onChange={text('pickup_from')} /></Field>
+                <Field label="Collect till"><input type="time" value={draft.pickup_to} onChange={text('pickup_to')} /></Field>
+              </div>
+              <Field label="Days the counter is open (text)" hint="Shown on the sign-in page and in student Help"><input value={draft.counter_hours} onChange={text('counter_hours')} placeholder="e.g. Mon–Sat" /></Field>
+            </section>
+            <section className="ad-card settings-group">
+              <h2>When laundry is ready</h2>
+              <Field label="Ready after (days)" hint="Counted from the day it is given in; ready at the start of collection hours.">
+                <input type="number" min="0" max="14" value={draft.ready_after_days} onChange={num('ready_after_days')} />
+              </Field>
+              <p className="example-line"><Icon name="clock" size={16} />{example}</p>
+            </section>
+            <section className="ad-card settings-group">
+              <h2>Automatic status</h2>
+              <Switch checked={draft.auto_status} onChange={v => setDraft({ ...draft, auto_status: v })} label="Move orders along automatically"
+                hint="Received → Washing after the hours below, and Washing → Ready at the ready time. Students are told when it is ready. Staff can still change a status by hand." />
+              {draft.auto_status && <Field label="Show “Washing” after (hours)"><input type="number" min="1" max="168" value={draft.auto_washing_hours} onChange={num('auto_washing_hours')} /></Field>}
+            </section>
           </div>
-          <Switch checked={draft.allow_paid_extra} onChange={v => setDraft({ ...draft, allow_paid_extra: v })} label="Let students pay for extra kg" hint="Over a free limit the counter offers two choices: take clothes back, or charge for the extra kg. Off = only take clothes back." />
-          {draft.allow_paid_extra && <Field label="Price per extra kg (₹)"><input type="number" min="0" value={draft.extra_rate_per_kg} onChange={num('extra_rate_per_kg')} /></Field>}
-        </section>
-        <section className="ad-card settings-group">
-          <h2>Hostel plan (current semester)</h2>
-          <p className="muted small">Given to students approved from now on. Outside their dates they pay normal prices. Set dates for existing students from Students → Plan dates, or per student at the counter.</p>
-          <SemesterChips from={draft.semester_start} until={draft.semester_end} onPick={(from, until) => setDraft({ ...draft, semester_start: from, semester_end: until })} />
-          <div className="field-grid">
-            <Field label="Semester starts"><input type="date" value={draft.semester_start} onChange={e => setDraft({ ...draft, semester_start: e.target.value })} /></Field>
-            <Field label="Semester ends"><input type="date" value={draft.semester_end} onChange={e => setDraft({ ...draft, semester_end: e.target.value })} /></Field>
+        )}
+
+        {tab === 'payments' && (
+          <div className="settings-cards">
+            <section className="ad-card settings-group">
+              <h2>Payments</h2>
+              <Switch checked={draft.pay_before_pickup} onChange={v => setDraft({ ...draft, pay_before_pickup: v })} label="Payment needed before pickup" hint="Staff cannot hand over clothes while money is due" />
+              <div className="field-grid">
+                <Field label="UPI ID" hint="Used for the “Open UPI app” button, and for a QR if no image is uploaded"><input value={draft.upi_id} onChange={text('upi_id')} placeholder="e.g. everjoylaundry@okaxis" /></Field>
+                <Field label="Name shown in UPI apps"><input value={draft.upi_name} onChange={text('upi_name')} /></Field>
+              </div>
+            </section>
+            <section className="ad-card settings-group"><UpiQrSetting onChanged={() => void s.reload()} /></section>
           </div>
-        </section>
-        <section className="ad-card settings-group">
-          <h2>Student sign-in</h2>
-          <MailStatus />
-          <Switch checked={draft.student_email_otp} onChange={v => setDraft({ ...draft, student_email_otp: v })} label="Email code on a new phone or browser"
-            hint="Students type a 6-digit code sent to their university email the first time they sign in on a device. New registrations confirm their email the same way." />
-          <Field label="University email domain (optional)" hint="Only addresses ending with this are accepted, e.g. university.edu.in. Recommended: it stops codes being sent to random addresses.">
-            <input value={draft.student_email_domain} onChange={e => setDraft({ ...draft, student_email_domain: e.target.value })} placeholder="university.edu.in" autoCapitalize="none" />
-          </Field>
-        </section>
-        <section className="ad-card settings-group">
-          <h2>Basket cards</h2>
-          <p className="muted small">The numbered cards hung on each laundry basket (A1002, A628…). Staff type the card no. at drop-off and find the basket by it at pickup. A card can be on only one basket until it is collected, then it is free again.</p>
-          <Switch checked={draft.card_required} onChange={v => setDraft({ ...draft, card_required: v })} label="Card no. needed for every order" />
-          <CardSeries series={draft.card_series} onChange={card_series => setDraft({ ...draft, card_series })} />
-        </section>
-        <section className="ad-card settings-group">
-          <h2>Express</h2>
-          <Switch checked={draft.express_enabled} onChange={v => setDraft({ ...draft, express_enabled: v })} label="Offer express service" hint="Faster turnaround for a fixed fee" />
-          {draft.express_enabled && (
-            <div className="field-grid">
-              <Field label="Express fee per order (₹)"><input type="number" min="0" value={draft.express_fee} onChange={num('express_fee')} /></Field>
-              <Field label="Express ready time (hours)"><input type="number" min="1" value={draft.express_turnaround_hours} onChange={num('express_turnaround_hours')} /></Field>
-            </div>
-          )}
-        </section>
-        <section className="ad-card settings-group">
-          <h2>Payments</h2>
-          <Switch checked={draft.pay_before_pickup} onChange={v => setDraft({ ...draft, pay_before_pickup: v })} label="Payment needed before pickup" hint="Staff cannot hand over clothes while money is due" />
-          <div className="field-grid">
-            <Field label="UPI ID" hint="Used for the “Open UPI app” button, and for a QR if no image is uploaded"><input value={draft.upi_id} onChange={e => setDraft({ ...draft, upi_id: e.target.value })} placeholder="e.g. everjoylaundry@okaxis" /></Field>
-            <Field label="Name shown in UPI apps"><input value={draft.upi_name} onChange={e => setDraft({ ...draft, upi_name: e.target.value })} /></Field>
+        )}
+
+        {tab === 'students' && (
+          <div className="settings-cards">
+            <section className="ad-card settings-group">
+              <h2>Hostel plan (current semester)</h2>
+              <p className="muted small">Given to students approved from now on. Outside their dates they pay normal prices.</p>
+              <SemesterChips from={draft.semester_start} until={draft.semester_end} onPick={(from, until) => setDraft({ ...draft, semester_start: from, semester_end: until })} />
+              <div className="field-grid">
+                <Field label="Semester starts"><input type="date" value={draft.semester_start} onChange={text('semester_start')} /></Field>
+                <Field label="Semester ends"><input type="date" value={draft.semester_end} onChange={text('semester_end')} /></Field>
+              </div>
+            </section>
+            <section className="ad-card settings-group">
+              <h2>Student sign-in</h2>
+              <MailStatus />
+              <Switch checked={draft.student_email_otp} onChange={v => setDraft({ ...draft, student_email_otp: v })} label="Email code on a new phone or browser"
+                hint="Students type a 6-digit code sent to their university email the first time they sign in on a device." />
+              <Field label="University email domain" hint="Only addresses ending with this are accepted, e.g. university.edu.in. Recommended.">
+                <input value={draft.student_email_domain} onChange={text('student_email_domain')} placeholder="university.edu.in" autoCapitalize="none" />
+              </Field>
+            </section>
           </div>
-        </section>
-        <section className="ad-card settings-group">
-          <h2>Counter</h2>
-          <Field label="Counter timings" hint="Shown on the sign-in page and in student Help"><input value={draft.counter_hours} onChange={e => setDraft({ ...draft, counter_hours: e.target.value })} /></Field>
-        </section>
-        <section className="ad-card settings-group"><UpiQrSetting onChanged={() => void s.reload()} /></section>
-        <div className={`save-bar${dirty ? ' dirty' : ''}`}>
-          {error && <ErrorNote error={error} />}
-          <span>{dirty ? 'You have unsaved changes.' : 'All changes saved.'}</span>
-          <Button type="button" tone="plain" disabled={!dirty} onClick={() => setDraft(s.data!)}>Undo</Button>
-          <Button tone="primary" busy={busy} disabled={!dirty}>Save rules</Button>
-        </div>
+        )}
+
+        {tab === 'cards' && (
+          <div className="settings-cards one">
+            <section className="ad-card settings-group">
+              <h2>Basket cards</h2>
+              <p className="muted small">The numbered cards hung on each laundry basket (A1002, A628…). Staff type the card no. at drop-off and find the basket by it at pickup. A card can be on only one basket until it is collected.</p>
+              <Switch checked={draft.card_required} onChange={v => setDraft({ ...draft, card_required: v })} label="Card no. needed for every order" />
+              <CardSeries series={draft.card_series} onChange={card_series => setDraft({ ...draft, card_series })} />
+            </section>
+          </div>
+        )}
+
+        {tab !== 'services' && (
+          <div className={`save-bar${dirty ? ' dirty' : ''}`}>
+            {error && <ErrorNote error={error} />}
+            <span>{dirty ? 'You have unsaved changes.' : 'All changes saved.'}</span>
+            <Button type="button" tone="plain" disabled={!dirty} onClick={() => setDraft(s.data!)}>Undo</Button>
+            <Button tone="primary" busy={busy} disabled={!dirty}>Save rules</Button>
+          </div>
+        )}
       </form>
-      <Services />
-      <Hostels />
+
+      {tab === 'services' && <Services />}
+      {tab === 'students' && <Hostels />}
     </div>
   );
 }
@@ -680,23 +829,45 @@ function Hostels() {
 
 /* --------------------------------------------------------------- activity */
 
+type ActivityRow = { id: number; action: string; entity: string | null; entity_id: string | null; detail: string | null; created_at: string; actor_name: string | null; actor_role: string | null };
+
+/** Every recorded action, newest first, 100 per page. The first page refreshes itself, so new entries appear on top. */
 function Activity() {
+  const PAGE = 100;
   const [q, setQ] = useState('');
-  const [limit, setLimit] = useState(100);
-  const list = useLoad(() => api<{ rows: { id: number; action: string; entity: string | null; entity_id: string | null; detail: string | null; created_at: string; actor_name: string | null; actor_role: string | null }[] }>(`/admin/activity?limit=${limit}${q ? `&q=${encodeURIComponent(q)}` : ''}`), [q, limit]);
+  const [page, setPage] = useState(0);
+  useEffect(() => setPage(0), [q]);
+  const list = useLoad(() => api<{ rows: ActivityRow[]; total: number }>(`/admin/activity?limit=${PAGE}&offset=${page * PAGE}${q ? `&q=${encodeURIComponent(q)}` : ''}`), [q, page], { every: page === 0 ? 15_000 : undefined });
+  const total = list.data?.total ?? 0;
+  const pages = Math.max(1, Math.ceil(total / PAGE));
+  const first = page * PAGE + 1;
+  const last = Math.min(total, (page + 1) * PAGE);
+  const pager = (
+    <div className="pager">
+      <span className="muted small">{total ? `${first}–${last} of ${total.toLocaleString('en-IN')}` : 'No entries'}</span>
+      <Button size="sm" icon="back" disabled={page === 0} onClick={() => setPage(page - 1)}>Newer</Button>
+      <span className="small">Page {page + 1} of {pages}</span>
+      <Button size="sm" disabled={page + 1 >= pages} onClick={() => setPage(page + 1)}>Older <Icon name="next" size={16} /></Button>
+    </div>
+  );
   return (
     <div className="stack">
-      <div className="filters"><input className="grow" value={q} onChange={e => setQ(e.target.value)} placeholder="Search by order no., ID card, person or action" aria-label="Search activity" /></div>
-      <p className="muted small">Every important action is recorded here: who did it and when. Records cannot be edited.</p>
-      {!list.data ? <Loading /> : (
+      <div className="filters">
+        <input className="grow" value={q} onChange={e => setQ(e.target.value)} placeholder="Search by order no., ID card, person or action" aria-label="Search activity" />
+        {page === 0 && <span className="live-dot" title="New entries appear automatically">Live</span>}
+      </div>
+      <p className="muted small">Every important action is recorded here, with who did it and when. Records cannot be edited.</p>
+      {pager}
+      {!list.data ? (list.error ? <ErrorNote error={list.error} retry={list.reload} /> : <Loading />) : (
         <div className="ledger-wrap">
-          <table className="ledger">
-            <thead><tr><th>When</th><th>Who</th><th>What</th><th>Details</th></tr></thead>
+          <table className="ledger fit activity-table">
+            <thead><tr><th className="num">#</th><th>When</th><th>Who</th><th>What</th><th>Details</th></tr></thead>
             <tbody>
-              {list.data.rows.map(a => (
+              {list.data.rows.map((a, i) => (
                 <tr key={a.id}>
-                  <td>{when(a.created_at)}</td>
-                  <td>{a.actor_name ?? 'System'}<small>{a.actor_role === 'STUDENT' ? 'Student' : a.actor_role === 'ADMIN' ? 'Admin' : a.actor_role ? 'Staff' : ''}</small></td>
+                  <td className="num muted">{first + i}</td>
+                  <td className="nowrap">{when(a.created_at)}<small>{ago(a.created_at)}</small></td>
+                  <td>{a.actor_name ?? 'System'}<small>{a.actor_role === 'STUDENT' ? 'Student' : a.actor_role === 'ADMIN' ? 'Admin' : a.actor_role ? 'Staff' : 'Automatic'}</small></td>
                   <td><b>{actionText(a.action)}</b> {a.entity_id && <span className="ord">{a.entity_id}</span>}</td>
                   <td className="detail">{a.detail}</td>
                 </tr>
@@ -705,7 +876,7 @@ function Activity() {
           </table>
         </div>
       )}
-      {list.data && list.data.rows.length >= limit && <Button onClick={() => setLimit(limit + 100)}>Show more</Button>}
+      {list.data && list.data.rows.length > 20 && pager}
     </div>
   );
 }
@@ -1021,3 +1192,119 @@ function CardSeries({ series, onChange }: { series: Series[]; onChange: (s: Seri
     </div>
   );
 }
+
+/* ------------------------------------------------------------------ stats */
+
+type TAT = { orders: number; ready: number; collected: number; to_ready_h: number | null; wait_h: number | null; total_h: number | null; on_time: number | null };
+type StatsData = {
+  from: string; to: string; by: By;
+  overall: TAT;
+  byService: (TAT & { name: string })[];
+  byStaff: { name: string; taken: number; marked_ready: number; to_ready_h: number | null; handed_over: number; wait_h: number | null }[];
+  complaints: {
+    total: number; open: number; per_100_orders: number | null; students: number; share_of_customers: number | null; resolve_h: number | null;
+    series: { key: string; count: number }[]; byCategory: { name: string; count: number }[];
+    repeat: { name: string; id_card_no: string; complaints: number }[];
+  };
+};
+
+/** 30 h → "30 h", 54 h → "2.3 days" */
+const fmtH = (h: number | null) => (h === null ? '–' : h < 48 ? `${h} h` : `${Math.round((h / 24) * 10) / 10} days`);
+
+/** How fast the laundry works (per service and per person) and how often students complain. */
+function Stats() {
+  const today = todayKey();
+  const presets = [
+    { key: '7', label: '7 days', from: shiftDay(today, -6), to: today, by: 'day' as By },
+    { key: '14', label: '14 days', from: shiftDay(today, -13), to: today, by: 'day' as By },
+    { key: '30', label: '30 days', from: shiftDay(today, -29), to: today, by: 'day' as By },
+    { key: 'week12', label: '12 weeks', from: shiftDay(today, -83), to: today, by: 'week' as By },
+    { key: 'year', label: '12 months', from: shiftDay(today, -364), to: today, by: 'month' as By },
+  ];
+  const [p, setP] = useState(presets[2]);
+  const d = useLoad(() => api<StatsData>(`/admin/stats?from=${p.from}&to=${p.to}&by=${p.by}`), [p.key]);
+  const t = d.data;
+  const maxReady = Math.max(1, ...(t?.byService.map(x => x.to_ready_h ?? 0) ?? [1]));
+  return (
+    <div className="stack">
+      <div className="filters">
+        <Segmented label="Period" value={p.key} onChange={k => setP(presets.find(x => x.key === k)!)} options={presets.map(x => ({ value: x.key, label: x.label }))} />
+        <span className="muted small">{when(`${p.from}T12:00:00`, 'date')} – {when(`${p.to}T12:00:00`, 'date')}</span>
+      </div>
+      {!t ? (d.error ? <ErrorNote error={d.error} retry={d.reload} /> : <Loading />) : (
+        <>
+          <div className="kpis">
+            <Kpi label="Drop-off → ready" value={fmtH(t.overall.to_ready_h)} note="average turnaround" />
+            <Kpi label="Ready → collected" value={fmtH(t.overall.wait_h)} note="how long baskets wait" />
+            <Kpi label="Drop-off → collected" value={fmtH(t.overall.total_h)} note={`${t.overall.collected} of ${t.overall.orders} orders collected`} />
+            <Kpi label="Ready on time" value={t.overall.on_time === null ? '–' : `${t.overall.on_time}%`} note="by the promised time" warn={t.overall.on_time !== null && t.overall.on_time < 80} />
+            <Kpi label="Complaints" value={String(t.complaints.total)} note={t.complaints.per_100_orders === null ? 'no orders' : `${t.complaints.per_100_orders} per 100 orders`} warn={(t.complaints.per_100_orders ?? 0) > 5} />
+          </div>
+
+          <section className="ad-card">
+            <h2>Turnaround by service</h2>
+            {!t.byService.length ? <p className="muted">No orders in this period.</p> : (
+              <div className="ledger-wrap flat">
+                <table className="ledger fit">
+                  <thead><tr><th>Service</th><th className="num">Orders</th><th>Drop-off → ready</th><th className="num">Ready → collected</th><th className="num">Total</th><th className="num">On time</th></tr></thead>
+                  <tbody>{t.byService.map(x => (
+                    <tr key={x.name}>
+                      <td><b>{x.name}</b><small>{x.ready} ready, {x.collected} collected</small></td>
+                      <td className="num">{x.orders}</td>
+                      <td><span className="meter-row"><span className="hbar" style={{ width: `${((x.to_ready_h ?? 0) / maxReady) * 100}%` }} /><b>{fmtH(x.to_ready_h)}</b></span></td>
+                      <td className="num">{fmtH(x.wait_h)}</td>
+                      <td className="num">{fmtH(x.total_h)}</td>
+                      <td className="num">{x.on_time === null ? '–' : <span className={x.on_time < 80 ? 'bad' : ''}>{x.on_time}%</span>}</td>
+                    </tr>
+                  ))}</tbody>
+                </table>
+              </div>
+            )}
+          </section>
+
+          <section className="ad-card">
+            <h2>Staff</h2>
+            <p className="muted small">Who took orders, who marked them ready (and how long after drop-off), and who handed them over. “Automatic” is the automatic status step.</p>
+            {!t.byStaff.length ? <p className="muted">No activity in this period.</p> : (
+              <div className="ledger-wrap flat">
+                <table className="ledger fit">
+                  <thead><tr><th>Person</th><th className="num">Orders taken</th><th className="num">Marked ready</th><th className="num">Avg time to ready</th><th className="num">Handed over</th><th className="num">Avg wait before pickup</th></tr></thead>
+                  <tbody>{t.byStaff.map(x => (
+                    <tr key={x.name}><td><b>{x.name}</b></td><td className="num">{x.taken}</td><td className="num">{x.marked_ready}</td><td className="num">{fmtH(x.to_ready_h)}</td><td className="num">{x.handed_over}</td><td className="num">{fmtH(x.wait_h)}</td></tr>
+                  ))}</tbody>
+                </table>
+              </div>
+            )}
+          </section>
+
+          <div className="ad-grid">
+            <section className="ad-card chart-card">
+              <h2>Complaints per {p.by === 'day' ? 'day' : p.by === 'week' ? 'week' : 'month'}</h2>
+              <DayBars days={t.complaints.series.map(x => ({ day: x.key, orders: x.count, kg: 0 }))} by={p.by} unit="complaint" />
+            </section>
+            <section className="ad-card report-block">
+              <h2>How often students complain</h2>
+              <Row k="Complaints" v={t.complaints.total} />
+              <Row k="Still open" v={t.complaints.open} warn={t.complaints.open > 0} />
+              <Row k="Per 100 orders" v={t.complaints.per_100_orders ?? '–'} />
+              <Row k="Students who complained" v={`${t.complaints.students}${t.complaints.share_of_customers !== null ? ` (${t.complaints.share_of_customers}% of customers)` : ''}`} />
+              <Row k="Average time to resolve" v={fmtH(t.complaints.resolve_h)} />
+            </section>
+          </div>
+          <div className="ad-grid">
+            <ReportBlock title="Complaints by type">
+              {t.complaints.byCategory.length ? <table className="mini-table"><tbody>{t.complaints.byCategory.map(c => <tr key={c.name}><td>{c.name}</td><td className="num">{c.count}</td></tr>)}</tbody></table> : <p className="muted">No complaints.</p>}
+            </ReportBlock>
+            <ReportBlock title="Complain often (2 or more)">
+              {t.complaints.repeat.length ? <table className="mini-table"><tbody>{t.complaints.repeat.map(c => <tr key={c.id_card_no}><td>{c.name}<small>{c.id_card_no}</small></td><td className="num">{c.complaints}</td></tr>)}</tbody></table> : <p className="muted">Nobody complained more than once.</p>}
+            </ReportBlock>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+const Kpi = ({ label, value, note, warn }: { label: string; value: string; note?: string; warn?: boolean }) => (
+  <div className={`kpi${warn ? ' warn' : ''}`}><span>{label}</span><b>{value}</b>{note && <small>{note}</small>}</div>
+);

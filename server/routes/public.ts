@@ -37,6 +37,7 @@ router.get('/public/info', handle(async (_req, res) => {
     // Registration asks for the university email when sign-in codes are on.
     email_codes: await studentOtpOn(),
     email_domain: s.student_email_domain,
+    dropoff_from: s.dropoff_from, dropoff_to: s.dropoff_to, pickup_from: s.pickup_from, pickup_to: s.pickup_to,
   });
 }));
 
@@ -195,12 +196,26 @@ async function claimAccount(userId: number, passwordHash: string, idCardNo: stri
   });
 }
 
+/**
+ * Forgot password (students with a university email on file): a code is emailed; with it they choose a
+ * new password. Staff and students without an email ask at the counter, where any account can be reset.
+ */
+router.post('/auth/forgot', handle(async (req, res) => {
+  const b = parse(z.object({ loginId: z.string().trim().min(1, 'Enter your ID card no.').max(64) }), req.body);
+  if (!(await studentOtpOn())) throw new HttpError(409, 'Ask at the laundry counter. Staff can reset your password.', { code: 'ASK_COUNTER' });
+  const u = await db.get<{ id: number; token_version: number; email: string | null; active: number }>(
+    `SELECT u.id, u.token_version, u.active, st.email FROM users u JOIN students st ON st.user_id = u.id WHERE u.login_id = ? AND st.claimable = 0 AND st.left_at IS NULL`, [normaliseLogin(b.loginId)]);
+  if (!u || !u.email || !u.active) throw new HttpError(404, 'No account with a university email for this ID card no. Ask at the laundry counter to reset your password.');
+  codeSendLimit(req, 'login');
+  res.json(await startChallenge('RESET', u.email, u.id, { v: u.token_version }));
+}));
+
 /** The student typed the code from their email. */
 router.post('/auth/otp', handle(async (req, res) => {
-  const b = parse(z.object({ challenge: z.string().min(10).max(80), code: z.string().trim().min(4).max(12) }), req.body);
+  const b = parse(z.object({ challenge: z.string().min(10).max(80), code: z.string().trim().min(4).max(12), newPassword: zPassword(6).optional() }), req.body);
   // Each code allows only 5 tries; this per-network cap only slows mass guessing (campus Wi-Fi is shared, so it is generous).
   if (limited(`otp-check:${ip(req)}`, 300, 15 * 60_000)) throw new HttpError(429, 'Too many tries. Wait 15 minutes.');
-  const c = await useChallenge(b.challenge, b.code);
+  const c = await useChallenge(b.challenge, b.code, b.newPassword === undefined ? ['RESET'] : []);
   if (c.purpose === 'SIGNUP') {
     const id = await createStudent(c.payload as unknown as NewStudent, true);
     return signedIn(req, res, id, 0, { status: 201, trust: true });
@@ -210,6 +225,16 @@ router.post('/auth/otp', handle(async (req, res) => {
   // A code sent before a password reset, email change or sign-out-everywhere no longer counts.
   const v = (c.payload as { v?: number } | null)?.v;
   if (v !== undefined && v !== u.token_version) throw new HttpError(410, 'This code is no longer valid. Start again.');
+  if (c.purpose === 'RESET') {
+    if (!b.newPassword) throw new HttpError(400, 'Choose a new password.');
+    const hash = await bcrypt.hash(b.newPassword, 10);
+    const version = await db.tx(async () => {
+      await db.run('UPDATE users SET password_hash = ?, must_change_password = 0, password_expires_at = NULL, token_version = token_version + 1 WHERE id = ?', [hash, u.id]);
+      await logActivity(u.id, 'PASSWORD_RESET_BY_EMAIL', 'student', u.login_id);
+      return (await db.get<{ token_version: number }>('SELECT token_version FROM users WHERE id = ?', [u.id]))!.token_version;
+    });
+    return signedIn(req, res, u.id, version, { trust: true });
+  }
   if (c.purpose === 'EMAIL') {
     const email = String((c.payload as { email: string }).email);
     if (await db.get('SELECT 1 AS ok FROM students WHERE lower(email) = ? AND user_id != ?', [email, u.id])) throw new HttpError(409, 'This email is already used by another account.');

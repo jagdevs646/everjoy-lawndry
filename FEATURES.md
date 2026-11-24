@@ -121,6 +121,18 @@ One website for everyone. After signing in, each role gets its own look:
 | **No screenshots of QR codes** | Student | The slip QR **changes every 30 seconds**, so a screenshot or a photo of it stops working within about two minutes. The QR is signed with a key derived on the server, so even the old fixed QR can't be used to make one. Phones with a wrong clock use the server's time. On the Android app, screenshots and screen recording are blocked while a slip or ID QR is open. |
 | **Basket card no.** | Staff, admin, student | The physical cards on the baskets (A1002, A628…) are typed at drop-off, next to the order no., which stays as it is. A card can be on only one basket until it is collected, then it's free for the next one. At pickup, staff type the card no. to find the basket. The admin sets the card series in use (e.g. A1–A3000) and whether a card is required. The student sees the card no. on their slip, and the register export has a **Card No** column. Staff can change the card on an open order. |
 
+### Added on 25 November 2026 (second update)
+
+| Feature | Who | What it does |
+|---|---|---|
+| **Counter timings + automatic status** | Admin, student | Admin sets the drop-off hours (e.g. 6–8 PM), the collection hours (e.g. from 7 PM) and how many days after drop-off laundry is ready (e.g. 2). An order given on 24 Nov is promised for 26 Nov at 7 PM. Orders move by themselves: **Washing** after 24 hours (adjustable) and **Ready for pickup** at the ready time, and the student is notified. Staff can still change a status by hand; the admin can switch the automatic step off. Students see the timings on Home and in Help. |
+| **Tidier Rules & pricing** | Admin | Settings are split into tabs (Orders & limits, Timings, Prices & services, Payments, Students & sign-in, Basket cards), laid out across the full width. |
+| **Orders chart: daily / weekly / monthly** | Admin | The overview chart switches between the last 14 days, 12 weeks and 12 months. |
+| **Stats** | Admin | For any period: average time from drop-off → ready, ready → collected and total, with the on-time share, per service. Per staff member: orders taken, orders marked ready (and how fast), orders handed over. Complaints over time (daily/weekly/monthly), per 100 orders, by type, time to resolve, and students who complain often. |
+| **Remove students who left** | Admin | Tick students and choose **Remove (left hostel)**. They disappear from the student list and can't sign in or give laundry; their orders and payments stay in the register. Students with laundry at the counter or money due are not removed. **Left hostel** in the filter shows them, with **Restore**. |
+| **Activity log** | Admin | A numbered table, newest first, 100 entries per page with Newer/Older. The first page updates by itself every 15 seconds. |
+| **Reset password for everyone** | Admin, student | The admin can reset any student (Reset on each row) or staff/admin account (Staff page). Students can also use **Forgot your password?** on the sign-in page: a code goes to their university email, then they choose a new password. |
+
 ---
 
 ## Android and iPhone apps

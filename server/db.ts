@@ -451,7 +451,8 @@ export async function migrate() {
     ['students', 'email', 'TEXT'],                                  // university email: sign-in codes are sent here
     ['students', 'email_verified_at', 'TEXT'],
     ['students', 'valid_from', 'TEXT'],                             // hostel plan start (semester), YYYY-MM-DD
-    ['orders', 'tag_no', 'TEXT'],                                   // basket card no. (A1002…), reused once the order is collected                         // 1 = hostel prices when taken (kept for corrections)
+    ['orders', 'tag_no', 'TEXT'],
+    ['students', 'left_at', 'TEXT'],                               // removed from the hostel list (left); history kept                                   // basket card no. (A1002…), reused once the order is collected                         // 1 = hostel prices when taken (kept for corrections)
   ] as const;
   for (const [table, column, def] of add) {
     try {

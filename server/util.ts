@@ -25,6 +25,30 @@ export function startOfLocalDayIso(date = new Date()) {
   return new Date(Date.parse(`${dayKey(date)}T00:00:00.000Z`) - offsetMs).toISOString();
 }
 
+/** "2026-11-24" + n days → "2026-11-26" (calendar days, no time zone involved). */
+export function addDays(day: string, n: number) {
+  const d = new Date(`${day}T12:00:00.000Z`);
+  d.setUTCDate(d.getUTCDate() + n);
+  return d.toISOString().slice(0, 10);
+}
+
+/** The UTC instant of a campus-local date and time, e.g. ("2026-11-26", "19:00") in Asia/Kolkata → 13:30Z. */
+export function localDateTimeIso(day: string, hhmm: string) {
+  const guess = Date.parse(`${day}T${hhmm}:00.000Z`);
+  const at = new Date(guess);
+  const asLocal = new Date(at.toLocaleString('en-US', { timeZone: APP_TZ }));
+  const asUtc = new Date(at.toLocaleString('en-US', { timeZone: 'UTC' }));
+  return new Date(guess - (asLocal.getTime() - asUtc.getTime())).toISOString();
+}
+
+/** Monday of the week a day belongs to (for weekly charts). */
+export function weekStart(day: string) {
+  const d = new Date(`${day}T12:00:00.000Z`);
+  const back = (d.getUTCDay() + 6) % 7;
+  d.setUTCDate(d.getUTCDate() - back);
+  return d.toISOString().slice(0, 10);
+}
+
 export const round2 = (n: number) => Math.round(n * 100) / 100;
 
 /** Parse a request body/query with zod; the first issue becomes a readable 400. */

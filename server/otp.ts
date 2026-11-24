@@ -46,7 +46,7 @@ async function countSend(email: string, purpose: Purpose) {
     [nowIso().slice(0, 10), purpose === 'LOGIN' ? 'LOGIN' : 'OTHER']);
 }
 
-export type Purpose = 'LOGIN' | 'CLAIM' | 'SIGNUP' | 'EMAIL';
+export type Purpose = 'LOGIN' | 'CLAIM' | 'SIGNUP' | 'EMAIL' | 'RESET';
 type Challenge = { id: string; purpose: Purpose; user_id: number | null; email: string; code_hash: string; payload: string | null; attempts: number; sends: number; last_sent_at: string; expires_at: string };
 
 const CODE_TTL_MS = 10 * 60_000;
@@ -71,7 +71,7 @@ export async function checkStudentEmail(email: string) {
 }
 
 async function deliver(email: string, code: string, purpose: Purpose) {
-  const what = purpose === 'LOGIN' ? 'sign in on a new phone or browser' : purpose === 'CLAIM' ? 'set up your laundry account' : purpose === 'EMAIL' ? 'add this email to your laundry account' : 'confirm your email for the laundry account';
+  const what = purpose === 'LOGIN' ? 'sign in on a new phone or browser' : purpose === 'CLAIM' ? 'set up your laundry account' : purpose === 'EMAIL' ? 'add this email to your laundry account' : purpose === 'RESET' ? 'choose a new password for your laundry account' : 'confirm your email for the laundry account';
   await sendMail({
     to: email,
     subject: `${code} is your Everjoy Lawndry code`,
@@ -120,9 +120,11 @@ export async function resendChallenge(id: string) {
  * Check a code. A right code uses the challenge up (it can't be used twice); a wrong one counts
  * toward the 5 tries. Returns the challenge with its payload.
  */
-export async function useChallenge(id: string, code: string) {
+export async function useChallenge(id: string, code: string, needsMore: Purpose[] = []) {
   const c = await db.get<Challenge>('SELECT * FROM login_challenges WHERE id = ?', [id]);
   if (!c || c.expires_at < nowIso()) throw new HttpError(410, 'This code has expired. Start again.');
+  // e.g. a password reset needs the new password with the code; don't use the code up without it.
+  if (needsMore.includes(c.purpose)) throw new HttpError(400, 'Choose a new password.');
   if (c.attempts >= MAX_ATTEMPTS) throw new HttpError(429, 'Too many wrong codes. Start again.');
   const want = Buffer.from(c.code_hash, 'hex');
   const got = Buffer.from(hash(id, code.replace(/\D/g, '')), 'hex');

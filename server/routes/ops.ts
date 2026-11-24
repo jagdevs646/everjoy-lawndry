@@ -74,13 +74,14 @@ async function pickSettings() {
     allow_paid_extra: s.allow_paid_extra, extra_rate_per_kg: s.extra_rate_per_kg,
     upi_id: s.upi_id, upi_name: s.upi_name, has_upi_qr: !!s.upi_qr_file,
     card_required: s.card_required, card_series: s.card_series, semester_start: s.semester_start, semester_end: s.semester_end,
+    dropoff_from: s.dropoff_from, dropoff_to: s.dropoff_to, pickup_from: s.pickup_from, pickup_to: s.pickup_to, auto_status: s.auto_status,
   };
 }
 
 /* ---------------------------------------------------------------- students */
 
 router.get('/ops/students', handle(async (req, res) => {
-  const q = parse(z.object({ q: z.string().optional(), status: z.enum(['PENDING', 'ACTIVE', 'REJECTED', 'SUSPENDED']).optional().or(z.literal('')), hostelId: z.coerce.number().int().positive().max(MAX_ID).optional(), plan: z.enum(['EXPIRED', 'VALID', 'UPCOMING', 'WALKIN', '']).optional(), limit: z.coerce.number().int().optional(), offset: z.coerce.number().int().min(0).optional() }), req.query);
+  const q = parse(z.object({ q: z.string().optional(), status: z.enum(['PENDING', 'ACTIVE', 'REJECTED', 'SUSPENDED', 'LEFT']).optional().or(z.literal('')), hostelId: z.coerce.number().int().positive().max(MAX_ID).optional(), plan: z.enum(['EXPIRED', 'VALID', 'UPCOMING', 'WALKIN', '']).optional(), limit: z.coerce.number().int().optional(), offset: z.coerce.number().int().min(0).optional() }), req.query);
   res.json(await listStudents({ ...q, status: q.status || undefined }));
 }));
 

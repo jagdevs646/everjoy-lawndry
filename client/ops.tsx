@@ -312,7 +312,7 @@ export function StudentFacts({ s }: { s: CounterStudent }) {
   return (
     <dl className="facts">
       <div><dt>ID card no.</dt><dd className="big">{s.id_card_no}</dd></div>
-      <div><dt>Account</dt><dd><span className={`pill acc-${s.status.toLowerCase()}`}>{label[s.status]}</span></dd></div>
+      <div><dt>Account</dt><dd>{s.left_at ? <span className="pill acc-suspended">Left hostel</span> : <span className={`pill acc-${s.status.toLowerCase()}`}>{label[s.status]}</span>}</dd></div>
       <div><dt>Hostel</dt><dd>{s.kind === 'WALKIN' ? 'Walk-in customer' : <>{s.hostel_name}, room {s.room_no}</>}</dd></div>
       <div><dt>Hostel plan</dt><dd>{s.plan.hosteler ? (planPeriod(s.valid_from, s.valid_until) || 'Valid') : <span className="pill pay-due">Normal prices</span>}<small>{s.plan.label}</small></dd></div>
       <div><dt>Mobile</dt><dd><a href={`tel:${s.mobile}`}>{s.mobile}</a></dd></div>

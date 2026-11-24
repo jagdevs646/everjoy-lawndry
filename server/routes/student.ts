@@ -54,6 +54,7 @@ router.get('/me/home', handle(async (req, res) => {
       pay_before_pickup: s.pay_before_pickup, express_enabled: s.express_enabled, express_fee: s.express_fee,
       monthly_kg_limit: s.monthly_kg_limit, monthly_order_limit: s.monthly_order_limit, allow_paid_extra: s.allow_paid_extra, extra_rate_per_kg: s.extra_rate_per_kg,
       has_upi_qr: !!s.upi_qr_file,
+      dropoff_from: s.dropoff_from, dropoff_to: s.dropoff_to, pickup_from: s.pickup_from, pickup_to: s.pickup_to,
     },
   });
 }));

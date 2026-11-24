@@ -13,6 +13,8 @@ type Info = { hostels: Hostel[]; max_kg_per_order: number; counter_hours: string
 export function OtpStep({ start, onDone, onBack }: { start: OtpStart; onDone: (r: SignedIn) => void; onBack: () => void }) {
   const [challenge, setChallenge] = useState(start);
   const [code, setCode] = useState('');
+  const reset = start.purpose === 'RESET';
+  const [pw, setPw] = useState({ next: '', again: '' });
   const [wait, setWait] = useState(30);
   const { busy, error, setError, submit } = useFormAction();
   const resend = useFormAction();
@@ -23,7 +25,8 @@ export function OtpStep({ start, onDone, onBack }: { start: OtpStart; onDone: (r
   }, [wait]);
   const verify = async (e?: FormEvent) => {
     e?.preventDefault();
-    const r = await submit(() => api<SignedIn>('/auth/otp', { body: { challenge: challenge.challenge, code } }));
+    if (reset && pw.next !== pw.again) { setError('The two passwords do not match.'); return; }
+    const r = await submit(() => api<SignedIn>('/auth/otp', { body: { challenge: challenge.challenge, code, ...(reset ? { newPassword: pw.next } : {}) } }));
     if (r) onDone(r);
   };
   const again = async () => {
@@ -31,7 +34,8 @@ export function OtpStep({ start, onDone, onBack }: { start: OtpStart; onDone: (r
     const r = await resend.submit(() => api<OtpStart>('/auth/otp/resend', { body: { challenge: challenge.challenge } }), 'New code sent');
     if (r) { setChallenge(r); setCode(''); setWait(30); }
   };
-  const what = start.purpose === 'LOGIN' ? 'This is a new phone or browser for your account.' : start.purpose === 'CLAIM' ? 'Your account was added by the laundry office.' : 'One last step to register.';
+  const what = start.purpose === 'LOGIN' ? 'This is a new phone or browser for your account.' : start.purpose === 'CLAIM' ? 'Your account was added by the laundry office.'
+    : start.purpose === 'RESET' ? 'To choose a new password, confirm it’s you.' : start.purpose === 'EMAIL' ? 'Confirm this is your email.' : 'One last step to register.';
   return (
     <form className="auth-card" onSubmit={verify} noValidate>
       <button type="button" className="auth-back" onClick={onBack}><Icon name="back" size={18} />Back</button>
@@ -41,8 +45,12 @@ export function OtpStep({ start, onDone, onBack }: { start: OtpStart; onDone: (r
         <input className="otp-input" value={code} onChange={e => { const v = e.target.value.replace(/\D/g, '').slice(0, 6); setCode(v); }}
           inputMode="numeric" autoComplete="one-time-code" autoFocus aria-label="6-digit code" />
       </Field>
+      {reset && <div className="field-row">
+        <Field label="New password" hint="At least 6 characters"><input type="password" value={pw.next} onChange={e => setPw({ ...pw, next: e.target.value })} autoComplete="new-password" /></Field>
+        <Field label="Repeat password"><input type="password" value={pw.again} onChange={e => setPw({ ...pw, again: e.target.value })} autoComplete="new-password" /></Field>
+      </div>}
       {(error || resend.error) && <ErrorNote error={error || resend.error} />}
-      <Button tone="primary" size="lg" block busy={busy} disabled={code.length !== 6}>Continue</Button>
+      <Button tone="primary" size="lg" block busy={busy} disabled={code.length !== 6 || (reset && pw.next.length < 6)}>{reset ? 'Save new password' : 'Continue'}</Button>
       <Button type="button" tone="plain" block busy={resend.busy} disabled={wait > 0} onClick={again}>{wait > 0 ? `Send a new code in ${wait} s` : 'Send a new code'}</Button>
       <p className="auth-foot">Wrong email or no access to it? Ask at the laundry counter; staff can update your email.</p>
     </form>
@@ -82,6 +90,7 @@ function SignIn({ onSignedIn, counterHours }: { onSignedIn: (u: User) => void; c
   const [loginId, setLoginId] = useState('');
   const [password, setPassword] = useState('');
   const [otp, setOtp] = useState<OtpStart | null>(null);
+  const [forgot, setForgot] = useState(false);
   const { busy, error, submit: send } = useFormAction();
   const submit = async (e: FormEvent) => {
     e.preventDefault();
@@ -90,7 +99,8 @@ function SignIn({ onSignedIn, counterHours }: { onSignedIn: (u: User) => void; c
     if ('otp_required' in r) { setOtp(r); return; }
     onSignedIn(r.user);
   };
-  if (otp) return <OtpStep start={otp} onDone={r => onSignedIn(r.user)} onBack={() => { setOtp(null); setPassword(''); }} />;
+  if (otp) return <OtpStep start={otp} onDone={r => { if (otp.purpose === 'RESET') toast('New password saved'); onSignedIn(r.user); }} onBack={() => { setOtp(null); setPassword(''); }} />;
+  if (forgot) return <Forgot loginId={loginId} counterHours={counterHours} onCode={o => { setForgot(false); setOtp(o); }} onBack={() => setForgot(false)} />;
   return (
     <form className="auth-card" onSubmit={submit} noValidate>
       <h1>Sign in</h1>
@@ -104,7 +114,29 @@ function SignIn({ onSignedIn, counterHours }: { onSignedIn: (u: User) => void; c
       {error && <ErrorNote error={error} />}
       <Button tone="primary" size="lg" block busy={busy} disabled={!loginId || !password}>Sign in</Button>
       <p className="auth-alt">New to Everjoy? <a href="#/register">Register with your ID card</a></p>
-      <p className="auth-foot">Forgot your password? Ask at the laundry counter{counterHours ? ` (${counterHours})` : ''}. Staff can reset it for you.</p>
+      <p className="auth-foot"><button type="button" className="link-btn inline" onClick={() => setForgot(true)}>Forgot your password?</button> Students can reset it with a code from their university email. Staff, or anyone without an email on file, ask at the laundry counter{counterHours ? ` (${counterHours})` : ''} or the admin.</p>
+    </form>
+  );
+}
+
+/** Forgot password: a code goes to the student's university email, then they choose a new password. */
+function Forgot({ loginId, counterHours, onCode, onBack }: { loginId: string; counterHours?: string; onCode: (o: OtpStart) => void; onBack: () => void }) {
+  const [id, setId] = useState(loginId);
+  const { busy, error, submit } = useFormAction();
+  const send = async (e: FormEvent) => {
+    e.preventDefault();
+    const r = await submit(() => api<OtpStart>('/auth/forgot', { body: { loginId: id } }));
+    if (r) onCode(r);
+  };
+  return (
+    <form className="auth-card" onSubmit={send} noValidate>
+      <button type="button" className="auth-back" onClick={onBack}><Icon name="back" size={18} />Sign in</button>
+      <h1>Forgot password</h1>
+      <p className="lede">Students: we email a code to your university email. Then you choose a new password.</p>
+      <Field label="ID card no."><input value={id} onChange={e => setId(e.target.value)} autoCapitalize="characters" spellCheck={false} autoFocus /></Field>
+      {error && <ErrorNote error={error} />}
+      <Button tone="primary" size="lg" block busy={busy} disabled={!id.trim()}>Email me a code</Button>
+      <p className="auth-foot">No email on your account, or you are staff? Ask at the laundry counter{counterHours ? ` (${counterHours})` : ''}: staff or the admin can give you a temporary password.</p>
     </form>
   );
 }

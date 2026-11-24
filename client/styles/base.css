@@ -260,3 +260,4 @@ img { max-width: 100%; }
 .plan-fields { border: 1px solid var(--line, #ddd); border-radius: var(--radius-sm, 10px); padding: 10px 12px 12px; display: grid; gap: 10px; }
 .plan-fields legend { padding: 0 6px; font-weight: 700; font-size: .875rem; }
 label.btn { cursor: pointer; }
+.link-btn.inline { padding: 0; font-weight: 700; color: var(--accent); }

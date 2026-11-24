@@ -106,7 +106,7 @@ export async function findOrderByCode(code: string) {
 const STUDENT_COLS = `u.id, u.name, u.mobile, u.login_id, u.active, u.created_at, u.must_change_password,
   st.id_card_no, st.hostel_id, h.name AS hostel_name, st.room_no, st.status, st.review_note, st.reviewed_at, rv.name AS reviewed_by_name,
   st.kind, st.valid_until, st.valid_from, st.claimable, st.pending_hostel_id, ph.name AS pending_hostel_name, st.pending_room_no, st.change_requested_at,
-  u.photo, st.email, st.email_verified_at`;
+  u.photo, st.email, st.email_verified_at, st.left_at`;
 const STUDENT_FROM = `FROM users u JOIN students st ON st.user_id = u.id JOIN hostels h ON h.id = st.hostel_id LEFT JOIN users rv ON rv.id = st.reviewed_by
   LEFT JOIN hostels ph ON ph.id = st.pending_hostel_id`;
 
@@ -121,7 +121,12 @@ export async function listStudents(f: { q?: string; status?: string; hostelId?: 
   const where: string[] = [];
   const p: unknown[] = [];
   const month = dayKey().slice(0, 7);
-  if (f.status) { where.push('st.status = ?'); p.push(f.status); }
+  // Students who left the hostel are hidden unless asked for ("Left hostel").
+  if (f.status === 'LEFT') where.push('st.left_at IS NOT NULL');
+  else {
+    where.push('st.left_at IS NULL');
+    if (f.status) { where.push('st.status = ?'); p.push(f.status); }
+  }
   if (f.plan === 'WALKIN') where.push("st.kind = 'WALKIN'");
   else if (f.plan === 'EXPIRED') { where.push("st.kind = 'HOSTELER' AND st.valid_until IS NOT NULL AND st.valid_until < ?"); p.push(dayKey()); }
   else if (f.plan === 'VALID') { where.push("st.kind = 'HOSTELER' AND (st.valid_from IS NULL OR st.valid_from <= ?) AND (st.valid_until IS NULL OR st.valid_until >= ?)"); p.push(dayKey(), dayKey()); }

@@ -218,3 +218,6 @@ html[data-theme='student'], html[data-theme='public'] {
 .slip-order { font-size: .8rem; color: var(--muted); font-weight: 600; }
 .slip-no .card-no { font-size: 1.6rem; }
 .profile-photo { padding: 14px 16px; border-radius: var(--radius); background: var(--surface); }
+
+.slip-noqr { padding: 18px; text-align: center; color: var(--ink-2); font-weight: 600; }
+.timings-line { display: flex; align-items: center; gap: 8px; padding: 10px 14px; border-radius: var(--radius-sm); background: var(--surface); color: var(--ink-2); font-size: .9rem; font-weight: 600; }

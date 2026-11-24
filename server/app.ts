@@ -5,6 +5,7 @@ import { db, migrate } from './db.js';
 import { appCors, csrf, initAuthSecret, mustChangePassword, session } from './auth.js';
 import { serveFile } from './files.js';
 import { ensureAdmin, seedDemo } from './seed.js';
+import { maybeAutoAdvance } from './rules.js';
 import { HttpError, errorHandler } from './util.js';
 import { router as publicRoutes } from './routes/public.js';
 import { router as studentRoutes } from './routes/student.js';
@@ -44,6 +45,8 @@ export async function createApp({ demo = false } = {}) {
 
   const api = express.Router();
   api.use(appCors, session, csrf, mustChangePassword);   // appCors answers the app's preflight before anything else
+  // Signed-in requests also move orders along (washing / ready) on time, at most once a minute.
+  if (process.env.NODE_ENV !== 'test') api.use((req, _res, next) => { if ((req as { user?: unknown }).user) maybeAutoAdvance(); next(); });
   api.use((_req, res, next) => { res.setHeader('Cache-Control', 'no-store'); next(); });
   api.get('/health', (_req, res) => res.json({ ok: true }));
   api.get('/files/:name', serveFile);

@@ -868,3 +868,89 @@ describe('round 2 review fixes', () => {
     expect((await put(admin, '/api/admin/settings', { card_series: [{ prefix: 'EJ', from: 1, to: 9 }] })).status).toBe(400);
   });
 });
+
+describe('round 3: timings, automatic status, stats, leaving, password reset', () => {
+  it('ready time is the pickup time N days after drop-off, and orders move on by themselves', async () => {
+    await put(admin, '/api/admin/settings', { pickup_from: '19:00', ready_after_days: 2, auto_status: true, auto_washing_hours: 24 });
+    const s = await newStudent();
+    const o = await order(s.id, 3, 5);
+    const exp = new Date(o.body.expected_at);
+    expect(exp.toLocaleTimeString('en-GB', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit' })).toBe('19:00');
+    expect((exp.getTime() - Date.now()) / 3600_000).toBeGreaterThan(24);
+    const { db } = await import('../server/db.js');
+    const { runAutoAdvance } = await import('../server/rules.js');
+    // 25 hours after drop-off: washing
+    await db.run('UPDATE orders SET received_at = ? WHERE id = ?', [new Date(Date.now() - 25 * 3600_000).toISOString(), o.body.id]);
+    await runAutoAdvance();
+    expect((await staff.get(`/api/ops/orders/${o.body.id}`)).body.status).toBe('WASHING');
+    // ready time reached: ready for pickup, student told
+    await db.run('UPDATE orders SET expected_at = ? WHERE id = ?', [new Date(Date.now() - 60_000).toISOString(), o.body.id]);
+    await runAutoAdvance();
+    const after = await staff.get(`/api/ops/orders/${o.body.id}`);
+    expect(after.body.status).toBe('READY');
+    expect(after.body.events.at(-1).note).toContain('Automatic');
+    expect((await s.agent.get('/api/notifications')).body.rows[0].title).toContain('ready for pickup');
+    // switched off: nothing moves
+    await put(admin, '/api/admin/settings', { auto_status: false });
+    const o2 = await order(s.id, 2, 3);
+    await db.run('UPDATE orders SET received_at = ?, expected_at = ? WHERE id = ?', [new Date(Date.now() - 50 * 3600_000).toISOString(), new Date(Date.now() - 60_000).toISOString(), o2.body.id]);
+    await runAutoAdvance();
+    expect((await staff.get(`/api/ops/orders/${o2.body.id}`)).body.status).toBe('RECEIVED');
+    await put(admin, '/api/admin/settings', { auto_status: true });
+  });
+
+  it('orders chart by day, week and month', async () => {
+    for (const by of ['day', 'week', 'month']) {
+      const r = await admin.get(`/api/admin/trend?by=${by}`);
+      expect(r.status).toBe(200);
+      expect(r.body.rows).toHaveLength(by === 'day' ? 14 : 12);
+      expect(r.body.rows.at(-1).orders).toBeGreaterThan(0);
+    }
+  });
+
+  it('stats: turnaround per service and staff, complaints per 100 orders', async () => {
+    const r = await admin.get('/api/admin/stats?from=2020-01-01&to=2099-12-31&by=month');
+    expect(r.status, r.body.error).toBe(200);
+    expect(r.body.byService.length).toBeGreaterThan(0);
+    expect(r.body.byService[0]).toHaveProperty('to_ready_h');
+    expect(r.body.byStaff.some((p: { name: string }) => p.name === 'Counter One')).toBe(true);
+    expect(r.body.byStaff.some((p: { name: string }) => p.name === 'Automatic')).toBe(true);
+    expect(r.body.complaints.total).toBeGreaterThan(0);
+    expect(r.body.complaints.per_100_orders).toBeGreaterThan(0);
+  });
+
+  it('students who left are removed from the list (history kept) and can be restored', async () => {
+    const s = await newStudent();
+    const busy = await newStudent();
+    await order(busy.id, 2, 3);
+    const r = await post(admin, '/api/admin/students/leave', { ids: [s.id, busy.id] });
+    expect(r.body.changed).toBe(1);
+    expect(r.body.blocked).toHaveLength(1);   // still has laundry at the counter
+    expect((await staff.get(`/api/ops/students?q=${s.idCardNo}`)).body.total).toBe(0);
+    expect((await staff.get(`/api/ops/students?status=LEFT&q=${s.idCardNo}`)).body.total).toBe(1);
+    expect((await s.agent.get('/api/me/home')).status).toBe(401);   // signed out
+    expect((await order(s.id, 2, 3)).status).toBe(409);
+    expect((await staff.post('/api/admin/students/leave').set('x-ej', '1').send({ ids: [s.id] })).status).toBe(403);
+    expect((await post(admin, `/api/admin/students/${s.id}/restore`)).status).toBe(200);
+    expect((await staff.get(`/api/ops/students?q=${s.idCardNo}`)).body.total).toBe(1);
+  });
+
+  it('a student resets a forgotten password with a code from their email', async () => {
+    const s = await newStudent();
+    const a = request.agent(app);
+    const start = await post(a, '/api/auth/forgot', { loginId: s.idCardNo });
+    expect(start.status, start.body.error).toBe(200);
+    expect((await post(a, '/api/auth/otp', { challenge: start.body.challenge, code: codeFor(s.email) })).status).toBe(400);   // new password needed
+    const done = await post(a, '/api/auth/otp', { challenge: start.body.challenge, code: codeFor(s.email), newPassword: 'fresh-pass' });
+    expect(done.status, done.body.error).toBe(200);
+    expect((await s.agent.get('/api/me/home')).status).toBe(401);   // other devices signed out
+    await signIn(s.idCardNo, 'fresh-pass');
+  });
+
+  it('activity log pages through everything, newest first', async () => {
+    const r = await admin.get('/api/admin/activity?limit=100&offset=0');
+    expect(r.body.total).toBeGreaterThan(r.body.rows.length - 1);
+    expect(r.body.rows.length).toBeLessThanOrEqual(100);
+    expect(r.body.rows[0].id).toBeGreaterThan(r.body.rows.at(-1).id);
+  });
+});

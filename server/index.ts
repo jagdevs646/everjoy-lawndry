@@ -1,5 +1,6 @@
 import { createApp } from './app.js';
 import { db } from './db.js';
+import { maybeAutoAdvance } from './rules.js';
 
 const arg = (name: string) => { const i = process.argv.indexOf(name); return i > -1 ? process.argv[i + 1] : undefined; };
 const wantsDemo = process.argv.includes('--demo') || process.env.DEMO === '1';
@@ -13,6 +14,9 @@ const app = await createApp({ demo });
 const server = app.listen(port, () => {
   console.log(`Everjoy Lawndry running on http://localhost:${port} (${db.dialect === 'postgres' ? 'Postgres' : 'SQLite'}${demo ? ', demo data' : ''})`);
 });
+
+// Move orders to washing / ready on time, even when nobody is using the site.
+setInterval(() => maybeAutoAdvance(), 5 * 60_000).unref();
 
 // Render and other hosts send SIGTERM before stopping or redeploying: finish requests, close the database.
 for (const signal of ['SIGTERM', 'SIGINT'] as const) {
