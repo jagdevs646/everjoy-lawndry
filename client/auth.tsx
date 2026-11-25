@@ -114,6 +114,7 @@ function SignIn({ onSignedIn, counterHours }: { onSignedIn: (u: User) => void; c
       {error && <ErrorNote error={error} />}
       <Button tone="primary" size="lg" block busy={busy} disabled={!loginId || !password}>Sign in</Button>
       <p className="auth-alt">New to Everjoy? <a href="#/register">Register with your ID card</a></p>
+      <p className="auth-foot"><a href="guide/students.html">New to Everjoy? Read the student guide</a></p>
       <p className="auth-foot"><button type="button" className="link-btn inline" onClick={() => setForgot(true)}>Forgot your password?</button> Students can reset it with a code from their university email. Staff, or anyone without an email on file, ask at the laundry counter{counterHours ? ` (${counterHours})` : ''} or the admin.</p>
     </form>
   );

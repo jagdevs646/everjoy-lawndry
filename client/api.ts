@@ -16,18 +16,21 @@ export type Order = {
   // Two-sided register: what the student confirmed (SIGNATURE | PHONE | OVERRIDE | DISPUTED; null = not yet)
   dropoff_ack?: string | null; dropoff_ack_at?: string | null; pickup_ack?: string | null; pickup_ack_at?: string | null;
   signoffs?: Signoff[];
-  handover_request?: { returned_count: number; note: string | null; pay_method: string | null; status: 'WAITING' | 'DISPUTED'; reason: string | null; created_at: string; expires_at: string; staff_name: string } | null;
+  confirm_requests?: ConfirmRequest[];
 };
 export type Signoff = {
   id: number; kind: 'DROPOFF' | 'PICKUP'; method: 'SIGNATURE' | 'PHONE' | 'OVERRIDE'; status: 'CONFIRMED' | 'DISPUTED'; statement: string;
   signature: string | null; reason: string | null; created_at: string; superseded_at: string | null; returned_count: number | null; staff_name: string | null;
   proof_hash?: string; ip?: string | null; user_agent?: string | null;
 };
-/** What the student still has to confirm (their app asks). */
+export type ConfirmKind = 'DROPOFF' | 'PICKUP';
+/** A code the counter is waiting for (staff see the status, never the code). */
+export type ConfirmRequest = { kind: ConfirmKind; returned_count: number | null; note: string | null; pay_method: string | null; status: 'WAITING' | 'DISPUTED'; reason: string | null;
+  tries: number; created_at: string; expires_at: string; seconds_left: number; staff_name: string };
+/** Codes the counter is waiting for: the app shows a pop-up and makes the code from `key`. */
 export type Pending = {
-  dropoff: { id: number; order_no: string; tag_no: string | null; clothes_count: number; weight_kg: number; service_name: string | null; statement: string; version: string; disputed?: boolean }[];
-  handover: { order_id: number; order_no: string; tag_no: string | null; clothes_count: number; returned_count: number; note: string | null; amount: number; pay_method: string | null; staff_name: string;
-    expires_at: string; seconds_left: number; statement: string; version: string } | null;
+  requests: { order_id: number; kind: ConfirmKind; order_no: string; tag_no: string | null; staff_name: string; created_at: string; statement: string;
+    key: string; step_seconds: number; pay_method: string | null; amount: number; seconds_left: number }[];
 };
 export type Student = {
   id: number; name: string; mobile: string; login_id: string; active: number; created_at: string; id_card_no: string; hostel_id: number; hostel_name: string;

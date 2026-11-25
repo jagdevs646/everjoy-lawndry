@@ -683,7 +683,7 @@ export async function deliverOrder(actorId: number, id: number, returnedCount: n
   await db.tx(async () => {
     await db.lockRow('orders', id);
     const { s, o } = await checkHandover(id, returnedCount, note);
-    if (s.sign_pickup && !proof) throw new HttpError(409, 'The student must sign for their clothes on this screen, or confirm on their phone, before you hand them over.', { code: 'SIGN_NEEDED' });
+    if (s.sign_pickup && !proof) throw new HttpError(409, 'Ask the student for the code on their phone before you hand the clothes over.', { code: 'SIGN_NEEDED' });
     const at = nowIso();
     if (o.status !== 'READY') await addEvent(id, 'READY', 'Marked ready at handover', actorId);
     await db.run(`UPDATE orders SET status = 'DELIVERED', ready_at = COALESCE(ready_at, ?), delivered_by = ?, delivered_at = ?, returned_count = ?, updated_at = ? WHERE id = ?`,
@@ -693,7 +693,7 @@ export async function deliverOrder(actorId: number, id: number, returnedCount: n
       const so = await orderForSign(id);
       await recordSignoff({ o: so, kind: 'PICKUP', proof, staffId: actorId, at, statement: statementFor('PICKUP', so, at, returnedCount, note.trim()), origin, returned: returnedCount });
     }
-    await db.run('DELETE FROM handover_requests WHERE order_id = ?', [id]);
+    await db.run('DELETE FROM confirm_requests WHERE order_id = ?', [id]);
     await notify(o.student_id, `${o.order_no} handed over`, `${returnedCount} clothes returned. ${returnedCount !== o.clothes_count ? 'Count differed from drop-off — raise a complaint if something is missing.' : 'Thank you for using Everjoy Lawndry!'}`, id);
     await logActivity(actorId, 'ORDER_DELIVERED', 'order', o.order_no, `${returnedCount}/${o.clothes_count} clothes${note ? `, ${note}` : ''}`);
   });
@@ -705,7 +705,7 @@ export async function cancelOrder(actorId: number, id: number, reason: string) {
     const o = await getOrderRow(id);
     if (!OPEN.includes(o.status)) throw new HttpError(409, `${o.order_no} is ${o.status.toLowerCase()} and cannot be cancelled.`);
     await db.run(`UPDATE orders SET status = 'CANCELLED', cancel_reason = ?, payment_status = CASE WHEN payment_status = 'DUE' THEN 'NONE' ELSE payment_status END, updated_at = ? WHERE id = ?`, [reason, nowIso(), id]);
-    await db.run('DELETE FROM handover_requests WHERE order_id = ?', [id]);
+    await db.run('DELETE FROM confirm_requests WHERE order_id = ?', [id]);
     await addEvent(id, 'CANCELLED', reason, actorId);
     await notify(o.student_id, `${o.order_no} cancelled`, reason, id);
     await logActivity(actorId, 'ORDER_CANCELLED', 'order', o.order_no, reason);
@@ -730,7 +730,7 @@ export async function correctOrder(actorId: number, id: number, weightKg: number
     await db.run(`UPDATE orders SET weight_kg = ?, clothes_count = ?, within_kg = ?, extra_kg = ?, amount = ?, payment_status = ?, charge_note = ?, updated_at = ? WHERE id = ?`,
       [q.weight_kg, q.clothes_count, q.within_kg, q.extra_kg, q.amount, q.amount > 0 ? (o.payment_status === 'WAIVED' ? 'WAIVED' : 'DUE') : 'NONE', q.charge_note, nowIso(), id]);
     const detail = `${o.clothes_count}→${q.clothes_count} clothes, ${o.weight_kg}→${q.weight_kg} kg, ${reason}`;
-    await db.run('DELETE FROM handover_requests WHERE order_id = ?', [id]);   // the student would confirm old numbers
+    await db.run('DELETE FROM confirm_requests WHERE order_id = ?', [id]);   // the student would confirm old numbers
     await addEvent(id, 'CORRECTED', detail, actorId);
     // The student confirmed the old count/weight: that confirmation no longer describes this order.
     const ack = (o as unknown as { dropoff_ack: string | null }).dropoff_ack;

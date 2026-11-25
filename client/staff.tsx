@@ -3,7 +3,7 @@ import { Announcement, api, ApiError, Order, Service, Student, User } from './ap
 import { ChangePassword } from './auth';
 import { go, kg, plural, requestId, rupees, toast, useAction, useFormAction, useLoad, useRoute, useScrollTop, when } from './lib';
 import { CardInput, ComplaintsBoard, CounterStudent, HandOver, OpsSettings, OrderSheet, serviceLine, StudentFacts, StudentLine, StudentSheet } from './ops';
-import { DropoffSign, useSignRules } from './signoff';
+import { CodeEntry, useSignRules } from './signoff';
 import { Avatar, Brand, Button, Empty, ErrorNote, Field, Icon, IconName, Loading, PayPill, Scanner, Segmented, Sheet, StatusPill, Stepper } from './ui';
 
 type Summary = {
@@ -80,6 +80,7 @@ export function StaffApp({ user, onSignOut, onUser, onAdmin }: { user: User; onS
           <div className="stack">
             <p className="muted">Signed in as {user.login_id}</p>
             <details className="pw-details"><summary>Change password</summary><ChangePassword user={user} onDone={u => { onUser(u); setMenu(false); }} /></details>
+            <a className="btn btn-quiet btn-block" href="guide/staff.html"><Icon name="help" size={18} />Guide for staff and admin</a>
             {onAdmin && <Button block icon="chart" onClick={() => { setMenu(false); onAdmin(); }}>Back to admin office</Button>}
             <Button block tone="danger" icon="logout" onClick={onSignOut}>Sign out</Button>
           </div>
@@ -383,7 +384,7 @@ function Created({ o, onNext, onOpen }: { o: Order; onNext: () => void; onOpen: 
   const rules = useSignRules();
   const [signed, setSigned] = useState(false);
   // When the student must sign, don't put the focus on "Next student".
-  useEffect(() => { if (!rules.sign_dropoff) next.current?.focus(); }, [rules.sign_dropoff]);
+  useEffect(() => { if (!rules.sign_dropoff || o.customer_kind === 'WALKIN') next.current?.focus(); }, [rules.sign_dropoff, o.customer_kind]);
   return (
     <div className="sf-page created" role="status">
       {o.tag_no ? <>
@@ -396,8 +397,9 @@ function Created({ o, onNext, onOpen }: { o: Order; onNext: () => void; onOpen: 
       </>}
       <p className="created-meta">{o.student_name}{o.customer_kind === 'WALKIN' ? '' : `, room ${o.room_no}`}. {serviceLine(o)}: {plural(o.clothes_count, 'piece')}{Number(o.weight_kg) > 0 ? `, ${kg(o.weight_kg)}` : ''}{o.amount ? `. ${rupees(o.amount)} due at pickup` : ''}.</p>
       <p className="created-sub">{o.customer_kind === 'WALKIN' ? 'Walk-in: tell them the order no. They show it at pickup.' : 'The digital slip is already on the student’s phone.'}</p>
-      {rules.sign_dropoff && <DropoffSign o={o} onSigned={() => setSigned(true)} />}
-      <Button ref={next} tone={rules.sign_dropoff && !signed ? 'quiet' : 'primary'} size="lg" block icon="plus" onClick={onNext}>{rules.sign_dropoff && !signed ? 'Next student (not signed yet)' : 'Next student'}</Button>
+      {rules.sign_dropoff && o.customer_kind !== 'WALKIN' && !signed && <CodeEntry o={o} kind="DROPOFF" onDone={() => setSigned(true)} />}
+      {signed && <div className="code-done"><Icon name="check" size={22} /><span><b>Confirmed by the student</b><small>They gave the code from their phone.</small></span></div>}
+      <Button ref={next} tone={rules.sign_dropoff && !signed && o.customer_kind !== 'WALKIN' ? 'quiet' : 'primary'} size="lg" block icon="plus" onClick={onNext}>{rules.sign_dropoff && !signed && o.customer_kind !== 'WALKIN' ? 'Next student (not confirmed yet)' : 'Next student'}</Button>
       <Button block onClick={onOpen}>Open this order</Button>
     </div>
   );

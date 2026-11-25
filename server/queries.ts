@@ -60,10 +60,11 @@ export async function orderDetail(id: number, opts: { includeQr?: boolean } = {}
   if (!o) throw new HttpError(404, 'Order not found.');
   const events = await db.all(`SELECT e.type, e.note, e.at, u.name AS by_name, u.role AS by_role FROM order_events e LEFT JOIN users u ON u.id = e.by_user WHERE e.order_id = ? ORDER BY e.id`, [id]);
   const signoffs = await signoffsFor(id, !!opts.includeQr);
-  const handover = opts.includeQr ? undefined : await db.get<Record<string, unknown> & { expires_at: string }>(`SELECT h.returned_count, h.note, h.pay_method, h.status, h.reason, h.created_at, h.expires_at, u.name AS staff_name
-    FROM handover_requests h JOIN users u ON u.id = h.staff_id WHERE h.order_id = ? AND h.expires_at > ?`, [id, nowIso()]);
-  if (handover) handover.seconds_left = Math.max(0, Math.round((Date.parse(handover.expires_at) - Date.now()) / 1000));
-  return { ...o, events, signoffs, handover_request: handover ?? null };
+  // Codes the counter is waiting for (staff see the status, never the code).
+  const requests = opts.includeQr ? [] : (await db.all<Record<string, unknown> & { expires_at: string }>(`SELECT r.kind, r.returned_count, r.note, r.pay_method, r.status, r.reason, r.tries,
+      r.created_at, r.expires_at, u.name AS staff_name FROM confirm_requests r JOIN users u ON u.id = r.staff_id WHERE r.order_id = ? AND r.expires_at > ?`, [id, nowIso()]))
+    .map(r => ({ ...r, seconds_left: Math.max(0, Math.round((Date.parse(r.expires_at) - Date.now()) / 1000)) }));
+  return { ...o, events, signoffs, confirm_requests: requests };
 }
 
 export async function findOrderByCode(code: string) {

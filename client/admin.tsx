@@ -80,6 +80,7 @@ export function AdminApp({ user, onSignOut, onUser, onCounter }: { user: User; o
         </nav>
         <div className="ad-side-foot">
           <button onClick={onCounter}><Icon name="washer" size={18} />Open the counter</button>
+          <a href="guide/staff.html"><Icon name="help" size={18} />Guide</a>
           <button onClick={() => setPw(true)}><Icon name="lock" size={18} />Change password</button>
           <button onClick={onSignOut}><Icon name="logout" size={18} />Sign out</button>
           <small>{user.name}</small>
@@ -282,8 +283,8 @@ function DayBars({ days, by = 'day', unit = 'order' }: { days: Overview['days'];
 function AckMarks({ o }: { o: Order }) {
   const mark = (label: string, ack?: string | null, show = true) => {
     if (!show) return null;
-    const tone = ack === 'SIGNATURE' || ack === 'PHONE' ? 'ok' : ack === 'DISPUTED' ? 'bad' : ack === 'OVERRIDE' ? 'warn' : 'wait';
-    const title = `${label}: ${ack === 'SIGNATURE' ? 'signed at the counter' : ack === 'PHONE' ? 'confirmed on phone' : ack === 'DISPUTED' ? 'disputed' : ack === 'OVERRIDE' ? 'admin override' : 'not confirmed'}`;
+    const tone = ack && ['CODE', 'COUNTER', 'SIGNATURE', 'PHONE'].includes(ack) ? 'ok' : ack === 'DISPUTED' ? 'bad' : ack === 'OVERRIDE' ? 'warn' : 'wait';
+    const title = `${label}: ${ack === 'CODE' ? 'student gave the code' : ack === 'COUNTER' ? 'walk-in, at the counter' : ack === 'SIGNATURE' ? 'signed at the counter' : ack === 'PHONE' ? 'confirmed on phone' : ack === 'DISPUTED' ? 'disputed' : ack === 'OVERRIDE' ? 'admin override' : 'not confirmed'}`;
     return <span className={`ack-mark ${tone}`} title={title} aria-label={title}>{label} {tone === 'ok' ? '✓' : tone === 'wait' ? '–' : '!'}</span>;
   };
   if (o.status === 'CANCELLED') return <span className="muted">–</span>;
@@ -349,7 +350,7 @@ function Register({ open }: { open: Openers }) {
           <p className="muted small">{list.data.total} {list.data.total === 1 ? 'order' : 'orders'}{f.from ? ` from ${when(`${f.from}T12:00:00`, 'date')}` : ''}{f.to ? ` to ${when(`${f.to}T12:00:00`, 'date')}` : ''}</p>
           <div className="ledger-wrap">
             <table className="ledger">
-              <thead><tr><th>Order</th><th>Card</th><th>Date in</th><th>Student</th><th>Room</th><th>Service</th><th className="num">Clothes</th><th className="num">Kg</th><th>Status</th><th>Payment</th><th>Handed over</th><th>Student signed</th></tr></thead>
+              <thead><tr><th>Order</th><th>Card</th><th>Date in</th><th>Student</th><th>Room</th><th>Service</th><th className="num">Clothes</th><th className="num">Kg</th><th>Status</th><th>Payment</th><th>Handed over</th><th>Student confirmed</th></tr></thead>
               <tbody>
                 {list.data.rows.map(o => (
                   <tr key={o.id} onClick={() => open.order(o.id)} tabIndex={0} onKeyDown={e => e.key === 'Enter' && open.order(o.id)}>
@@ -750,11 +751,11 @@ function Settings() {
             </section>
             <section className="ad-card settings-group">
               <h2>Student confirmation (two-sided register)</h2>
-              <p className="muted small">Like signing the paper register: the student confirms what they gave and what they got back, by signing with a finger on the counter screen or tapping Yes in their app. Each confirmation keeps the exact sentence, the time, who was at the counter and a tamper-proof fingerprint.</p>
-              <Switch checked={draft.sign_dropoff} onChange={v => setDraft({ ...draft, sign_dropoff: v })} label="Student confirms every drop-off"
-                hint="The counter shows a signature pad after each order, and the student's app asks “Did you give this?”. Disputes open a complaint." />
-              <Switch checked={draft.sign_pickup} onChange={v => setDraft({ ...draft, sign_pickup: v })} label="No hand-over without the student's confirmation"
-                hint="Staff can hand over only after the student signs on the counter screen or confirms on their phone. Only the admin can skip it, with a written reason." />
+              <p className="muted small">Like signing the paper register, without paper: a pop-up on the student's app shows what they confirm and a 6-digit code that changes every 30 seconds. The student reads it out and staff type it in. Each confirmation keeps the exact sentence, the time, who was at the counter and a tamper-proof fingerprint.</p>
+              <Switch checked={draft.sign_dropoff} onChange={v => setDraft({ ...draft, sign_dropoff: v })} label="Student confirms every drop-off with a code"
+                hint="After staff take an order, the student's app shows the code. “Something is wrong” on the pop-up opens a complaint." />
+              <Switch checked={draft.sign_pickup} onChange={v => setDraft({ ...draft, sign_pickup: v })} label="No hand-over without the student's code"
+                hint="After counting the clothes back, staff press Hand over and type the code from the student's phone. Walk-ins (no app) are handed over at the counter. Only the admin can skip the code, with a written reason." />
             </section>
             <section className="ad-card settings-group">
               <h2>Express</h2>

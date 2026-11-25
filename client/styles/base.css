@@ -339,3 +339,38 @@ label.btn { cursor: pointer; }
 .handover-waiting > span { flex: 1; display: grid; }
 .handover-waiting small { color: var(--ink-2); }
 @media (prefers-reduced-motion: reduce) { .handover-waiting { animation: none; } }
+
+.guide-link { display: flex; align-items: center; gap: 12px; padding: 14px 16px; border-radius: var(--radius); background: var(--surface); color: var(--ink); text-decoration: none; border: 1px solid var(--line); }
+.guide-link > span { flex: 1; display: grid; }
+.guide-link small { color: var(--muted); }
+.guide-link > svg:first-child { color: var(--accent); }
+
+/* Grid columns may shrink to the screen: a wide child (the card box input) must not push the form past a small phone. */
+.order-form, .card-box, .card-entry-wrap, .sign-box, .handover { grid-template-columns: minmax(0, 1fr); }
+.card-entry input { width: 100%; }
+.sign-box { text-align: left; }
+.sign-or { display: block; }
+.sign-or .live-dot { margin-right: 6px; vertical-align: middle; }
+
+/* Two-sided register with a code: counter box and the student's pop-up */
+.code-box { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; padding: 16px; border-radius: var(--radius); background: var(--surface); border: 2px solid var(--accent); text-align: left; }
+.code-box h2 { display: flex; align-items: center; gap: 8px; font-size: 1.05rem; }
+.code-sentence { margin: 0; padding: 10px 12px; border-left: 3px solid var(--accent); background: color-mix(in srgb, var(--accent) 8%, transparent); border-radius: 0 var(--radius-sm) var(--radius-sm) 0; font-size: .95rem; line-height: 1.45; }
+.code-ask { margin: 0; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; color: var(--ink-2); font-size: .95rem; }
+.code-form { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; align-items: stretch; }
+.code-input { font-size: 2rem !important; font-weight: 800; letter-spacing: .35em; text-align: center; font-variant-numeric: tabular-nums; min-height: 64px; min-width: 0; }
+.code-left { color: var(--muted); font-variant-numeric: tabular-nums; }
+.code-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.code-dispute, .code-done { display: flex; gap: 10px; align-items: flex-start; padding: 14px 16px; border-radius: var(--radius); background: var(--bad-soft); color: var(--bad); }
+.code-dispute span, .code-done span { display: grid; gap: 2px; }
+.code-dispute small, .code-done small { color: var(--ink-2); }
+.code-done { background: var(--good-soft); color: var(--good); text-align: left; }
+@media (max-width: 420px) { .code-form { grid-template-columns: 1fr; } }
+.code-show { display: grid; justify-items: center; gap: 8px; padding: 18px 14px; border-radius: var(--radius); background: var(--accent-soft); }
+.code-show-label { font-weight: 600; color: var(--ink-2); text-align: center; }
+.code-digits { font-family: var(--font-display); font-size: 3rem; line-height: 1; letter-spacing: .08em; font-variant-numeric: tabular-nums; color: var(--ink); }
+.code-timer { position: relative; display: block; width: 100%; max-width: 240px; padding-top: 8px; text-align: center; font-size: .8rem; color: var(--muted); }
+.code-timer i { position: absolute; top: 0; left: 0; height: 4px; border-radius: 2px; background: var(--accent); transition: width 1s linear; }
+.code-ask { display: block; }
+.code-ask > svg, .code-ask .live-dot { display: inline-block; vertical-align: -3px; margin-right: 6px; }
+.code-ask .live-dot { display: inline-flex; }

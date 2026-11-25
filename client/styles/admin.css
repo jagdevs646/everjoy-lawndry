@@ -35,8 +35,8 @@ html[data-theme='admin'] h1, html[data-theme='admin'] h2 { letter-spacing: -.01e
 .ad-side .brand-sub { background: rgba(255,255,255,.14); color: #fff; }
 .ad-side-head { padding: 0 8px 22px; }
 .ad-side nav { display: grid; gap: 2px; }
-.ad-side nav a, .ad-side-foot button { display: flex; align-items: center; gap: 12px; padding: 10px 12px; border-radius: 8px; color: #EBCFD5; text-decoration: none; font-weight: 600; border: 0; background: none; text-align: left; width: 100%; }
-.ad-side nav a:hover, .ad-side-foot button:hover { background: rgba(255,255,255,.08); color: #fff; }
+.ad-side nav a, .ad-side-foot button, .ad-side-foot a { display: flex; align-items: center; gap: 12px; padding: 10px 12px; border-radius: 8px; color: #EBCFD5; text-decoration: none; font-weight: 600; border: 0; background: none; text-align: left; width: 100%; }
+.ad-side nav a:hover, .ad-side-foot button:hover, .ad-side-foot a:hover { background: rgba(255,255,255,.08); color: #fff; }
 .ad-side nav a.on { background: #fff; color: var(--accent); }
 .ad-side-foot { margin-top: auto; display: grid; gap: 2px; padding-top: 14px; border-top: 1px solid rgba(255,255,255,.16); }
 .ad-side-foot small { padding: 8px 12px 0; color: #D9B3BC; }

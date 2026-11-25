@@ -279,7 +279,7 @@ router.get('/admin/report', handle(async (req, res) => {
 const ackText = (ack: unknown, at: unknown) => {
   if (!ack) return '';
   const when = at ? new Date(String(at)).toLocaleString('en-IN', { timeZone: process.env.APP_TZ || 'Asia/Kolkata', dateStyle: 'medium', timeStyle: 'short' }) : '';
-  const how = ({ SIGNATURE: 'Signed at counter', PHONE: 'Confirmed on phone', OVERRIDE: 'Admin override', DISPUTED: 'DISPUTED' } as Record<string, string>)[String(ack)] ?? String(ack);
+  const how = ({ CODE: 'Student gave the code', COUNTER: 'Walk-in, at the counter', SIGNATURE: 'Signed at counter', PHONE: 'Confirmed on phone', OVERRIDE: 'Admin override', DISPUTED: 'DISPUTED' } as Record<string, string>)[String(ack)] ?? String(ack);
   return when ? `${how}, ${when}` : how;
 };
 

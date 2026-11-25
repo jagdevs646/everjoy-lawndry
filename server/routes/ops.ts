@@ -7,7 +7,7 @@ import { AuthedRequest, requireRole } from '../auth.js';
 import { addEvent, cancelOrder, cardInUse, checkHandover, checkCard, isUniqueError, nextFreeCard, correctOrder, createOrder, deliverOrder, getOrderRow, getSettings, listServices, monthUsage, orderInput, planStatus, quote, recordPayment, setStatus } from '../rules.js';
 import { photoUpload, savePhoto } from '../files.js';
 import { checkStudentEmail } from '../otp.js';
-import { HANDOVER_REQUEST_MINUTES, orderForSign, recordSignoff, statementFor, type Origin, type Proof } from '../signoff.js';
+import { checkRequestCode, getRequest, isConfirmed, openRequest, orderForSign, recordSignoff, statementFor, type Origin, type Proof } from '../signoff.js';
 import { announcementsFor, complaintDetail, findOrderByCode, listComplaints, listOrders, listStudents, orderDetail, studentProfile } from '../queries.js';
 import { codeKey, dayKey, handle, HttpError, MAX_ID, nowIso, parse, startOfLocalDayIso, zDate, zId, zText } from '../util.js';
 import { normaliseLogin, zIdCard, zMobile, zRoom } from './public.js';
@@ -262,6 +262,11 @@ router.post('/ops/orders', handle(async (req, res) => {
   const input = parse(orderInput, req.body);
   const requestId = parse(z.string().min(8).max(64).optional(), req.body.requestId);
   const created = await createOrder(actor(req).id, input, requestId);
+  // The student confirms the drop-off with the code on their phone (not walk-ins: they have no app).
+  if (!created.duplicate && (await getSettings()).sign_dropoff) {
+    const o = await orderForSign(created.id);
+    if (!(await isWalkIn(o.student_id))) await openRequest(o, 'DROPOFF', actor(req).id);
+  }
   res.status(created.duplicate ? 200 : 201).json(await orderDetail(created.id));
 }));
 
@@ -309,32 +314,30 @@ const zHandover = z.object({
   payMethod: z.enum(['CASH', 'UPI']).optional(),
   payRef: z.string().trim().max(60).default(''),
 });
-const zSignature = z.string().max(90_000, 'The signature image is too large. Clear it and sign again.');
+const zKind = z.enum(['DROPOFF', 'PICKUP']);
+const isWalkIn = async (studentId: number) => (await db.get<{ kind: string }>('SELECT kind FROM students WHERE user_id = ?', [studentId]))?.kind === 'WALKIN';
 
+/**
+ * Hand over without a code: walk-in customers (no app; staff confirm at the counter), the admin with a
+ * written reason, or when the admin switched the confirmation off. Students with the app confirm with the
+ * code instead (POST confirm-request, then confirm).
+ */
 router.post('/ops/orders/:id/deliver', handle(async (req, res) => {
   const id = parse(zId, req.params.id);
-  const b = parse(zHandover.extend({
-    signature: zSignature.optional(),                       // student's finger signature on this screen
-    clothesCount: z.coerce.number().int().optional(),       // what the signing screen showed as given
-    override: z.string().trim().max(200).optional(),        // admin only: hand over without it, and why
-  }), req.body);
+  const b = parse(zHandover.extend({ override: z.string().trim().max(200).optional() }), req.body);
   const me = actor(req);
-  if (b.signature && b.clothesCount !== undefined && b.clothesCount !== (await getOrderRow(id)).clothes_count) {
-    throw new HttpError(409, 'The order was changed while the student signed. Show them the new count and sign again.', { code: 'CHANGED' });
-  }
-  let proof: Proof | undefined;
-  if (b.signature) proof = { method: 'SIGNATURE', signature: b.signature };
-  else if (b.override !== undefined) {
-    if (me.role !== 'ADMIN') throw new HttpError(403, 'Only the admin can hand over without the student’s signature.');
-    if (b.override.length < 5) throw new HttpError(422, 'Write why the student could not sign (at least a few words).');
-    proof = { method: 'OVERRIDE', reason: b.override };
-  }
   await db.tx(async () => {   // payment + handover succeed or fail together
     await db.lockRow('orders', id);
-    // Count, payment and status first (what staff must fix), then the signature, all before taking money.
-    const { s } = await checkHandover(id, b.returnedCount, b.note, !!b.payMethod);
-    if (s.sign_pickup && !proof) throw new HttpError(409, 'The student must sign for their clothes on this screen, or confirm on their phone, before you hand them over.', { code: 'SIGN_NEEDED' });
-    if (b.payMethod && (await getOrderRow(id)).payment_status === 'DUE') await recordPayment(me.id, id, b.payMethod, b.payRef);
+    // Count, payment and status first (what staff must fix), then the confirmation, all before taking money.
+    const { s, o } = await checkHandover(id, b.returnedCount, b.note, !!b.payMethod);
+    let proof: Proof | undefined;
+    if (b.override !== undefined) {
+      if (me.role !== 'ADMIN') throw new HttpError(403, 'Only the admin can hand over without the student’s code.');
+      if (b.override.length < 5) throw new HttpError(422, 'Write why the student could not confirm (at least a few words).');
+      proof = { method: 'OVERRIDE', reason: b.override };
+    } else if (s.sign_pickup && await isWalkIn(o.student_id)) proof = { method: 'COUNTER' };
+    if (s.sign_pickup && !proof) throw new HttpError(409, 'Ask the student for the code on their phone before you hand the clothes over.', { code: 'SIGN_NEEDED' });
+    if (b.payMethod && o.payment_status === 'DUE') await recordPayment(me.id, id, b.payMethod, b.payRef);
     await deliverOrder(me.id, id, b.returnedCount, b.note, proof, origin(req));
   });
   res.json(await orderDetail(id));
@@ -343,50 +346,58 @@ router.post('/ops/orders/:id/deliver', handle(async (req, res) => {
 /** Does the student have to confirm drop-off / pickup? (admin's choice; staff screens read it) */
 router.get('/ops/sign-rules', handle(async (_req, res) => { const s = await getSettings(); res.json({ sign_dropoff: s.sign_dropoff, sign_pickup: s.sign_pickup }); }));
 
-/** The student signs the drop-off on the counter screen ("I gave 8 clothes, 3 kg…"). */
-router.post('/ops/orders/:id/sign', handle(async (req, res) => {
+/**
+ * Ask the student to confirm with a code: the drop-off ("I gave 12 clothes…"), or the hand-over after
+ * counting the clothes back ("I received 12 of 12…"; any payment is saved when the code is right).
+ */
+router.post('/ops/orders/:id/confirm-request', handle(async (req, res) => {
   const id = parse(zId, req.params.id);
-  const b = parse(z.object({ signature: zSignature, clothesCount: z.coerce.number().int().optional(), weightKg: z.coerce.number().optional() }), req.body);
+  const b = parse(z.object({ kind: zKind }).and(zHandover.partial()), req.body);
   await db.tx(async () => {
     await db.lockRow('orders', id);
     const o = await orderForSign(id);
-    if ((b.clothesCount !== undefined && b.clothesCount !== o.clothes_count) || (b.weightKg !== undefined && Number(b.weightKg) !== Number(o.weight_kg))) {
-      throw new HttpError(409, `${o.order_no} was changed (now ${o.clothes_count} clothes). Show the student the new details and sign again.`, { code: 'CHANGED' });
+    if (!['RECEIVED', 'WASHING', 'READY'].includes(o.status)) throw new HttpError(409, `${o.order_no} is ${o.status.toLowerCase()}.`);
+    if (await isWalkIn(o.student_id)) throw new HttpError(409, 'Walk-in customers have no app, so there is no code. Hand over at the counter.');
+    if (b.kind === 'DROPOFF') {
+      if (isConfirmed(o.dropoff_ack)) throw new HttpError(409, `The student already confirmed the drop-off of ${o.order_no}.`);
+      await openRequest(o, 'DROPOFF', actor(req).id);
+    } else {
+      const returned = b.returnedCount ?? o.clothes_count;
+      const { o: row } = await checkHandover(id, returned, b.note ?? '', !!b.payMethod);
+      await openRequest(o, 'PICKUP', actor(req).id, { returned_count: returned, note: b.note ?? '', pay_method: row.payment_status === 'DUE' ? b.payMethod ?? null : null, pay_ref: b.payRef ?? '' });
     }
-    if (!['RECEIVED', 'WASHING', 'READY'].includes(o.status)) throw new HttpError(409, `${o.order_no} is ${o.status.toLowerCase()}; the drop-off can no longer be signed.`);
-    if (o.dropoff_ack === 'SIGNATURE' || o.dropoff_ack === 'PHONE') throw new HttpError(409, `The student already confirmed the drop-off of ${o.order_no}.`);
-    const at = nowIso();
-    await recordSignoff({ o, kind: 'DROPOFF', proof: { method: 'SIGNATURE', signature: b.signature }, staffId: actor(req).id, at, statement: statementFor('DROPOFF', o, at), origin: origin(req) });
   });
   res.json(await orderDetail(id));
 }));
 
-/**
- * Hand over by phone: staff count the clothes, then the student taps "Yes, I received them" in their own
- * app. The hand-over completes at that moment (with payment, if any). Expires after a few minutes.
- */
-router.post('/ops/orders/:id/handover-request', handle(async (req, res) => {
+router.delete('/ops/orders/:id/confirm-request', handle(async (req, res) => {
   const id = parse(zId, req.params.id);
-  const b = parse(zHandover, req.body);
+  const kind = parse(zKind, req.query.kind);
+  await db.run('DELETE FROM confirm_requests WHERE order_id = ? AND kind = ?', [id, kind]);
+  res.json(await orderDetail(id));
+}));
+
+/** Staff type the code the student reads from their phone. Right code: confirmed (and, for pickup, handed over). */
+router.post('/ops/orders/:id/confirm', handle(async (req, res) => {
+  const id = parse(zId, req.params.id);
+  const b = parse(z.object({ kind: zKind, code: z.string().trim().regex(/^\d{6}$/, 'Type the 6-digit code from the student’s screen.') }), req.body);
+  const r = await checkRequestCode(id, b.kind, b.code);
+  const me = actor(req);
   await db.tx(async () => {
     await db.lockRow('orders', id);
-    const { o } = await checkHandover(id, b.returnedCount, b.note, !!b.payMethod);
-    const kind = await db.get<{ kind: string }>('SELECT kind FROM students WHERE user_id = ?', [o.student_id]);
-    if (kind?.kind === 'WALKIN') throw new HttpError(409, 'Walk-in customers have no app: ask them to sign on this screen.');
+    const still = await getRequest(id, b.kind);
+    if (!still || still.created_at !== r.created_at) throw new HttpError(409, 'The request changed. Send the student a new code.');
     const at = nowIso();
-    await db.run('DELETE FROM handover_requests WHERE order_id = ?', [id]);
-    await db.run('INSERT INTO handover_requests (order_id, staff_id, returned_count, note, pay_method, pay_ref, status, created_at, expires_at) VALUES (?,?,?,?,?,?,?,?,?)', [
-      id, actor(req).id, b.returnedCount, b.note || null, o.payment_status === 'DUE' ? b.payMethod ?? null : null, b.payRef || null, 'WAITING', at,
-      new Date(Date.now() + HANDOVER_REQUEST_MINUTES * 60_000).toISOString(),
-    ]);
-    await notify(o.student_id, `Confirm you received ${o.order_no}`, `Open the app and confirm you got ${b.returnedCount} clothes back, or say what is wrong.`, id);
+    if (b.kind === 'DROPOFF') {
+      const o = await orderForSign(id);
+      if (isConfirmed(o.dropoff_ack)) throw new HttpError(409, `The student already confirmed the drop-off of ${o.order_no}.`);
+      await recordSignoff({ o, kind: 'DROPOFF', proof: { method: 'CODE' }, staffId: me.id, at, statement: statementFor('DROPOFF', o, at), origin: origin(req) });
+      await db.run('DELETE FROM confirm_requests WHERE order_id = ? AND kind = ?', [id, 'DROPOFF']);
+    } else {
+      if (r.pay_method && (await getOrderRow(id)).payment_status === 'DUE') await recordPayment(me.id, id, r.pay_method, r.pay_ref ?? '');
+      await deliverOrder(me.id, id, Number(r.returned_count), r.note ?? '', { method: 'CODE' }, origin(req));
+    }
   });
-  res.json(await orderDetail(id));
-}));
-
-router.delete('/ops/orders/:id/handover-request', handle(async (req, res) => {
-  const id = parse(zId, req.params.id);
-  await db.run('DELETE FROM handover_requests WHERE order_id = ?', [id]);
   res.json(await orderDetail(id));
 }));
 

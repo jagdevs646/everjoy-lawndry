@@ -1,33 +1,42 @@
 import crypto from 'node:crypto';
 import { db, insertId, logActivity, notify } from './db.js';
 import { HttpError, nowIso } from './util.js';
+import { slipKey } from './auth.js';
 
 /**
  * Two-sided register: the student confirms what they handed in and what they got back, the way they
- * signed the paper register before.
+ * signed the paper register before, but with a code instead of a signature.
  *
- * Drop-off: after staff take the order, the student signs with a finger on the counter screen, or taps
- * "Yes, I gave this" in their own app. "Something is wrong" records a dispute and opens a complaint.
- * Pickup: the hand-over only completes when the student signs on the counter screen, or confirms on their
- * own phone while staff wait. Only the admin can hand over without it, and must write why.
+ * When staff take an order, or press "Hand over" after counting the clothes back, a pop-up opens on the
+ * student's app with what they confirm ("I received 12 of 12 clothes…") and a 6-digit code that changes
+ * every 30 seconds. The student reads it out and staff type it in: that proves the student is at the
+ * counter with their own phone and agrees. "Something is wrong" on the pop-up records a dispute and opens
+ * a complaint. Walk-in customers (no app) are confirmed by the staff member at the counter. Only the admin
+ * can hand over without the code, and must write why.
  *
- * Every confirmation keeps the exact sentence the student agreed to, who was at the counter, the time, the
- * device it came from and a SHA-256 fingerprint over all of it (and the signature image), so a record that
- * was changed afterwards no longer matches its fingerprint.
+ * Every confirmation keeps the exact sentence, who was at the counter, the time, the device and a SHA-256
+ * fingerprint over all of it, so a record changed afterwards no longer matches its fingerprint.
  */
 
 export type SignKind = 'DROPOFF' | 'PICKUP';
-export type SignMethod = 'SIGNATURE' | 'PHONE' | 'OVERRIDE';
 export type Proof =
-  | { method: 'SIGNATURE'; signature: string }               // PNG data URL drawn on the counter screen
-  | { method: 'PHONE' }                                       // the student confirmed in their own app
-  | { method: 'OVERRIDE'; reason: string };                   // admin only, with a written reason
+  | { method: 'CODE' }                                        // the student read the code from their app to staff
+  | { method: 'COUNTER' }                                     // walk-in customer (no app), confirmed by staff
+  | { method: 'OVERRIDE'; reason: string }                    // admin only, with a written reason
+  | { method: 'PHONE' }                                       // older records
+  | { method: 'SIGNATURE'; signature: string };               // older records
+
+/** Acks that mean "the drop-off / collection was confirmed". */
+export const CONFIRMED_ACKS = ['CODE', 'COUNTER', 'SIGNATURE', 'PHONE'];
+export const isConfirmed = (ack: string | null | undefined) => !!ack && CONFIRMED_ACKS.includes(ack);
 
 /** Who sent the confirmation: kept as evidence. */
 export type Origin = { ip?: string; userAgent?: string };
 
 const MAX_SIGNATURE_BYTES = 60 * 1024;
-export const HANDOVER_REQUEST_MINUTES = 10;
+export const REQUEST_MINUTES = 10;            // a confirmation request stays open this long
+export const CODE_STEP_SECONDS = 30;          // the code on the student's screen changes this often
+const MAX_TRIES = 5;                          // wrong codes before the request is cancelled
 
 const time = (iso: string) => new Date(iso).toLocaleString('en-IN', { timeZone: process.env.APP_TZ || 'Asia/Kolkata', day: 'numeric', month: 'short', year: 'numeric', hour: 'numeric', minute: '2-digit' });
 const kgText = (n: number) => `${Math.round(Number(n) * 10) / 10} kg`;
@@ -111,13 +120,14 @@ export async function recordSignoff(p: {
   const ack = disputed ? 'DISPUTED' : p.proof.method;
   if (p.kind === 'DROPOFF') await db.run('UPDATE orders SET dropoff_ack = ?, dropoff_ack_at = ?, updated_at = ? WHERE id = ?', [ack, p.at, p.at, p.o.id]);
   else await db.run('UPDATE orders SET pickup_ack = ?, pickup_ack_at = ?, updated_at = ? WHERE id = ?', [ack, p.at, p.at, p.o.id]);
-  const how = p.proof.method === 'SIGNATURE' ? 'signed at the counter' : p.proof.method === 'PHONE' ? 'confirmed on their phone' : `handed over without the student's confirmation: ${reason}`;
+  const how = p.proof.method === 'CODE' ? 'confirmed with the code on their phone' : p.proof.method === 'COUNTER' ? 'walk-in customer, confirmed at the counter'
+    : p.proof.method === 'SIGNATURE' ? 'signed at the counter' : p.proof.method === 'PHONE' ? 'confirmed on their phone' : `handed over without the student's confirmation: ${reason}`;
   const what = p.kind === 'DROPOFF' ? 'drop-off' : 'collection';
   await db.run('INSERT INTO order_events (order_id, type, note, by_user, at) VALUES (?,?,?,?,?)', [
     p.o.id, disputed ? `${p.kind}_DISPUTED` : `${p.kind}_SIGNED`, disputed ? `Student disputes the ${what}: ${reason}` : `Student ${how}`,
-    p.proof.method === 'PHONE' ? p.o.student_id : p.staffId, p.at,
+    disputed ? p.o.student_id : p.staffId, p.at,
   ]);
-  await logActivity(p.proof.method === 'PHONE' ? p.o.student_id : p.staffId, disputed ? `${p.kind}_DISPUTED` : p.proof.method === 'OVERRIDE' ? 'PICKUP_OVERRIDE' : `${p.kind}_SIGNED`,
+  await logActivity(disputed ? p.o.student_id : p.staffId, disputed ? `${p.kind}_DISPUTED` : p.proof.method === 'OVERRIDE' ? 'PICKUP_OVERRIDE' : `${p.kind}_SIGNED`,
     'order', p.o.order_no, disputed ? String(reason) : p.proof.method === 'OVERRIDE' ? String(reason) : how);
   return id;
 }
@@ -158,4 +168,58 @@ export async function resetDropoff(o: { id: number; order_no: string; student_id
   await db.run('UPDATE orders SET dropoff_ack = NULL, dropoff_ack_at = NULL WHERE id = ?', [o.id]);
   await db.run('INSERT INTO order_events (order_id, type, note, by_user, at) VALUES (?,?,?,?,?)', [o.id, 'DROPOFF_RESET', 'Details changed: the student must confirm the drop-off again', actorId, at]);
   await notify(o.student_id, `Confirm ${o.order_no} again`, 'The counter corrected your order. Open the app and confirm the new count, or say what is wrong.', o.id);
+}
+
+/* --------------------------------------------------- confirmation requests */
+
+export type ConfirmRequest = {
+  order_id: number; kind: SignKind; staff_id: number; secret: string; returned_count: number | null; note: string | null;
+  pay_method: 'CASH' | 'UPI' | null; pay_ref: string | null; status: 'WAITING' | 'DISPUTED'; reason: string | null; tries: number; created_at: string; expires_at: string;
+};
+
+/** The key the student's app gets to make the codes (never the secret itself). */
+export const requestKey = (r: Pick<ConfirmRequest, 'secret'>) => slipKey(`confirm:${r.secret}`);
+
+/** The 6-digit code for one 30-second step. The app makes the same code from the key. */
+export function confirmCode(key: string, orderId: number, kind: SignKind, step: number) {
+  const h = crypto.createHmac('sha256', key).update(`code.${orderId}.${kind}.${step}`).digest();
+  return String(h.readUInt32BE(0) % 1_000_000).padStart(6, '0');
+}
+const stepNow = () => Math.floor(Date.now() / 1000 / CODE_STEP_SECONDS);
+
+export async function getRequest(orderId: number, kind: SignKind) {
+  return db.get<ConfirmRequest>('SELECT * FROM confirm_requests WHERE order_id = ? AND kind = ?', [orderId, kind]);
+}
+
+/** Ask the student to confirm: a pop-up with the code opens on their app. Replaces an earlier request. */
+export async function openRequest(o: OrderForSign, kind: SignKind, staffId: number, extra: { returned_count?: number; note?: string; pay_method?: string | null; pay_ref?: string } = {}) {
+  const at = nowIso();
+  await db.run('DELETE FROM confirm_requests WHERE order_id = ? AND kind = ?', [o.id, kind]);
+  await db.run(`INSERT INTO confirm_requests (order_id, kind, staff_id, secret, returned_count, note, pay_method, pay_ref, status, tries, created_at, expires_at)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`, [o.id, kind, staffId, crypto.randomBytes(18).toString('base64url'), extra.returned_count ?? null, extra.note || null,
+    extra.pay_method ?? null, extra.pay_ref || null, 'WAITING', 0, at, new Date(Date.now() + REQUEST_MINUTES * 60_000).toISOString()]);
+  await notify(o.student_id, kind === 'DROPOFF' ? `Confirm your drop-off ${o.order_no}` : `Confirm you received ${o.order_no}`,
+    'Open the app: tell the staff the code on your screen to confirm.', o.id);
+}
+
+/**
+ * Check a code staff typed. Wrong codes count (outside any transaction, so they stick); after 5 the
+ * request is cancelled. The current code and the one just before it are accepted (time to read it out).
+ */
+export async function checkRequestCode(orderId: number, kind: SignKind, code: string) {
+  const r = await getRequest(orderId, kind);
+  if (!r) throw new HttpError(409, 'Nothing is waiting for a code. Press the button again to send the student a new code.');
+  if (r.status !== 'WAITING') throw new HttpError(409, `The student said something is wrong: “${r.reason}”. Sort it out, then send a new code.`);
+  if (r.expires_at <= nowIso()) throw new HttpError(409, 'The code request expired. Send the student a new code.');
+  const key = requestKey(r);
+  const step = stepNow();
+  const ok = [step, step - 1].some(s => crypto.timingSafeEqual(Buffer.from(confirmCode(key, orderId, kind, s)), Buffer.from(code.padStart(6, '0').slice(0, 6))));
+  if (ok) return r;
+  const tries = Number(r.tries) + 1;
+  if (tries >= MAX_TRIES) {
+    await db.run('DELETE FROM confirm_requests WHERE order_id = ? AND kind = ?', [orderId, kind]);
+    throw new HttpError(429, 'Too many wrong codes. Send the student a new code.');
+  }
+  await db.run('UPDATE confirm_requests SET tries = ? WHERE order_id = ? AND kind = ?', [tries, orderId, kind]);
+  throw new HttpError(422, `That code is not right. Ask the student to read the code on their screen again (${MAX_TRIES - tries} tries left).`);
 }

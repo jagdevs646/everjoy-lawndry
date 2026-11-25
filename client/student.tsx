@@ -1,6 +1,6 @@
 import { FormEvent, ReactNode, useCallback, useEffect, useRef, useState } from 'react';
 import { Announcement, api, Complaint, Hostel, Notice, OtpStart, Order, Pending, Plan, Service, Student, Usage, User } from './api';
-import { ackLabel, SignatureImage } from './signoff';
+import { ackLabel, isConfirmed, SignatureImage, useRotatingCode } from './signoff';
 import { ChangePassword, OtpStep } from './auth';
 import { isApp, serverAddress } from './platform';
 import { ago, back, firstName, go, kg, noteServerTime, plural, rupees, shrinkPhoto, toast, useAction, useFormAction, useLoad, useRoute, useScrollTop, when } from './lib';
@@ -33,30 +33,37 @@ export function StudentApp({ user, onSignOut, onUser }: { user: User; onSignOut:
 
   const signOut = () => { try { localStorage.removeItem(cacheKey(user.id)); } catch { /* ignore */ } onSignOut(); };
 
-  // What the student still has to confirm. Checked often while laundry is ready (they may be at the
-  // counter), less often while it is in progress; the home screen refresh brings it too.
+  // Codes the counter is waiting for. Checked every few seconds while the app is open, so the pop-up
+  // appears as soon as staff take the order or press "Hand over".
   const [pending, setPendingRaw] = useState<Pending | undefined>(undefined);
   const pendingJson = useRef('');
-  // Only re-render when something changed (polls usually return the same thing).
-  const setPending = useCallback((p: Pending) => { const j = JSON.stringify({ ...p, handover: p.handover && { ...p.handover, seconds_left: 0 } }); if (j !== pendingJson.current) { pendingJson.current = j; setPendingRaw(p); } }, []);
+  const keyOf = (r: Pending['requests'][number]) => `${r.order_id}:${r.kind}:${r.created_at}`;
+  // Only re-render when the set of requests changed (polls usually return the same thing).
+  const setPending = useCallback((p: Pending) => { const j = JSON.stringify((p.requests ?? []).map(keyOf)); if (j !== pendingJson.current) { pendingJson.current = j; setPendingRaw(p); } }, []);
   const asked = useRef(0);   // bumped on every answer: a poll that started before it is stale
-  useEffect(() => { if (home.data?.pending) setPending(home.data.pending); }, [home.data, setPending]);
-  const anyReady = !!data?.open.some(o => o.status === 'READY');
-  const anyOpen = !!data?.open.length;
-  const every = anyReady || pending?.handover ? 4000 : anyOpen ? 15000 : 0;
+  useEffect(() => { if (home.data?.pending?.requests) setPending(home.data.pending); }, [home.data, setPending]);
   useEffect(() => {
-    if (!every) return;
+    if (!data) return;
     const t = setInterval(() => {
       if (document.visibilityState !== 'visible') return;
       const n = asked.current;
       api<Pending>('/me/pending').then(p => { if (n === asked.current) setPending(p); }).catch(() => {});
-    }, every);
+    }, 4000);
     return () => clearInterval(t);
-  }, [every, setPending]);
-  const [dismissed, setDismissed] = useState('');
-  const h = pending?.handover;
-  const hKey = h ? `${h.order_id}:${h.version}` : '';
-  const closeHandover = useCallback(() => setDismissed(hKey), [hKey]);
+  }, [!!data, setPending]);   // eslint-disable-line react-hooks/exhaustive-deps
+  const reqs = pending?.requests ?? [];
+  // A request that went away was confirmed by staff (or expired): refresh the slips.
+  const seenKeys = useRef<string[]>([]);
+  useEffect(() => {
+    const now = reqs.map(keyOf);
+    const gone = seenKeys.current.filter(k => !now.includes(k));
+    seenKeys.current = now;
+    if (gone.length) { toast('Confirmed at the counter'); void home.reload(); }
+  }, [pending]);   // eslint-disable-line react-hooks/exhaustive-deps
+  const [dismissed, setDismissed] = useState<string[]>([]);
+  const openReq = reqs.find(r => !dismissed.includes(keyOf(r)));
+  const openKey = openReq ? keyOf(openReq) : '';
+  const closeCode = useCallback(() => setDismissed(d => [...d, openKey]), [openKey]);
   const answered = (p?: Pending) => { asked.current++; if (p) setPending(p); void home.reload(); };
   const tab = ['orders', 'help', 'me'].includes(parts[0]) ? parts[0] : 'home';
   const base = tab === 'home' ? '' : tab;
@@ -76,7 +83,7 @@ export function StudentApp({ user, onSignOut, onUser }: { user: User; onSignOut:
           tab === 'orders' ? <MyOrders /> :
           tab === 'help' ? <Help home={data} /> :
           tab === 'me' ? <Profile home={data} onSaved={home.reload} onSignOut={signOut} user={user} onUser={onUser} /> :
-          <HomePage home={data} pending={pending ?? data.pending} onAnswered={answered} onOpenHandover={() => setDismissed('')} />}
+          <HomePage home={data} pending={pending ?? data.pending} onOpenCodes={() => setDismissed([])} />}
       </main>
       <nav className="st-tabs" aria-label="Main">
         <Tab to="" icon="home" label="Home" on={tab === 'home'} />
@@ -94,7 +101,7 @@ export function StudentApp({ user, onSignOut, onUser }: { user: User; onSignOut:
       {overlay === 'slip' && arg && <Slip id={Number(arg)} cached={data?.open} close={closeOverlay} />}
       {overlay === 'inbox' && <Inbox close={() => { closeOverlay(); void home.reload(); }} />}
       {overlay === 'myqr' && data && <MyQr profile={data.profile} close={closeOverlay} />}
-      {h && dismissed !== hKey && <ConfirmHandover key={hKey} h={h} onClose={closeHandover} onDone={answered} />}
+      {openReq && <CodePopup key={openKey} r={openReq} onClose={closeCode} onDone={answered} />}
     </div>
   );
 }
@@ -110,7 +117,7 @@ function Tab({ to, icon, label, on, badge }: { to: string; icon: IconName; label
 
 /* ------------------------------------------------------------------- home */
 
-function HomePage({ home, pending, onAnswered, onOpenHandover }: { home: Home; pending?: Pending; onAnswered: (p?: Pending) => void; onOpenHandover: () => void }) {
+function HomePage({ home, pending, onOpenCodes }: { home: Home; pending?: Pending; onOpenCodes: () => void }) {
   const { profile: p, open, usage, info } = home;
   const ready = open.filter(o => o.status === 'READY');
   return (
@@ -128,14 +135,13 @@ function HomePage({ home, pending, onAnswered, onOpenHandover }: { home: Home; p
 
       {p.status !== 'ACTIVE' ? <AccountState p={p} /> : (
         <>
-          {pending?.handover && (
-            <button type="button" className="handover-waiting" onClick={onOpenHandover}>
-              <Icon name="phone" size={22} />
-              <span><b>The counter is waiting for you</b><small>Confirm you received {pending.handover.tag_no ?? pending.handover.order_no}</small></span>
+          {pending?.requests?.map(r => (
+            <button key={`${r.order_id}:${r.kind}`} type="button" className="handover-waiting" onClick={onOpenCodes}>
+              <Icon name="lock" size={22} />
+              <span><b>The counter is waiting for your code</b><small>{r.kind === 'DROPOFF' ? 'Confirm your drop-off' : 'Confirm you received'} {r.tag_no ?? r.order_no}</small></span>
               <Icon name="next" size={18} />
             </button>
-          )}
-          {pending?.dropoff.map(item => <ConfirmDropoff key={`${item.id}:${item.version}`} item={item} onDone={onAnswered} />)}
+          ))}
           {ready.length > 0 && <p className="ready-banner"><Icon name="check" size={18} />{ready.length === 1 ? `${ready[0].order_no} is ready. Collect it with your slip.` : `${ready.length} orders are ready to collect.`}</p>}
           <section aria-label="Laundry at the counter" className="tag-stack">
             {open.length ? open.map(o => <OrderTag key={o.id} o={o} />) : (
@@ -311,79 +317,46 @@ function Slip({ id, cached, close }: { id: number; cached?: Order[]; close: () =
 
 /* ---------------------------------------------------- two-sided register */
 
-/** "Did you give this laundry?" until the student confirms, or says what is wrong (opens a complaint). */
-function ConfirmDropoff({ item, onDone }: { item: Pending['dropoff'][number]; onDone: (p?: Pending) => void }) {
+/**
+ * The pop-up when the counter takes your laundry or hands it back: what you confirm, and a code that
+ * changes every 30 seconds. Read it out to the staff member; they type it in. That's your signature.
+ */
+function CodePopup({ r, onClose, onDone }: { r: Pending['requests'][number]; onClose: () => void; onDone: (p?: Pending) => void }) {
+  const { code, left, failed } = useRotatingCode(r.key, r.order_id, r.kind, r.step_seconds);
   const [wrong, setWrong] = useState(false);
   const [reason, setReason] = useState('');
   const { busy, error, submit } = useFormAction();
-  const answer = async (confirm: boolean) => {
-    const r = await submit(() => api<{ pending: Pending }>(`/me/orders/${item.id}/dropoff`, { body: { confirm, reason, version: item.version } }), confirm ? `Thanks. ${item.order_no} confirmed` : 'Sent to the laundry office');
-    if (r) onDone(r.pending);
+  const dispute = async () => {
+    const res = await submit(() => api<{ pending: Pending }>(`/me/orders/${r.order_id}/dispute`, { body: { kind: r.kind, reason } }), 'Told the counter. A complaint was opened for you.');
+    if (res) onDone(res.pending);
   };
   return (
-    <section className="confirm-card" aria-label={`Confirm drop-off ${item.order_no}`}>
-      <h2><Icon name="edit" size={18} />{item.disputed ? 'You reported a problem' : 'Confirm your drop-off'}</h2>
-      {item.disputed && <p className="muted small">The laundry office has your message. If it is sorted out and the details below are right, confirm them.</p>}
-      <p className="confirm-sentence">“{item.statement}”</p>
-      {wrong ? (
-        <>
-          <Field label="What is wrong?" hint="The laundry office gets this as a complaint.">
-            <textarea value={reason} onChange={e => setReason(e.target.value)} rows={3} maxLength={300} placeholder="e.g. I gave 9 clothes, not 8" autoFocus />
-          </Field>
-          {error && <ErrorNote error={error} />}
-          <div className="btn-pair">
-            <Button tone="plain" onClick={() => setWrong(false)}>Back</Button>
-            <Button tone="danger" busy={busy} disabled={reason.trim().length < 3} onClick={() => answer(false)}>Send to the office</Button>
-          </div>
-        </>
-      ) : (
-        <>
-          {error && <ErrorNote error={error} />}
-          <Button tone="primary" size="lg" block icon="check" busy={busy} onClick={() => answer(true)}>Yes, I gave this</Button>
-          {!item.disputed && <button type="button" className="link-btn confirm-wrong" onClick={() => setWrong(true)}>Something is wrong</button>}
-        </>
-      )}
-    </section>
-  );
-}
-
-/** The counter is waiting: "Yes, I received my clothes" completes the hand-over. */
-function ConfirmHandover({ h, onClose, onDone }: { h: NonNullable<Pending['handover']>; onClose: () => void; onDone: (p?: Pending) => void }) {
-  const [wrong, setWrong] = useState(false);
-  const [reason, setReason] = useState('');
-  // Seconds left come from the server, so a phone with a wrong clock still counts down correctly.
-  const [start] = useState(() => ({ at: Date.now(), left: h.seconds_left }));
-  const [, tick] = useState(0);
-  useEffect(() => { const t = setInterval(() => tick(n => n + 1), 1000); return () => clearInterval(t); }, []);
-  const { busy, error, submit } = useFormAction();
-  const left = Math.max(0, start.left - Math.round((Date.now() - start.at) / 1000));
-  const answer = async (confirm: boolean) => {
-    const r = await submit(() => api<{ pending: Pending }>(`/me/orders/${h.order_id}/handover`, { body: { confirm, reason, version: h.version } }), confirm ? 'Collected. Thank you!' : 'Told the counter. A complaint was opened for you.');
-    if (r) onDone(r.pending);
-  };
-  return (
-    <Sheet title="Confirm your collection" onClose={onClose} size="sm" className="handover-ask">
+    <Sheet title={r.kind === 'DROPOFF' ? 'Confirm your drop-off' : 'Confirm your collection'} onClose={onClose} size="sm" className="code-popup">
       <div className="stack">
-        <p className="handover-ask-head"><span className="card-no">{h.tag_no ?? h.order_no}</span><span>{h.staff_name} at the counter is waiting for you.</span></p>
-        <p className="confirm-sentence">“{h.statement}”</p>
-        {h.amount > 0 && <p className="handover-ask-pay"><Icon name="rupee" size={18} />You pay {rupees(h.amount)} at the counter{h.pay_method ? ` (${h.pay_method === 'UPI' ? 'UPI' : 'cash'})` : ''}.</p>}
+        <p className="handover-ask-head"><span className="card-no">{r.tag_no ?? r.order_no}</span><span>{r.staff_name} at the counter is waiting for your code.</span></p>
+        <p className="confirm-sentence">“{r.statement}”</p>
+        {r.amount > 0 && <p className="handover-ask-pay"><Icon name="rupee" size={18} />You pay {rupees(r.amount)} at the counter{r.pay_method ? ` (${r.pay_method === 'UPI' ? 'UPI' : 'cash'})` : ''}.</p>}
         {wrong ? (
           <>
             <Field label="What is wrong?" hint="The counter sees this straight away, and the office gets a complaint.">
-              <textarea value={reason} onChange={e => setReason(e.target.value)} rows={3} maxLength={300} placeholder="e.g. One shirt is missing" autoFocus />
+              <textarea value={reason} onChange={e => setReason(e.target.value)} rows={3} maxLength={300} placeholder={r.kind === 'DROPOFF' ? 'e.g. I gave 9 clothes, not 8' : 'e.g. One shirt is missing'} autoFocus />
             </Field>
             {error && <ErrorNote error={error} />}
             <div className="btn-pair">
               <Button tone="plain" onClick={() => setWrong(false)}>Back</Button>
-              <Button tone="danger" busy={busy} disabled={reason.trim().length < 3} onClick={() => answer(false)}>Tell the counter</Button>
+              <Button tone="danger" busy={busy} disabled={reason.trim().length < 3} onClick={dispute}>Tell the counter</Button>
             </div>
           </>
         ) : (
           <>
-            {error && <ErrorNote error={error} />}
-            <Button tone="primary" size="lg" block icon="check" busy={busy} disabled={left === 0} onClick={() => answer(true)}>Yes, I received {plural(h.returned_count, 'piece')}</Button>
+            <div className="code-show" aria-live="polite">
+              <span className="code-show-label">If this is right, read this code to the staff:</span>
+              {failed ? <b className="code-digits">—</b> : <b className="code-digits">{code ? `${code.slice(0, 3)} ${code.slice(3)}` : '··· ···'}</b>}
+              <span className="code-timer"><i style={{ width: `${(left / r.step_seconds) * 100}%` }} />New code in {left} s</span>
+            </div>
+            {failed && <ErrorNote error="This screen can't make the code (it needs a secure https page). Ask the staff to help." />}
             <button type="button" className="link-btn confirm-wrong" onClick={() => setWrong(true)}>Something is wrong</button>
-            <small className="muted">Check your clothes before you tap Yes. {left ? `${Math.floor(left / 60)}:${String(left % 60).padStart(2, '0')} left.` : 'This request expired: ask the counter to send it again.'}</small>
+            <small className="muted">{r.kind === 'PICKUP' ? 'Check your clothes before you give the code. ' : ''}Never give this code to anyone who is not at the laundry counter.</small>
           </>
         )}
       </div>
@@ -397,17 +370,17 @@ function SlipConfirmations({ order }: { order: Order }) {
   const sig = (kind: 'DROPOFF' | 'PICKUP') => order.signoffs?.find(s => s.kind === kind && !s.superseded_at);
   const line = (kind: 'DROPOFF' | 'PICKUP', ack?: string | null, at?: string | null) => {
     const s = sig(kind);
-    const ok = ack === 'SIGNATURE' || ack === 'PHONE';
+    const ok = isConfirmed(ack);
     const label = kind === 'DROPOFF' ? 'Drop-off' : 'Collection';
     return (
       <div className={`slip-confirm ${ok ? 'ok' : ack === 'DISPUTED' ? 'bad' : ack === 'OVERRIDE' ? 'warn' : 'wait'}`}>
         <Icon name={ok ? 'check' : ack ? 'alert' : 'clock'} size={16} />
         <span>
           <b>{label}: </b>
-          {ok ? `you ${ack === 'SIGNATURE' ? 'signed at the counter' : 'confirmed in the app'}, ${when(at, 'short')}`
+          {ok ? `${ack === 'CODE' ? 'you confirmed with your code' : ack === 'COUNTER' ? 'confirmed at the counter' : ack === 'SIGNATURE' ? 'you signed at the counter' : 'you confirmed in the app'}, ${when(at, 'short')}`
             : ack === 'DISPUTED' ? `you reported a problem${s?.reason ? `: “${s.reason}”` : ''}`
             : ack === 'OVERRIDE' ? `handed over by the admin without your confirmation${s?.reason ? ` (${s.reason})` : ''}`
-            : live && kind === 'DROPOFF' ? 'not confirmed yet. Confirm it on your Home screen.' : ackLabel(ack)}
+            : live && kind === 'DROPOFF' ? 'not confirmed yet. Staff can send you a code at the counter.' : ackLabel(ack)}
         </span>
         {s?.signature && <SignatureImage name={s.signature} />}
       </div>
@@ -465,6 +438,7 @@ function Help({ home }: { home: Home }) {
     <div className="st-page">
       <h1>Help</h1>
       <Button tone="primary" icon="plus" block onClick={() => go('help/new')} disabled={home.profile.status !== 'ACTIVE'}>Report a problem</Button>
+      <a className="guide-link" href="guide/students.html"><Icon name="help" size={20} /><span><b>How to use Everjoy</b><small>Step-by-step guide with pictures</small></span><Icon name="next" size={18} /></a>
       <h2 className="sub">My complaints</h2>
       {!list.data ? (list.error ? <ErrorNote error={list.error} retry={list.reload} /> : <Loading />) : !list.data.rows.length
         ? <p className="muted">No complaints. If clothes go missing or come back damaged, report it here with the order number.</p>
@@ -488,7 +462,7 @@ function Help({ home }: { home: Home }) {
         <dt>How much can I give at once?</dt><dd>{kg(home.info.max_kg_per_order)} per order is free with the hostel plan.{home.info.allow_paid_extra !== false && home.info.extra_rate_per_kg ? ` If your clothes weigh more, you can pay ${rupees(home.info.extra_rate_per_kg)} per extra kg or take some back.` : ' Heavier loads need a second order.'} Staff weigh and count your clothes, and the slip appears on your phone.</dd>
         <dt>Can I pay by UPI?</dt><dd>{home.info.upi_id || home.info.has_upi_qr ? 'Yes. Tap “Pay by UPI” on Home to see the QR, pay, and show the payment screen at the counter. Cash also works.' : 'Pay in cash at the counter.'}</dd>
         <dt>My phone is dead at pickup</dt><dd>Tell staff your order number and show your ID card. They can find the order without the QR.</dd>
-        <dt>I forgot my password</dt><dd>Ask at the counter. Staff give you a temporary password, and you choose a new one after signing in.</dd>
+        <dt>I forgot my password</dt><dd>Tap “Forgot your password?” on the sign-in page to get a code by university email, or ask at the counter for a temporary password.</dd>
         <dt>Counter timings</dt><dd>{home.info.dropoff_from ? <>Give laundry: {t12(home.info.dropoff_from)}–{t12(home.info.dropoff_to!)}. Collect: {t12(home.info.pickup_from!)}–{t12(home.info.pickup_to!)}. </> : null}{home.info.counter_hours}</dd>
       </dl>
       {sub === 'new' && list.data && <NewComplaint categories={list.data.categories} orderId={orderId} close={() => back('help')} onDone={() => { void list.reload(); back('help'); }} />}

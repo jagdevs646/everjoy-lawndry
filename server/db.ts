@@ -483,7 +483,13 @@ export async function migrate() {
     clothes INTEGER, returned_count INTEGER, ip TEXT, user_agent TEXT, proof_hash TEXT NOT NULL, created_at TEXT NOT NULL, superseded_at TEXT)`);
   await db.driver.script('CREATE INDEX IF NOT EXISTS idx_signoffs_order ON order_signoffs (order_id)');
   await db.driver.script('CREATE INDEX IF NOT EXISTS idx_signoffs_signature ON order_signoffs (signature)');
-  // Hand-over waiting for the student to confirm on their phone (one per order, expires after a few minutes).
+  // A confirmation the counter is waiting for: the student's app shows a 30-second code made from this
+  // request's secret; staff type it in. One per order and kind (drop-off / pickup), expires after minutes.
+  await db.driver.script(`CREATE TABLE IF NOT EXISTS confirm_requests (
+    order_id INTEGER NOT NULL, kind TEXT NOT NULL, staff_id INTEGER NOT NULL, secret TEXT NOT NULL, returned_count INTEGER, note TEXT,
+    pay_method TEXT, pay_ref TEXT, status TEXT NOT NULL DEFAULT 'WAITING', reason TEXT, tries INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL, expires_at TEXT NOT NULL, PRIMARY KEY (order_id, kind))`);
+  // Older: hand-over waiting for the student to confirm on their phone (no longer used).
   await db.driver.script(`CREATE TABLE IF NOT EXISTS handover_requests (
     order_id INTEGER PRIMARY KEY, staff_id INTEGER NOT NULL, returned_count INTEGER NOT NULL, note TEXT, pay_method TEXT, pay_ref TEXT,
     status TEXT NOT NULL DEFAULT 'WAITING', reason TEXT, created_at TEXT NOT NULL, expires_at TEXT NOT NULL)`);

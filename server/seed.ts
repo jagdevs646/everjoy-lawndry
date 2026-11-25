@@ -72,7 +72,7 @@ export async function seedDemo() {
         await setStatus(staff[1], [o.id], 'READY');
         const row = (await db.get<{ payment_status: string; clothes_count: number }>('SELECT payment_status, clothes_count FROM orders WHERE id = ?', [o.id]))!;
         if (row.payment_status === 'DUE') await recordPayment(staff[1], o.id, rand() > 0.5 ? 'UPI' : 'CASH');
-        await deliverOrder(staff[(i + 1) % 2], o.id, row.clothes_count, '', { method: 'PHONE' });   // demo: the student confirmed in the app
+        await deliverOrder(staff[(i + 1) % 2], o.id, row.clothes_count, '', { method: 'CODE' });   // demo: the student confirmed with the code
         const received = new Date(Date.now() - d * 86400_000);
         received.setUTCHours(3 + Math.floor(rand() * 9), Math.floor(rand() * 60));
         await shiftOrder(o.id, received, true);

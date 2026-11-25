@@ -1,10 +1,12 @@
 /**
- * Two-sided register on screen: the signature pad the student signs with a finger at the counter,
- * the "student confirms" step at drop-off and pickup, and the record of what the student confirmed.
+ * Two-sided register on screen. When staff take an order or hand clothes back, the student's app shows a
+ * pop-up with what they confirm and a 6-digit code that changes every 30 seconds; staff type that code
+ * here. This file has the counter's code box, the code the student's phone makes, and the record of
+ * what the student confirmed.
  */
-import { PointerEvent as RPointerEvent, useEffect, useRef, useState } from 'react';
-import { api, fileObjectUrl, type Order, type Signoff } from './api';
-import { kg, useFormAction, when } from './lib';
+import { useEffect, useRef, useState } from 'react';
+import { api, fileObjectUrl, type ConfirmKind, type Order, type Signoff } from './api';
+import { kg, serverNow, useFormAction, when } from './lib';
 import { isApp } from './platform';
 import { Button, ErrorNote, Icon } from './ui';
 
@@ -22,84 +24,139 @@ export function useSignRules() {
   return r;
 }
 
-/* ---------------------------------------------------------- signature pad */
+export const CONFIRMED_ACKS = ['CODE', 'COUNTER', 'SIGNATURE', 'PHONE'];
+export const isConfirmed = (ack?: string | null) => !!ack && CONFIRMED_ACKS.includes(ack);
 
-const PAD_W = 640, PAD_H = 240;   // stored image size (small PNG, about 5–20 KB)
-const INK = '#13223F';
+/* ------------------------------------------------- the code on the student's phone */
 
 /**
- * A finger (or mouse) signature, black ink on white like paper. Reports a PNG data URL once there is
- * enough ink to be a signature, and null when cleared.
+ * The 6-digit code for this request, made on the phone from the key the server sent (the same HMAC the
+ * server checks). Changes every 30 seconds, by the server's clock.
  */
-export function SignaturePad({ onChange, label = 'Sign here with your finger' }: { onChange: (png: string | null) => void; label?: string }) {
-  const canvas = useRef<HTMLCanvasElement>(null);
-  const drawing = useRef(false);
-  const pointer = useRef<number | null>(null);   // one finger at a time; a palm or second finger is ignored
-  const last = useRef<{ x: number; y: number } | null>(null);
-  const ink = useRef(0);
-  const [empty, setEmpty] = useState(true);
-  const [marked, setMarked] = useState(false);
+export function useRotatingCode(key: string, orderId: number, kind: ConfirmKind, stepSeconds = 30) {
+  const [code, setCode] = useState('');
+  const [left, setLeft] = useState(stepSeconds);
+  const [failed, setFailed] = useState(false);
+  useEffect(() => {
+    const subtle = globalThis.crypto?.subtle;
+    if (!subtle) { setFailed(true); return; }
+    let live = true;
+    let shown = -1;
+    let timer = 0;
+    const enc = new TextEncoder();
+    subtle.importKey('raw', enc.encode(key), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']).then(k => {
+      const tick = async () => {
+        const now = serverNow() / 1000;
+        if (live) setLeft(stepSeconds - Math.floor(now % stepSeconds));
+        const step = Math.floor(now / stepSeconds);
+        if (step === shown) return;
+        shown = step;
+        const sig = await subtle.sign('HMAC', k, enc.encode(`code.${orderId}.${kind}.${step}`));
+        const n = new DataView(sig).getUint32(0) % 1_000_000;
+        if (live) setCode(String(n).padStart(6, '0'));
+      };
+      void tick();
+      timer = window.setInterval(() => void tick(), 1000);
+    }).catch(() => live && setFailed(true));
+    return () => { live = false; window.clearInterval(timer); };
+  }, [key, orderId, kind, stepSeconds]);
+  return { code, left, failed };
+}
 
-  const paper = () => {
-    const c = canvas.current!;
-    const ctx = c.getContext('2d')!;
-    ctx.setTransform(1, 0, 0, 1, 0, 0);
-    ctx.fillStyle = '#ffffff';
-    ctx.fillRect(0, 0, c.width, c.height);
-    ctx.strokeStyle = '#C9D2E0';
-    ctx.lineWidth = 2;
-    ctx.beginPath(); ctx.moveTo(24, c.height - 46); ctx.lineTo(c.width - 24, c.height - 46); ctx.stroke();   // the line to sign on
-  };
-  useEffect(() => { paper(); }, []);
+/* ------------------------------------------------- what the student agrees to */
 
-  const at = (e: RPointerEvent<HTMLCanvasElement>) => {
-    const r = canvas.current!.getBoundingClientRect();
-    return { x: ((e.clientX - r.left) / r.width) * PAD_W, y: ((e.clientY - r.top) / r.height) * PAD_H };
+type Who = Pick<Order, 'student_name' | 'id_card_no' | 'order_no' | 'clothes_count' | 'weight_kg' | 'service_name' | 'tag_no'>;
+export function dropoffSentence(o: Who) {
+  const w = Number(o.weight_kg) > 0 ? ` (${kg(o.weight_kg)})` : '';
+  return `I, ${o.student_name} (ID ${o.id_card_no}), gave ${o.clothes_count} clothes${w} for ${o.service_name || 'Wash & fold'}, order ${o.order_no}${o.tag_no ? `, basket card ${o.tag_no}` : ''}.`;
+}
+export function pickupSentence(o: Who, returned: number, note?: string | null) {
+  return `I, ${o.student_name} (ID ${o.id_card_no}), received ${returned} of the ${o.clothes_count} clothes I gave for order ${o.order_no}${o.tag_no ? `, basket card ${o.tag_no}` : ''}.${note?.trim() ? ` Staff note: ${note.trim()}` : ''}`;
+}
+
+const HOW: Record<string, string> = {
+  CODE: 'Confirmed with the student’s code', COUNTER: 'Walk-in, confirmed at the counter', SIGNATURE: 'Signed at the counter',
+  PHONE: 'Confirmed on their phone', OVERRIDE: 'Handed over by the admin without the code', DISPUTED: 'Disputed by the student',
+};
+export const ackLabel = (ack?: string | null) => (ack ? HOW[ack] ?? ack : 'Not confirmed yet');
+
+/* ---------------------------------------------------- counter: type the code */
+
+/**
+ * Staff type the code the student reads from their phone. Sends the student a new code when none is
+ * waiting (or `start` asks to). For pickup, `start` holds the counted clothes and payment.
+ */
+export function CodeEntry({ o, kind, start, onDone, onBack, autoStart }: {
+  o: Order; kind: ConfirmKind; start?: { returnedCount: number; note: string; payMethod?: 'CASH' | 'UPI'; payRef?: string };
+  onDone: (o: Order) => void; onBack?: () => void; autoStart?: boolean;
+}) {
+  const [cur, setCur] = useState<Order>(o);
+  const [code, setCode] = useState('');
+  const [seen, setSeen] = useState(Date.now());
+  const [, tick] = useState(0);
+  const sending = useFormAction();
+  const checking = useFormAction();
+  const done = useRef(false);
+  const req = cur.confirm_requests?.find(r => r.kind === kind);
+  const input = useRef<HTMLInputElement>(null);
+
+  const send = async () => {
+    const r = await sending.submit(() => api<Order>(`/ops/orders/${o.id}/confirm-request`, { body: { kind, ...(start ?? {}) } }));
+    if (r) { setCur(r); setSeen(Date.now()); setCode(''); input.current?.focus(); }
   };
-  const down = (e: RPointerEvent<HTMLCanvasElement>) => {
-    e.preventDefault();
-    if (pointer.current !== null) return;
-    pointer.current = e.pointerId;
-    canvas.current!.setPointerCapture(e.pointerId);
-    drawing.current = true;
-    last.current = at(e);
+  useEffect(() => { if (autoStart && !req) void send(); }, []);   // eslint-disable-line react-hooks/exhaustive-deps
+  // Watch for "something is wrong" from the student, and the request expiring.
+  useEffect(() => {
+    let live = true;
+    let busy = false;
+    const t = setInterval(() => {
+      tick(n => n + 1);
+      if (busy) return;
+      busy = true;
+      api<Order>(`/ops/orders/${o.id}`).then(r => { if (live && !done.current) { setCur(r); setSeen(Date.now()); } }).catch(() => {}).finally(() => { busy = false; });
+    }, 3000);
+    return () => { live = false; clearInterval(t); };
+  }, [o.id]);
+  const confirm = async (value = code) => {
+    if (value.length !== 6) return;
+    const r = await checking.submit(() => api<Order>(`/ops/orders/${o.id}/confirm`, { body: { kind, code: value } }), kind === 'DROPOFF' ? 'Drop-off confirmed by the student' : `${o.order_no} handed over`);
+    if (r) { done.current = true; onDone(r); } else { setCode(''); input.current?.focus(); void api<Order>(`/ops/orders/${o.id}`).then(setCur).catch(() => {}); }
   };
-  const move = (e: RPointerEvent<HTMLCanvasElement>) => {
-    if (!drawing.current || !last.current || e.pointerId !== pointer.current) return;
-    if (!marked) setMarked(true);
-    const p = at(e);
-    const ctx = canvas.current!.getContext('2d')!;
-    ctx.strokeStyle = INK;
-    ctx.lineWidth = 3.2;
-    ctx.lineCap = 'round';
-    ctx.lineJoin = 'round';
-    ctx.beginPath(); ctx.moveTo(last.current.x, last.current.y); ctx.lineTo(p.x, p.y); ctx.stroke();
-    ink.current += Math.hypot(p.x - last.current.x, p.y - last.current.y);
-    last.current = p;
-  };
-  const up = (e: RPointerEvent<HTMLCanvasElement>) => {
-    if (!drawing.current || e.pointerId !== pointer.current) return;
-    pointer.current = null;
-    drawing.current = false;
-    last.current = null;
-    // A dot or a tiny tick is not a signature.
-    if (ink.current >= 120) { setEmpty(false); onChange(canvas.current!.toDataURL('image/png')); }
-  };
-  const clear = () => { ink.current = 0; setEmpty(true); setMarked(false); paper(); onChange(null); };
+  const left = req ? Math.max(0, (req.seconds_left ?? 600) - Math.round((Date.now() - seen) / 1000)) : 0;
+  const sentence = kind === 'DROPOFF' ? dropoffSentence(cur) : pickupSentence(cur, req?.returned_count ?? start?.returnedCount ?? cur.clothes_count, req?.note ?? start?.note);
 
   return (
-    <div className="sig-pad">
-      <canvas ref={canvas} width={PAD_W} height={PAD_H} aria-label={label} role="img"
-        onPointerDown={down} onPointerMove={move} onPointerUp={up} onPointerCancel={up} onPointerLeave={up} />
-      <div className="sig-pad-bar">
-        <span>{!empty ? 'Signed' : marked ? 'Keep going: write the full signature' : label}</span>
-        <button type="button" className="link-btn" onClick={clear} disabled={!marked}>Clear</button>
+    <section className="code-box" aria-label={kind === 'DROPOFF' ? 'Student confirms the drop-off' : 'Student confirms they received the clothes'}>
+      <h2><Icon name="lock" size={18} />{kind === 'DROPOFF' ? 'Student confirms the drop-off' : 'Student confirms they received it'}</h2>
+      <p className="code-sentence">“{sentence}”</p>
+      {req?.status === 'DISPUTED' ? (
+        <div className="code-dispute"><Icon name="alert" size={22} /><span><b>{cur.student_name} says something is wrong</b><small>“{req.reason}”. {kind === 'PICKUP' ? 'Do not hand over yet. ' : ''}Sort it out together (a complaint was opened), then send a new code.</small></span></div>
+      ) : req && left > 0 ? (
+        <>
+          <p className="code-ask"><span className="live-dot" />A code is on <b>{cur.student_name}</b>’s phone. Ask them to read it out.</p>
+          <form className="code-form" onSubmit={e => { e.preventDefault(); void confirm(); }}>
+            <input ref={input} className="code-input" value={code} onChange={e => { const v = e.target.value.replace(/\D/g, '').slice(0, 6); setCode(v); if (v.length === 6) void confirm(v); }}
+              inputMode="numeric" autoComplete="one-time-code" placeholder="••••••" aria-label="Code from the student’s phone" autoFocus maxLength={6} />
+            <Button tone="primary" size="lg" busy={checking.busy} disabled={code.length !== 6} icon="check">{kind === 'DROPOFF' ? 'Confirm' : 'Confirm and hand over'}</Button>
+          </form>
+          {checking.error && <ErrorNote error={checking.error} />}
+          <small className="code-left">Request open for {Math.floor(left / 60)}:{String(left % 60).padStart(2, '0')} more.</small>
+        </>
+      ) : (
+        <p className="code-ask muted">{sending.busy ? 'Sending a code to the student’s phone…' : 'No code is waiting. Send one to the student’s phone.'}</p>
+      )}
+      {sending.error && <ErrorNote error={sending.error} />}
+      <div className="code-actions">
+        <Button type="button" tone="plain" busy={sending.busy} icon="phone" onClick={send}>{req ? 'Send a new code' : 'Send the code'}</Button>
+        {onBack && <Button type="button" tone="plain" onClick={onBack}>Back</Button>}
       </div>
-    </div>
+    </section>
   );
 }
 
-/** A stored signature image (the website loads it directly; the app fetches it with the token). */
+/* -------------------------------------------------- the record (staff, student) */
+
+/** A stored signature image from older records. */
 export function SignatureImage({ name }: { name: string }) {
   const [src, setSrc] = useState(isApp ? '' : `/api/files/${encodeURIComponent(name)}`);
   useEffect(() => {
@@ -112,76 +169,7 @@ export function SignatureImage({ name }: { name: string }) {
   return src ? <img className="sig-img" src={src} alt="Student's signature" loading="lazy" /> : <span className="sig-img placeholder" />;
 }
 
-/* ------------------------------------------------- what the student agrees to */
-
-type Who = Pick<Order, 'student_name' | 'id_card_no' | 'order_no' | 'clothes_count' | 'weight_kg' | 'service_name' | 'tag_no'>;
-/** Shown above the pad. The server stores its own copy of this sentence with the signature. */
-export function dropoffSentence(o: Who) {
-  const w = Number(o.weight_kg) > 0 ? ` (${kg(o.weight_kg)})` : '';
-  return `I, ${o.student_name} (ID ${o.id_card_no}), gave ${o.clothes_count} clothes${w} for ${o.service_name || 'Wash & fold'}, order ${o.order_no}${o.tag_no ? `, basket card ${o.tag_no}` : ''}.`;
-}
-export function pickupSentence(o: Who, returned: number, note?: string | null) {
-  return `I, ${o.student_name} (ID ${o.id_card_no}), received ${returned} of the ${o.clothes_count} clothes I gave for order ${o.order_no}${o.tag_no ? `, basket card ${o.tag_no}` : ''}.${note?.trim() ? ` Staff note: ${note.trim()}` : ''}`;
-}
-
-const HOW: Record<string, string> = { SIGNATURE: 'Signed at the counter', PHONE: 'Confirmed on their phone', OVERRIDE: 'Handed over by admin without confirmation', DISPUTED: 'Disputed by the student' };
-export const ackLabel = (ack?: string | null) => (ack ? HOW[ack] ?? ack : 'Not confirmed yet');
-
-/* ------------------------------------------------------ drop-off at counter */
-
-/**
- * After an order is taken: the student signs on this screen, or confirms in their own app (the screen
- * shows it the moment they do). Staff can move on to the next student at any time.
- */
-export function DropoffSign({ o, onSigned, compact }: { o: Order; onSigned?: (o: Order) => void; compact?: boolean }) {
-  const [sig, setSig] = useState<string | null>(null);
-  const [state, setState] = useState<Order>(o);
-  const { busy, error, submit } = useFormAction();
-  const confirmed = state.dropoff_ack === 'SIGNATURE' || state.dropoff_ack === 'PHONE';
-  const walkIn = o.customer_kind === 'WALKIN';
-  // Watch for the student answering in their app, until they do (one request at a time, nothing after leaving).
-  useEffect(() => {
-    if (confirmed || walkIn) return;
-    let live = true;
-    let busyPoll = false;
-    const t = setInterval(() => {
-      if (busyPoll) return;
-      busyPoll = true;
-      api<Order>(`/ops/orders/${o.id}`).then(r => {
-        if (!live || r.dropoff_ack === state.dropoff_ack) return;
-        setState(r);
-        if (r.dropoff_ack === 'SIGNATURE' || r.dropoff_ack === 'PHONE') onSigned?.(r);
-      }).catch(() => {}).finally(() => { busyPoll = false; });
-    }, 3000);
-    return () => { live = false; clearInterval(t); };
-  }, [confirmed, walkIn, o.id, state.dropoff_ack]);   // eslint-disable-line react-hooks/exhaustive-deps
-  const save = async () => {
-    if (!sig) return;
-    const r = await submit(() => api<Order>(`/ops/orders/${o.id}/sign`, { body: { signature: sig, clothesCount: state.clothes_count, weightKg: state.weight_kg } }), 'Drop-off signed');
-    if (r) { setState(r); onSigned?.(r); }
-  };
-
-  if (confirmed) return (
-    <div className="sign-done"><Icon name="check" size={22} /><span><b>{ackLabel(state.dropoff_ack)}</b><small>{when(state.dropoff_ack_at, 'short')}. The student confirmed this drop-off.</small></span></div>
-  );
-  return (
-    <section className={`sign-box${compact ? ' compact' : ''}`} aria-label="Student confirms the drop-off">
-      {state.dropoff_ack === 'DISPUTED' && (
-        <div className="sign-dispute"><Icon name="alert" size={22} /><span><b>The student said something is wrong</b><small>“{state.signoffs?.find(s => s.kind === 'DROPOFF')?.reason}”. Recount together. If the count changes, correct the order; if it was right, the student signs below or confirms in the app.</small></span></div>
-      )}
-      <h2><Icon name="edit" size={18} />Student signs for the drop-off</h2>
-      <p className="sign-sentence">“{dropoffSentence(state)}”</p>
-      <SignaturePad onChange={setSig} />
-      {error && <ErrorNote error={error} />}
-      <Button tone="primary" size="lg" block busy={busy} disabled={!sig} icon="check" onClick={save}>Save signature</Button>
-      {!walkIn && <p className="sign-or"><span className="live-dot" />Or the student taps <b>Yes, I gave this</b> in their Everjoy app. This screen updates by itself.</p>}
-    </section>
-  );
-}
-
-/* -------------------------------------------------------- the record (staff) */
-
-/** What the student confirmed for an order: drop-off and collection, with signatures and evidence. */
+/** What the student confirmed for an order: drop-off and collection, with the evidence. */
 export function SignoffRecord({ o, showEvidence }: { o: Order; showEvidence?: boolean }) {
   const list = (o.signoffs ?? []) as Signoff[];
   const row = (kind: 'DROPOFF' | 'PICKUP', ack: string | null | undefined, at: string | null | undefined) => {
@@ -198,9 +186,7 @@ export function SignoffRecord({ o, showEvidence }: { o: Order; showEvidence?: bo
         {s?.reason && <p className={`signoff-reason${s.status === 'DISPUTED' ? ' bad' : ''}`}>{s.status === 'DISPUTED' ? 'Student says: ' : 'Reason: '}{s.reason}</p>}
         {s?.signature && <SignatureImage name={s.signature} />}
         {s && showEvidence && (
-          <small className="signoff-evidence">
-            {s.staff_name ? `At the counter: ${s.staff_name}. ` : ''}{s.ip ? `From ${s.ip}. ` : ''}Fingerprint {String(s.proof_hash ?? '').slice(0, 16)}…
-          </small>
+          <small className="signoff-evidence">{s.staff_name ? `At the counter: ${s.staff_name}. ` : ''}Fingerprint {String(s.proof_hash ?? '').slice(0, 16)}…</small>
         )}
       </div>
     );
