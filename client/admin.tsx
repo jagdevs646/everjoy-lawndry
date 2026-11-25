@@ -1,8 +1,8 @@
 import { FormEvent, ReactNode, useEffect, useRef, useState } from 'react';
-import { Announcement, api, ApiError, blobUrl, download, Hostel, Order, Service, Student, User } from './api';
+import { Announcement, api, ApiError, blobUrl, Complaint, download, Hostel, Order, Service, Student, User } from './api';
 import { ChangePassword } from './auth';
 import { ago, kg, planPeriod, plural, rupees, shiftDay, toast, todayKey, useAction, useFormAction, useLoad, useRoute, useScrollTop, when } from './lib';
-import { ComplaintsBoard, OrderSheet, SemesterChips, StudentSheet } from './ops';
+import { ComplaintSheet, OrderSheet, SemesterChips, StudentSheet } from './ops';
 import { GridFrame, useGrid } from './grid';
 import { Avatar, Brand, Button, Empty, ErrorNote, Field, Icon, IconButton, IconName, invalidatePaymentInfo, Loading, PayPill, Segmented, Sheet, StatusPill, Switch } from './ui';
 
@@ -101,7 +101,7 @@ export function AdminApp({ user, onSignOut, onUser, onCounter }: { user: User; o
           {current.key === '' && <OverviewPage open={open} />}
           {current.key === 'register' && <Register open={open} />}
           {current.key === 'students' && <Students open={open} />}
-          {current.key === 'complaints' && <div className="ad-narrow"><ComplaintsBoard onOpenOrder={setOrderId} /></div>}
+          {current.key === 'complaints' && <Complaints onOpenOrder={setOrderId} />}
           {current.key === 'notices' && <Notices />}
           {current.key === 'stats' && <Stats />}
           {current.key === 'reports' && <Reports />}
@@ -375,6 +375,61 @@ function Register({ open }: { open: Openers }) {
           </GridFrame>
         </>
       )}
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------- complaints */
+
+const COMPLAINT_STATUS: Record<string, { label: string; cls: string }> = {
+  OPEN: { label: 'New', cls: 'cs-open' }, IN_PROGRESS: { label: 'Checking', cls: 'cs-in_progress' }, RESOLVED: { label: 'Resolved', cls: 'cs-resolved' },
+};
+
+/** Every complaint as a register: search, filters, and the same table tools as the Register. */
+function Complaints({ onOpenOrder }: { onOpenOrder: (id: number) => void }) {
+  const [f, setF] = useState({ q: '', status: 'OPEN', category: '' });
+  const [openId, setOpenId] = useState<number | null>(null);
+  const filters = new URLSearchParams(Object.entries(f).filter(([, v]) => v)).toString();
+  const grid = useGrid('complaints', [filters], { wrap: true });   // complaints are sentences: wrapped by default
+  const qs = `${filters}${filters ? '&' : ''}limit=${grid.size}&offset=${grid.offset}`;
+  const list = useLoad(() => api<{ rows: Complaint[]; total: number; categories: string[] }>(`/ops/complaints?${qs}`), [qs], { every: 60_000 });
+  const set = (k: keyof typeof f) => (e: { target: { value: string } }) => setF({ ...f, [k]: e.target.value });
+  return (
+    <div className="stack">
+      <div className="filters">
+        <input className="grow" value={f.q} onChange={set('q')} placeholder="Search name, ID card, room, order no. or complaint" aria-label="Search complaints" />
+        <select value={f.status} onChange={set('status')} aria-label="Status">
+          <option value="OPEN">Open (new and checking)</option><option value="NEW">New</option><option value="IN_PROGRESS">Checking</option><option value="RESOLVED">Resolved</option><option value="">All</option>
+        </select>
+        <select value={f.category} onChange={set('category')} aria-label="Type">
+          <option value="">Any type</option>{list.data?.categories.map(c => <option key={c}>{c}</option>)}
+        </select>
+      </div>
+      {!list.data ? (list.error ? <ErrorNote error={list.error} retry={list.reload} /> : <Loading />) : !list.data.rows.length ? (
+        <Empty icon="check" title={f.status === 'OPEN' && !f.q && !f.category ? 'No open complaints' : 'No complaints match'}>{f.status === 'OPEN' ? 'When a student reports a problem it shows up here.' : 'Try other filters.'}</Empty>
+      ) : (
+        <GridFrame grid={grid} total={list.data.total} shown={list.data.rows.length}>
+          <table className="ledger fit">
+            <thead><tr><th>Raised</th><th>Student</th><th>Hostel, room</th><th>Order</th><th>Type</th><th>Complaint</th><th>Status</th><th>Last reply</th><th>Updated</th></tr></thead>
+            <tbody>
+              {list.data.rows.map(c => (
+                <tr key={c.id} tabIndex={0} onClick={() => setOpenId(c.id)} onKeyDown={e => e.key === 'Enter' && setOpenId(c.id)}>
+                  <td className="nowrap">{when(c.created_at)}</td>
+                  <td><b>{c.student_name}</b><small>{c.id_card_no}</small></td>
+                  <td>{c.hostel_name}<small>Room {c.room_no}</small></td>
+                  <td className="ord">{c.order_no ?? <span className="muted">–</span>}</td>
+                  <td>{c.category}</td>
+                  <td className="detail">{c.description}{c.photo ? <small>Photo attached</small> : null}</td>
+                  <td><span className={`pill ${COMPLAINT_STATUS[c.status]?.cls ?? ''}`}>{COMPLAINT_STATUS[c.status]?.label ?? c.status}</span></td>
+                  <td className="detail">{c.last_message ?? <span className="muted">No reply yet</span>}</td>
+                  <td>{ago(c.updated_at)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </GridFrame>
+      )}
+      {openId && <ComplaintSheet id={openId} close={() => setOpenId(null)} onChanged={() => void list.reload()} onOpenOrder={id => { setOpenId(null); onOpenOrder(id); }} />}
     </div>
   );
 }

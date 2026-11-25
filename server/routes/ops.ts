@@ -7,6 +7,7 @@ import { AuthedRequest, requireRole } from '../auth.js';
 import { addEvent, cancelOrder, cardInUse, checkHandover, checkCard, isUniqueError, nextFreeCard, correctOrder, createOrder, deliverOrder, getOrderRow, getSettings, listServices, monthUsage, orderInput, planStatus, quote, recordPayment, setStatus } from '../rules.js';
 import { photoUpload, savePhoto } from '../files.js';
 import { checkStudentEmail } from '../otp.js';
+import { COMPLAINT_CATEGORIES } from './student.js';
 import { checkRequestCode, getRequest, isConfirmed, openRequest, orderForSign, recordSignoff, statementFor, type Origin, type Proof } from '../signoff.js';
 import { announcementsFor, complaintDetail, findOrderByCode, listComplaints, listOrders, listStudents, orderDetail, studentProfile } from '../queries.js';
 import { codeKey, dayKey, handle, HttpError, MAX_ID, nowIso, parse, startOfLocalDayIso, zDate, zId, zText } from '../util.js';
@@ -498,8 +499,13 @@ router.delete('/ops/students/:id/photo', handle(async (req, res) => {
 /* -------------------------------------------------------------- complaints */
 
 router.get('/ops/complaints', handle(async (req, res) => {
-  const status = parse(z.enum(['OPEN', 'IN_PROGRESS', 'RESOLVED', '']).optional(), req.query.status);
-  res.json({ rows: await listComplaints({ status: status || undefined }) });
+  const f = parse(z.object({
+    status: z.enum(['OPEN', 'NEW', 'IN_PROGRESS', 'RESOLVED', '']).optional(),
+    q: z.string().max(80).optional(), category: z.string().max(60).optional(),
+    limit: z.coerce.number().int().min(1).max(1000).optional(), offset: z.coerce.number().int().min(0).optional(),
+  }), req.query);
+  const rows = await listComplaints({ ...f, status: f.status || undefined });
+  res.json({ rows, total: (rows as unknown as { total: number }).total, categories: COMPLAINT_CATEGORIES });
 }));
 
 router.get('/ops/complaints/:id', handle(async (req, res) => res.json(await complaintDetail(parse(zId, req.params.id)))));

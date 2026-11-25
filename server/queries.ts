@@ -179,16 +179,27 @@ export async function complaintDetail(id: number) {
   return { ...c, updates };
 }
 
-export async function listComplaints(f: { studentId?: number; status?: string }) {
+export async function listComplaints(f: { studentId?: number; status?: string; q?: string; category?: string; limit?: number; offset?: number }) {
   const where: string[] = [];
   const p: unknown[] = [];
   if (f.studentId) { where.push('c.student_id = ?'); p.push(f.studentId); }
   if (f.status === 'OPEN') where.push(`c.status IN ('OPEN','IN_PROGRESS')`);
+  else if (f.status === 'NEW') where.push(`c.status = 'OPEN'`);
   else if (f.status) { where.push('c.status = ?'); p.push(f.status); }
+  if (f.category) { where.push('c.category = ?'); p.push(f.category); }
+  if (f.q?.trim()) {
+    const like = likeContains(f.q.trim());
+    where.push(`(LOWER(u.name) LIKE LOWER(?) ESCAPE '\\' OR LOWER(st.id_card_no) LIKE LOWER(?) ESCAPE '\\' OR LOWER(c.description) LIKE LOWER(?) ESCAPE '\\'
+      OR LOWER(o.order_no) LIKE LOWER(?) ESCAPE '\\' OR st.room_no = ?)`);
+    p.push(like, like, like, like, f.q.trim());
+  }
+  const limit = Math.min(Math.max(Math.trunc(Number(f.limit)) || 200, 1), 1000);
+  const offset = Math.max(Math.trunc(Number(f.offset)) || 0, 0);
+  const from = `FROM complaints c JOIN users u ON u.id = c.student_id JOIN students st ON st.user_id = c.student_id JOIN hostels h ON h.id = st.hostel_id
+    LEFT JOIN orders o ON o.id = c.order_id ${where.length ? `WHERE ${where.join(' AND ')}` : ''}`;
   return db.all(`SELECT c.id, c.category, c.description, c.status, c.photo, c.created_at, c.updated_at, o.order_no, c.order_id,
       u.name AS student_name, st.id_card_no, st.room_no, h.name AS hostel_name,
       (SELECT message FROM complaint_updates cu WHERE cu.complaint_id = c.id AND cu.message IS NOT NULL ORDER BY cu.id DESC LIMIT 1) AS last_message
-    FROM complaints c JOIN users u ON u.id = c.student_id JOIN students st ON st.user_id = c.student_id JOIN hostels h ON h.id = st.hostel_id
-    LEFT JOIN orders o ON o.id = c.order_id ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
-    ORDER BY CASE c.status WHEN 'RESOLVED' THEN 1 ELSE 0 END, c.updated_at DESC LIMIT 200`, p);
+    ${from} ORDER BY CASE c.status WHEN 'RESOLVED' THEN 1 ELSE 0 END, c.updated_at DESC LIMIT ${limit} OFFSET ${offset}`, p)
+    .then(async rows => Object.assign(rows, { total: Number((await db.get<{ c: number }>(`SELECT COUNT(*) AS c ${from}`, p))?.c ?? 0) }));
 }

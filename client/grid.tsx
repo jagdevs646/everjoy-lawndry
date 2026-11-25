@@ -13,8 +13,8 @@ const DEFAULTS: Prefs = { size: 100, height: 'normal', wrap: false, widths: {} }
 const MIN_SIZE = 10, MAX_SIZE = 1000, MIN_COL = 48;
 
 const key = (id: string) => `ej-grid:${id}`;
-function loadPrefs(id: string): Prefs {
-  try { return { ...DEFAULTS, ...JSON.parse(localStorage.getItem(key(id)) || '{}') }; } catch { return DEFAULTS; }
+function loadPrefs(id: string, start: Partial<Prefs> = {}): Prefs {
+  try { return { ...DEFAULTS, ...start, ...JSON.parse(localStorage.getItem(key(id)) || '{}') }; } catch { return { ...DEFAULTS, ...start }; }
 }
 function savePrefs(id: string, p: Prefs) {
   try { localStorage.setItem(key(id), JSON.stringify(p)); } catch { /* private mode: not remembered */ }
@@ -22,8 +22,8 @@ function savePrefs(id: string, p: Prefs) {
 const wide = () => window.matchMedia('(min-width: 761px)').matches;
 
 /** Page and rows-per-page for one table. `resetOn` (filters, search) goes back to page 1. */
-export function useGrid(id: string, resetOn: unknown[] = []) {
-  const [prefs, setPrefsRaw] = useState<Prefs>(() => loadPrefs(id));
+export function useGrid(id: string, resetOn: unknown[] = [], start: Partial<Prefs> = {}) {
+  const [prefs, setPrefsRaw] = useState<Prefs>(() => loadPrefs(id, start));
   const [page, setPage] = useState(0);
   const setPrefs = (p: Partial<Prefs>) => setPrefsRaw(cur => { const next = { ...cur, ...p }; savePrefs(id, next); return next; });
   useEffect(() => setPage(0), resetOn);   // eslint-disable-line react-hooks/exhaustive-deps

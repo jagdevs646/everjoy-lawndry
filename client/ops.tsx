@@ -475,7 +475,7 @@ export function ComplaintsBoard({ onOpenOrder }: { onOpenOrder: (id: number) => 
   );
 }
 
-function ComplaintSheet({ id, close, onChanged, onOpenOrder }: { id: number; close: () => void; onChanged: () => void; onOpenOrder: (id: number) => void }) {
+export function ComplaintSheet({ id, close, onChanged, onOpenOrder }: { id: number; close: () => void; onChanged: () => void; onOpenOrder: (id: number) => void }) {
   const d = useLoad(() => api<Complaint>(`/ops/complaints/${id}`), [id]);
   const [message, setMessage] = useState('');
   const [status, setStatus] = useState<Complaint['status'] | ''>('');
