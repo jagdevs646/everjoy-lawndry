@@ -1119,14 +1119,14 @@ describe('two-sided register: the student confirms with the code on their phone'
     expect(mine.confirm_requests).toEqual([]);
   });
 
-  it('a drop-off without the code is "not confirmed": not received and stuck until the code or an admin override', async () => {
+  it('a drop-off without the code is "not confirmed": it stays in its lane, cannot move on and is not counted as taken in', async () => {
     const s = await newStudent();
     const o = await order(s.id, 2, 6);
     const id = o.body.id;
     expect(o.body.dropoff_needed).toBe(1);
     const lane = async (st: string) => (await staff.get(`/api/ops/orders?status=${st}&limit=500`)).body.rows as { id: number }[];
     expect(has(await lane('UNCONFIRMED'), id)).toBe(true);
-    expect(has(await lane('RECEIVED'), id)).toBe(false);
+    expect(has(await lane('RECEIVED'), id)).toBe(true);   // shown in its lane, marked "Not confirmed"
     const before = (await staff.get('/api/ops/summary')).body;
     expect(before.open.unconfirmed).toBeGreaterThan(0);
     const moved = await post(staff, '/api/ops/orders/status', { ids: [id], status: 'WASHING' });

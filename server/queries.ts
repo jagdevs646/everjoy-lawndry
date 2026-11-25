@@ -30,8 +30,7 @@ function orderWhere(f: OrderFilters, now: string) {
   // Clothes taken in, but the student has not confirmed with the code (or disputes): not received yet.
   else if (f.status === 'UNCONFIRMED' || f.status === 'UNSIGNED') where.push(waiting);
   else if (f.status === 'DISPUTED') where.push(`o.status IN ('RECEIVED','WASHING','READY') AND o.dropoff_ack = 'DISPUTED'`);
-  else if (f.status === 'LATE') { where.push(`o.status IN ('RECEIVED','WASHING') AND o.expected_at < ? AND NOT ${waiting}`); p.push(now); }
-  else if (['RECEIVED', 'WASHING', 'READY'].includes(f.status ?? '')) { where.push(`o.status = ? AND NOT ${waiting}`); p.push(f.status); }
+  else if (f.status === 'LATE') { where.push(`o.status IN ('RECEIVED','WASHING') AND o.expected_at < ?`); p.push(now); }
   else if (f.status) { where.push('o.status = ?'); p.push(f.status); }
   if (f.payment) { where.push('o.payment_status = ?'); p.push(f.payment); }
   if (f.hostel) { where.push('o.hostel_name = ?'); p.push(f.hostel); }

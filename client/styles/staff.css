@@ -154,20 +154,12 @@ html[data-theme='staff'] h1 { font-stretch: 85%; font-weight: 800; letter-spacin
   .or-state small { margin-left: 0; }
 }
 
-.lanes { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); gap: 6px; }
+.lanes { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; }
 .lanes button { display: grid; justify-items: start; gap: 0; padding: 10px 12px; border-radius: var(--radius-sm); border: 1.5px solid var(--line); background: var(--surface); color: var(--ink-2); font-weight: 700; font-size: .875rem; }
 .lanes b { font-size: 1.75rem; font-stretch: 75%; color: var(--ink); line-height: 1.1; }
 .lanes button.on { border-color: var(--accent); background: var(--accent-soft); color: var(--ink); }
 .lanes .lane-late b { color: var(--bad); }
 .lanes .lane-ready b { color: var(--good); }
-.lanes .lane-unconfirmed b { color: var(--warn, #E8A33A); }
-/* Phones: "Not confirmed" becomes a bar across the top, the four lanes below it. */
-@media (max-width: 560px) {
-  .lanes { grid-auto-flow: row; grid-template-columns: repeat(4, minmax(0, 1fr)); }
-  .lanes .lane-unconfirmed { grid-column: 1 / -1; display: flex; align-items: baseline; gap: 8px; padding: 6px 12px; }
-  .lanes .lane-unconfirmed b { font-size: 1.4rem; }
-}
-.lanes button { line-height: 1.2; }
 .lane-note { display: flex; gap: 8px; align-items: flex-start; margin: 0; padding: 10px 12px; border-radius: var(--radius-sm); background: var(--warn-soft, rgba(232, 163, 58, .12)); color: var(--ink-2); font-size: .9rem; }
 .lane-note .icon { flex: none; margin-top: 2px; }
 .orders-tools { display: flex; gap: 10px; align-items: center; }
@@ -219,3 +211,5 @@ html[data-theme='staff'] h1 { font-stretch: 85%; font-weight: 800; letter-spacin
 .verify .avatar-img { border-radius: 14px; }
 .find-input.upper { text-transform: uppercase; }
 .find-input.upper::placeholder { text-transform: none; }
+
+.row-check.lock { color: var(--warn); }

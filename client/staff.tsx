@@ -8,7 +8,7 @@ import { Avatar, Brand, Button, Empty, ErrorNote, Field, Icon, IconName, Loading
 
 type Summary = {
   today: { received: number; kg: number; clothes: number; delivered: number; collected: number };
-  open: { received: number; washing: number; ready: number; late: number; unconfirmed: number };
+  open: { received: number; washing: number; ready: number; late: number; unconfirmed?: number };
   pending_students: number; room_changes: number; services: Service[]; open_complaints: number; dues: number; settings: OpsSettings; announcements: Announcement[];
 };
 
@@ -486,7 +486,8 @@ function Pickup({ settings, onDone, openOrder, isAdmin }: { settings?: OpsSettin
 function OrderRow({ o, onOpen, selectable, selected, onSelect }: { o: Order; onOpen: () => void; selectable?: boolean; selected?: boolean; onSelect?: (on: boolean) => void }) {
   return (
     <li className={`order-row${selected ? ' sel' : ''}${o.late ? ' late' : ''}`}>
-      {selectable && <label className="row-check"><input type="checkbox" checked={!!selected} onChange={e => onSelect?.(e.target.checked)} aria-label={`Select ${o.order_no}`} /></label>}
+      {selectable ? <label className="row-check"><input type="checkbox" checked={!!selected} onChange={e => onSelect?.(e.target.checked)} aria-label={`Select ${o.order_no}`} /></label>
+        : onSelect && <span className="row-check lock" title="Waiting for the student’s code"><Icon name="lock" size={18} /></span>}
       <button onClick={onOpen}>
         <span className="or-no">{o.tag_no ? <span className="card-no">{o.tag_no}</span> : o.order_no}{o.tag_no && <small>{o.order_no}</small>}</span>
         <span className="or-who"><b>{o.student_name}</b><small>{o.hostel_name}, room {o.room_no}</small></span>
@@ -501,7 +502,6 @@ function OrderRow({ o, onOpen, selectable, selected, onSelect }: { o: Order; onO
 /* ----------------------------------------------------------------- orders */
 
 const LANES = [
-  { key: 'UNCONFIRMED', label: 'Not confirmed' },
   { key: 'RECEIVED', label: 'Received' },
   { key: 'WASHING', label: 'Washing' },
   { key: 'READY', label: 'Ready' },
@@ -516,22 +516,23 @@ function Orders({ summary, onChanged, openOrder }: { summary?: Summary; onChange
   const list = useLoad(() => api<{ rows: Order[]; total: number }>(`/ops/orders?status=${lane}&limit=300${q ? `&q=${encodeURIComponent(q)}` : ''}`), [lane, q], { every: 30_000 });
   const { busy, run } = useAction();
   useEffect(() => setSel(new Set()), [lane, q]);
-  const counts: Record<Lane, number | undefined> = { UNCONFIRMED: summary?.open.unconfirmed, RECEIVED: summary?.open.received, WASHING: summary?.open.washing, READY: summary?.open.ready, LATE: summary?.open.late };
+  const counts: Record<Lane, number | undefined> = { RECEIVED: summary?.open.received, WASHING: summary?.open.washing, READY: summary?.open.ready, LATE: summary?.open.late };
   const rows = list.data?.rows ?? [];
   const move = async (status: 'WASHING' | 'READY' | 'RECEIVED') => {
     const ids = [...sel];
     const r = await run(() => api<{ changed: number }>('/ops/orders/status', { body: { ids, status } }));
     if (r) { toast(`${plural(r.changed, 'order')} moved to ${status === 'READY' ? 'Ready' : status.toLowerCase()}${status === 'READY' ? '. Students were notified.' : ''}`); setSel(new Set()); void list.reload(); onChanged(); }
   };
-  const allOn = rows.length > 0 && rows.every(r => sel.has(r.id));
-  // Not confirmed: nothing moves until the student gives the code.
-  const nextFor: Record<Lane, ('WASHING' | 'READY' | 'RECEIVED')[]> = { UNCONFIRMED: [], RECEIVED: ['WASHING', 'READY'], WASHING: ['READY'], READY: ['WASHING'], LATE: ['WASHING', 'READY'] };
+  // Orders the student has not confirmed with the code stay where they are: they can't be selected to move.
+  const movable = rows.filter(r => !isAwaiting(r));
+  const allOn = movable.length > 0 && movable.every(r => sel.has(r.id));
+  const nextFor: Record<Lane, ('WASHING' | 'READY' | 'RECEIVED')[]> = { RECEIVED: ['WASHING', 'READY'], WASHING: ['READY'], READY: ['WASHING'], LATE: ['WASHING', 'READY'] };
 
   return (
     <div className="sf-page orders">
       <h1>Orders</h1>
       <div className="lanes" role="tablist" aria-label="Order status">
-        {LANES.filter(l => l.key !== 'UNCONFIRMED' || summary?.settings.sign_dropoff !== false || !!summary?.open.unconfirmed).map(l => (
+        {LANES.map(l => (
           <button key={l.key} role="tab" aria-selected={lane === l.key} className={`${lane === l.key ? 'on' : ''} lane-${l.key.toLowerCase()}`} onClick={() => setLane(l.key)}>
             <b>{counts[l.key] ?? '–'}</b>{l.label}
           </button>
@@ -539,12 +540,11 @@ function Orders({ summary, onChanged, openOrder }: { summary?: Summary; onChange
       </div>
       <div className="orders-tools">
         <input className="filter-input" value={q} onChange={e => setQ(e.target.value)} placeholder="Search order no., name, room or ID" aria-label="Search orders" />
-        {rows.length > 0 && lane !== 'UNCONFIRMED' && <label className="select-all"><input type="checkbox" checked={allOn} onChange={e => setSel(e.target.checked ? new Set(rows.map(r => r.id)) : new Set())} />Select all</label>}
+        {movable.length > 0 && <label className="select-all"><input type="checkbox" checked={allOn} onChange={e => setSel(e.target.checked ? new Set(movable.map(r => r.id)) : new Set())} />Select all</label>}
       </div>
-      {lane === 'UNCONFIRMED' && <p className="lane-note"><Icon name="lock" size={18} />Clothes taken in, but the student has not given the code from their phone yet. They don’t count as received and can’t move on until then. Open one and ask for the code.</p>}
-      {!list.data ? (list.error ? <ErrorNote error={list.error} retry={list.reload} /> : <Loading />) : !rows.length ? <Empty icon={lane === 'UNCONFIRMED' ? 'check' : 'washer'} title={lane === 'LATE' ? 'Nothing is late' : lane === 'UNCONFIRMED' ? 'Every drop-off is confirmed' : `No orders in ${lane.toLowerCase()}`} /> : (
+      {!list.data ? (list.error ? <ErrorNote error={list.error} retry={list.reload} /> : <Loading />) : !rows.length ? <Empty icon="washer" title={lane === 'LATE' ? 'Nothing is late' : `No orders in ${lane.toLowerCase()}`} /> : (
         <ul className="order-rows">
-          {rows.map(o => <OrderRow key={o.id} o={o} onOpen={() => openOrder(o.id)} selectable={lane !== 'UNCONFIRMED'} selected={sel.has(o.id)} onSelect={on => { const n = new Set(sel); if (on) n.add(o.id); else n.delete(o.id); setSel(n); }} />)}
+          {rows.map(o => <OrderRow key={o.id} o={o} onOpen={() => openOrder(o.id)} selectable={!isAwaiting(o)} selected={sel.has(o.id)} onSelect={on => { const n = new Set(sel); if (on) n.add(o.id); else n.delete(o.id); setSel(n); }} />)}
         </ul>
       )}
       {sel.size > 0 && (

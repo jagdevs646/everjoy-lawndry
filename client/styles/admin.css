@@ -381,8 +381,9 @@ html[data-theme='admin'] h1, html[data-theme='admin'] h2 { letter-spacing: -.01e
 .grid-select select { min-height: 34px !important; padding: 4px 8px !important; font-size: .9rem !important; width: auto !important; }
 .grid-wrap-toggle { font-size: .85rem; }
 
-/* Frozen header row inside a scrolling sheet */
-.ledger-wrap.grid { max-height: calc(100vh - 230px); overflow: auto; }
+/* The panel grows with its rows (a page of 50, 75 or 100 shows in full, no inner scrollbar); the page scrolls.
+   Wide tables still scroll sideways inside the panel. */
+.ledger-wrap.grid { max-height: none; overflow-x: auto; overflow-y: visible; }
 .ledger-wrap.grid .ledger th {
   position: sticky; top: 0; z-index: 2;
   background: var(--accent); color: #fff; font-weight: 700; letter-spacing: .01em;

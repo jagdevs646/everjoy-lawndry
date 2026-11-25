@@ -66,8 +66,8 @@ router.get('/admin/overview', handle(async (_req, res) => {
       students: one(`SELECT COUNT(DISTINCT student_id) AS c FROM orders WHERE month_key = ? AND status != 'CANCELLED'`, month),
     }),
     open: together({
-      in_progress: one(`SELECT COUNT(*) AS c FROM orders WHERE status IN ('RECEIVED','WASHING') AND NOT ${awaitingSql()}`),
-      ready: one(`SELECT COUNT(*) AS c FROM orders WHERE status = 'READY' AND NOT ${awaitingSql()}`),
+      in_progress: one(`SELECT COUNT(*) AS c FROM orders WHERE status IN ('RECEIVED','WASHING')`),
+      ready: one(`SELECT COUNT(*) AS c FROM orders WHERE status = 'READY'`),
       late: one(`SELECT COUNT(*) AS c FROM orders WHERE status IN ('RECEIVED','WASHING') AND expected_at < ?`, nowIso()),
       uncollected: one(`SELECT COUNT(*) AS c FROM orders WHERE status = 'READY' AND ready_at < ?`, new Date(Date.now() - 3 * 86400_000).toISOString()),
       dues: one(`SELECT COALESCE(SUM(amount), 0) AS c FROM orders WHERE payment_status = 'DUE' AND status != 'CANCELLED'`),
