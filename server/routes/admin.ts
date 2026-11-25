@@ -14,7 +14,7 @@ import { readUpload, writeXlsx, XLSX_TYPE } from '../sheets.js';
 import { mailConfigured } from '../mail.js';
 import { checkStudentEmail } from '../otp.js';
 import { announcementsFor, listOrders } from '../queries.js';
-import { addDays, dayKey, handle, HttpError, likeContains, localDateTimeIso, nowIso, parse, startOfLocalDayIso, weekStart, zDate, zId, zText } from '../util.js';
+import { addDays, dayKey, handle, HttpError, likeContains, localDateTimeIso, nowIso, parse, startOfLocalDayIso, weekStart, zDate, zId, zText, awaitingSql } from '../util.js';
 import { normaliseLogin, zIdCard, zMobile, zPassword, zRoom } from './public.js';
 import { tempPassword, tempPasswordExpiry } from './ops.js';
 import { claimHash } from './public.js';
@@ -66,15 +66,15 @@ router.get('/admin/overview', handle(async (_req, res) => {
       students: one(`SELECT COUNT(DISTINCT student_id) AS c FROM orders WHERE month_key = ? AND status != 'CANCELLED'`, month),
     }),
     open: together({
-      in_progress: one(`SELECT COUNT(*) AS c FROM orders WHERE status IN ('RECEIVED','WASHING')`),
-      ready: one(`SELECT COUNT(*) AS c FROM orders WHERE status = 'READY'`),
+      in_progress: one(`SELECT COUNT(*) AS c FROM orders WHERE status IN ('RECEIVED','WASHING') AND NOT ${awaitingSql()}`),
+      ready: one(`SELECT COUNT(*) AS c FROM orders WHERE status = 'READY' AND NOT ${awaitingSql()}`),
       late: one(`SELECT COUNT(*) AS c FROM orders WHERE status IN ('RECEIVED','WASHING') AND expected_at < ?`, nowIso()),
       uncollected: one(`SELECT COUNT(*) AS c FROM orders WHERE status = 'READY' AND ready_at < ?`, new Date(Date.now() - 3 * 86400_000).toISOString()),
       dues: one(`SELECT COALESCE(SUM(amount), 0) AS c FROM orders WHERE payment_status = 'DUE' AND status != 'CANCELLED'`),
       pending_students: one(`SELECT COUNT(*) AS c FROM students WHERE status = 'PENDING'`),
       complaints: one(`SELECT COUNT(*) AS c FROM complaints WHERE status != 'RESOLVED'`),
       // Drop-offs the student has not confirmed for over 12 hours, and ones they dispute.
-      unsigned: one(`SELECT COUNT(*) AS c FROM orders WHERE status IN ('RECEIVED','WASHING','READY') AND dropoff_ack IS NULL AND received_at < ?`, new Date(Date.now() - 12 * 3600_000).toISOString()),
+      unsigned: one(`SELECT COUNT(*) AS c FROM orders WHERE ${awaitingSql()} AND dropoff_ack IS NULL AND received_at < ?`, new Date(Date.now() - 12 * 3600_000).toISOString()),
       disputed: one(`SELECT COUNT(*) AS c FROM orders WHERE status IN ('RECEIVED','WASHING','READY') AND dropoff_ack = 'DISPUTED'`),
     }),
     totals: together({
@@ -279,7 +279,7 @@ router.get('/admin/report', handle(async (req, res) => {
 const ackText = (ack: unknown, at: unknown) => {
   if (!ack) return '';
   const when = at ? new Date(String(at)).toLocaleString('en-IN', { timeZone: process.env.APP_TZ || 'Asia/Kolkata', dateStyle: 'medium', timeStyle: 'short' }) : '';
-  const how = ({ CODE: 'Student gave the code', COUNTER: 'Walk-in, at the counter', SIGNATURE: 'Signed at counter', PHONE: 'Confirmed on phone', OVERRIDE: 'Admin override', DISPUTED: 'DISPUTED' } as Record<string, string>)[String(ack)] ?? String(ack);
+  const how = ({ CODE: 'Student gave the code', COUNTER: 'Walk-in, at the counter', SIGNATURE: 'Signed at counter', PHONE: 'Confirmed on phone', OVERRIDE: 'Admin override, no code', DISPUTED: 'DISPUTED' } as Record<string, string>)[String(ack)] ?? String(ack);
   return when ? `${how}, ${when}` : how;
 };
 

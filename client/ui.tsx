@@ -125,7 +125,11 @@ export function Switch({ checked, onChange, label, hint }: { checked: boolean; o
 /* --------------------------------------------------------------- statuses */
 
 export const STATUS_LABEL: Record<OrderStatus, string> = { RECEIVED: 'Received', WASHING: 'Washing', READY: 'Ready for pickup', DELIVERED: 'Handed over', CANCELLED: 'Cancelled' };
-export function StatusPill({ status, late }: { status: OrderStatus; late?: boolean | number }) {
+/** Clothes taken in, but the student has not confirmed the drop-off with the code (or disputes it). */
+export const isAwaiting = (o: Pick<Order, 'status' | 'dropoff_needed' | 'dropoff_ack'>) =>
+  ['RECEIVED', 'WASHING', 'READY'].includes(o.status) && Number(o.dropoff_needed) === 1 && (!o.dropoff_ack || o.dropoff_ack === 'DISPUTED');
+export function StatusPill({ status, late, awaiting }: { status: OrderStatus; late?: boolean | number; awaiting?: boolean }) {
+  if (awaiting) return <span className="pill st-unconfirmed">Not confirmed</span>;
   return <span className={`pill st-${status.toLowerCase()}${late ? ' st-late' : ''}`}>{late ? 'Late' : STATUS_LABEL[status]}</span>;
 }
 export function PayPill({ o }: { o: Pick<Order, 'payment_status' | 'amount' | 'paid_method'> }) {

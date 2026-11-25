@@ -1,7 +1,7 @@
 import { db } from './db.js';
 import crypto from 'node:crypto';
 import { QR_STEP_SECONDS, formatCard, getSettings, matchSeries, orderKeys, qrSignature } from './rules.js';
-import { codeKey, dayKey, HttpError, likeContains, nowIso } from './util.js';
+import { awaitingSql, codeKey, dayKey, HttpError, likeContains, nowIso } from './util.js';
 import { signoffsFor } from './signoff.js';
 
 /* Columns safe to show staff/admin. qr_token and request_id are never listed.
@@ -10,7 +10,7 @@ const ORDER_COLS = `o.id, o.order_no, o.student_id, o.hostel_name, o.room_no, o.
   o.status, o.within_kg, o.extra_kg, o.amount, o.payment_status, o.paid_method, o.paid_ref, o.paid_at, o.received_at, o.day_key,
   o.expected_at, o.ready_at, o.delivered_at, o.returned_count, o.cancel_reason,
   o.service_id, o.service_name, o.unit, o.rate, o.charge_note, st.kind AS customer_kind, o.tag_no, u.photo AS student_photo,
-  o.dropoff_ack, o.dropoff_ack_at, o.pickup_ack, o.pickup_ack_at,
+  o.dropoff_ack, o.dropoff_ack_at, o.pickup_ack, o.pickup_ack_at, o.dropoff_needed,
   u.name AS student_name, st.id_card_no, rb.name AS received_by_name, dl.name AS delivered_by_name,
   CASE WHEN o.status IN ('RECEIVED','WASHING') AND o.expected_at < ? THEN 1 ELSE 0 END AS late`;
 const ORDER_FROM = `FROM orders o JOIN users u ON u.id = o.student_id JOIN students st ON st.user_id = o.student_id
@@ -25,11 +25,13 @@ export type OrderFilters = {
 function orderWhere(f: OrderFilters, now: string) {
   const where: string[] = [];
   const p: unknown[] = [];
+  const waiting = awaitingSql('o.');
   if (f.status === 'OPEN') where.push(`o.status IN ('RECEIVED','WASHING','READY')`);
-  // Still open and not confirmed / disputed by the student (closed orders can no longer be confirmed).
-  else if (f.status === 'UNSIGNED') where.push(`o.status IN ('RECEIVED','WASHING','READY') AND o.dropoff_ack IS NULL`);
+  // Clothes taken in, but the student has not confirmed with the code (or disputes): not received yet.
+  else if (f.status === 'UNCONFIRMED' || f.status === 'UNSIGNED') where.push(waiting);
   else if (f.status === 'DISPUTED') where.push(`o.status IN ('RECEIVED','WASHING','READY') AND o.dropoff_ack = 'DISPUTED'`);
-  else if (f.status === 'LATE') { where.push(`o.status IN ('RECEIVED','WASHING') AND o.expected_at < ?`); p.push(now); }
+  else if (f.status === 'LATE') { where.push(`o.status IN ('RECEIVED','WASHING') AND o.expected_at < ? AND NOT ${waiting}`); p.push(now); }
+  else if (['RECEIVED', 'WASHING', 'READY'].includes(f.status ?? '')) { where.push(`o.status = ? AND NOT ${waiting}`); p.push(f.status); }
   else if (f.status) { where.push('o.status = ?'); p.push(f.status); }
   if (f.payment) { where.push('o.payment_status = ?'); p.push(f.payment); }
   if (f.hostel) { where.push('o.hostel_name = ?'); p.push(f.hostel); }

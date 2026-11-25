@@ -4,7 +4,7 @@ import { ackLabel, isConfirmed, SignatureImage, useRotatingCode } from './signof
 import { ChangePassword, OtpStep } from './auth';
 import { isApp, serverAddress } from './platform';
 import { ago, back, firstName, go, kg, noteServerTime, plural, rupees, shrinkPhoto, toast, useAction, useFormAction, useLoad, useRoute, useScrollTop, when } from './lib';
-import { Avatar, Brand, Button, Empty, ErrorNote, Field, Icon, IconButton, IconName, Loading, PayPill, Photo, Progress, QrImage, Sheet, SlipQr, StatusPill, UpiQr, useNoScreenshots } from './ui';
+import { Avatar, Brand, Button, Empty, ErrorNote, Field, Icon, IconButton, IconName, Loading, PayPill, Photo, Progress, QrImage, Sheet, SlipQr, isAwaiting, StatusPill, UpiQr, useNoScreenshots } from './ui';
 
 type Home = {
   profile: Student; plan?: Plan; services?: Service[]; usage: Usage; open: Order[]; due: number; unread: number; open_complaints: number; announcements: Announcement[];
@@ -215,7 +215,7 @@ function OrderTag({ o }: { o: Order }) {
       <span className="order-tag-hole" aria-hidden="true" />
       <span className="order-tag-top">
         <span className="order-tag-no">{o.tag_no ? <>Card {o.tag_no}</> : o.order_no}</span>
-        <StatusPill status={o.status} />
+        <StatusPill status={o.status} awaiting={isAwaiting(o)} />
       </span>
       <span className="order-tag-meta">{o.service_name ? `${o.service_name}: ` : ''}{plural(o.clothes_count, 'piece')}{Number(o.weight_kg) > 0 ? `, ${kg(o.weight_kg)}` : ''}{o.service === 'EXPRESS' ? ', express' : ''}</span>
       <Progress status={o.status} />
@@ -280,7 +280,7 @@ function Slip({ id, cached, close }: { id: number; cached?: Order[]; close: () =
               <span className="slip-brand">Everjoy Lawndry</span>
               <span className="slip-no">{order.tag_no ? <span className="card-no">{order.tag_no}</span> : order.order_no}</span>
               {order.tag_no && <span className="slip-order">Order {order.order_no}</span>}
-              <StatusPill status={order.status} />
+              <StatusPill status={order.status} awaiting={isAwaiting(order)} />
             </header>
             {live && order.qr_key ? (
               <div className="slip-qr"><SlipQr orderId={order.id} slipKey={order.qr_key} size={220} /></div>
@@ -380,8 +380,8 @@ function SlipConfirmations({ order }: { order: Order }) {
           <b>{label}: </b>
           {ok ? `${ack === 'CODE' ? 'you confirmed with your code' : ack === 'COUNTER' ? 'confirmed at the counter' : ack === 'SIGNATURE' ? 'you signed at the counter' : 'you confirmed in the app'}, ${when(at, 'short')}`
             : ack === 'DISPUTED' ? `you reported a problem${s?.reason ? `: “${s.reason}”` : ''}`
-            : ack === 'OVERRIDE' ? `handed over by the admin without your confirmation${s?.reason ? ` (${s.reason})` : ''}`
-            : live && kind === 'DROPOFF' ? 'not confirmed yet. Staff can send you a code at the counter.' : ackLabel(ack)}
+            : ack === 'OVERRIDE' ? `${kind === 'DROPOFF' ? 'counted as received by the admin without your code' : 'handed over by the admin without your confirmation'}${s?.reason ? ` (${s.reason})` : ''}`
+            : live && kind === 'DROPOFF' ? 'not confirmed yet, so it is not counted as received. Give the code from your phone at the counter.' : ackLabel(ack, kind)}
         </span>
         {s?.signature && <SignatureImage name={s.signature} />}
       </div>
@@ -419,7 +419,7 @@ function MyOrders() {
               <button onClick={() => go(`orders/slip/${o.id}`)}>
                 <span className="h-no">{o.order_no}</span>
                 <span className="h-meta">{when(o.received_at, 'date')}, {o.service_name ? `${o.service_name}, ` : ''}{plural(o.clothes_count, 'piece')}{Number(o.weight_kg) > 0 ? `, ${kg(o.weight_kg)}` : ''}</span>
-                <span className="h-right"><StatusPill status={o.status} /><PayPill o={o} /></span>
+                <span className="h-right"><StatusPill status={o.status} awaiting={isAwaiting(o)} /><PayPill o={o} /></span>
               </button>
             </li>
           ))}

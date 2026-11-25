@@ -59,6 +59,13 @@ export async function seedDemo() {
 
     await saveSettings(admin, { monthly_kg_limit: 40, over_limit_action: 'CHARGE', extra_rate_per_kg: 25, express_enabled: true, express_fee: 30 });
 
+    // Demo orders: the student gave the code at the counter (one order below is left waiting for it).
+    const demoOrder = async (...a: Parameters<typeof createOrder>) => {
+      const o = await createOrder(...a);
+      await db.run(`UPDATE orders SET dropoff_ack = 'CODE', dropoff_ack_at = received_at WHERE id = ?`, [o.id]);
+      return o;
+    };
+
     // Two weeks of history so the admin charts and reports have something to show.
     let seed = 7;
     const rand = () => ((seed = (seed * 16807) % 2147483647) / 2147483647);
@@ -67,7 +74,7 @@ export async function seedDemo() {
       for (let i = 0; i < count; i++) {
         const student = students[Math.floor(rand() * 6)];
         const weight = Math.round((2 + rand() * 4.8) * 10) / 10;
-        const o = await createOrder(staff[i % 2], { studentId: student, weightKg: weight, clothesCount: 6 + Math.floor(rand() * 18), service: rand() > 0.85 ? 'EXPRESS' : 'REGULAR', note: '' });
+        const o = await demoOrder(staff[i % 2], { studentId: student, weightKg: weight, clothesCount: 6 + Math.floor(rand() * 18), service: rand() > 0.85 ? 'EXPRESS' : 'REGULAR', note: '' });
         await setStatus(staff[0], [o.id], 'WASHING');
         await setStatus(staff[1], [o.id], 'READY');
         const row = (await db.get<{ payment_status: string; clothes_count: number }>('SELECT payment_status, clothes_count FROM orders WHERE id = ?', [o.id]))!;
@@ -83,15 +90,15 @@ export async function seedDemo() {
 
     // Current state of the counter: something in every column.
     const [priya, arjun, sana, rohan, ishita] = students;
-    const ready = await createOrder(staff[0], { studentId: priya, weightKg: 4.2, clothesCount: 14, service: 'REGULAR', note: '1 bedsheet' });
+    const ready = await demoOrder(staff[0], { studentId: priya, weightKg: 4.2, clothesCount: 14, service: 'REGULAR', note: '1 bedsheet' });
     await setStatus(staff[0], [ready.id], 'WASHING');
     await setStatus(staff[0], [ready.id], 'READY');
-    const washing = await createOrder(staff[0], { studentId: priya, weightKg: 2.6, clothesCount: 9, service: 'EXPRESS', note: '' });
+    const washing = await demoOrder(staff[0], { studentId: priya, weightKg: 2.6, clothesCount: 9, service: 'EXPRESS', note: '' });
     await setStatus(staff[1], [washing.id], 'WASHING');
-    const late = await createOrder(staff[1], { studentId: arjun, weightKg: 6.4, clothesCount: 21, service: 'REGULAR', note: '' });
+    const late = await demoOrder(staff[1], { studentId: arjun, weightKg: 6.4, clothesCount: 21, service: 'REGULAR', note: '' });
     await shiftOrder(late.id, new Date(Date.now() - 3 * 86400_000));
-    await createOrder(staff[1], { studentId: sana, weightKg: 3.1, clothesCount: 11, service: 'REGULAR', note: '' });
-    const ready2 = await createOrder(staff[0], { studentId: rohan, weightKg: 5.5, clothesCount: 17, service: 'REGULAR', note: '' });
+    await demoOrder(staff[1], { studentId: sana, weightKg: 3.1, clothesCount: 11, service: 'REGULAR', note: '' });
+    const ready2 = await demoOrder(staff[0], { studentId: rohan, weightKg: 5.5, clothesCount: 17, service: 'REGULAR', note: '' });
     await setStatus(staff[0], [ready2.id], 'READY');
     await createOrder(staff[0], { studentId: ishita, weightKg: 1.8, clothesCount: 6, service: 'EXPRESS', note: 'Kurta — gentle wash' });
 

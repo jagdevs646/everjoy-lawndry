@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 import { z } from 'zod';
 import { db, insertId, logActivity, nextCounter, notify } from './db.js';
-import { HttpError, MAX_ID, addDays, codeKey, dayKey, looseKey, localDateTimeIso, monthKey, nowIso, parse, round2 } from './util.js';
+import { HttpError, MAX_ID, addDays, awaitingSql, codeKey, dayKey, looseKey, localDateTimeIso, monthKey, nowIso, parse, round2 } from './util.js';
 import { slipKey } from './auth.js';
 import { orderForSign, recordSignoff, resetDropoff, statementFor, type Origin, type Proof } from './signoff.js';
 
@@ -158,6 +158,8 @@ export async function saveSettings(actorId: number, input: unknown): Promise<Set
       await db.run('INSERT INTO settings (key, value, updated_at, updated_by) VALUES (?,?,?,?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at, updated_by = excluded.updated_by',
         [k, JSON.stringify(next[k]), nowIso(), actorId]);
     }
+    // Switching drop-off confirmation off: orders waiting for a code now count as received.
+    if (before.sign_dropoff && !next.sign_dropoff) await db.run(`UPDATE orders SET dropoff_needed = 0 WHERE ${awaitingSql()}`);
     const show = (v: unknown) => (typeof v === 'object' && v !== null ? JSON.stringify(v) : String(v));
     if (changed.length) await logActivity(actorId, 'SETTINGS_CHANGED', 'settings', null, changed.map(k => `${k}: ${show(before[k])} → ${show(next[k])}`).join('; '));
     return next;
@@ -561,7 +563,7 @@ export async function quote(raw: OrderInput, excludeOrderId = 0, snapshot?: Pric
   const amount = round2(base + extraCharge + expressFee);
   const expectedAt = readyTime(s, express);
   return {
-    student: { id: student.id, name: student.name, id_card_no: student.id_card_no, hostel_name: student.hostel_name, room_no: student.room_no, mobile: student.mobile },
+    student: { id: student.id, name: student.name, id_card_no: student.id_card_no, hostel_name: student.hostel_name, room_no: student.room_no, mobile: student.mobile, kind: student.kind },
     plan,
     tag_no: tagNo,
     service: { id: service.id, name: service.name, unit: service.unit, rate: unitRate },
@@ -594,17 +596,20 @@ export async function createOrder(actorId: number, input: OrderInput, requestId?
       if (existing) return { ...existing, duplicate: true };
     }
     const q = await quote(input);
-    const no = await nextOrderNo((await getSettings()).order_no_format);
+    const settings = await getSettings();
+    const no = await nextOrderNo(settings.order_no_format);
     const at = nowIso();
     const token = crypto.randomBytes(16).toString('base64url');
     const note = String(orderInput.parse(input).note || '') || null;
     const id = await insertId(`INSERT INTO orders (order_no, student_id, hostel_name, room_no, mobile, weight_kg, clothes_count, service, note,
         within_kg, extra_kg, amount, payment_status, qr_token, request_id, received_by, received_at, day_key, month_key, expected_at, updated_at,
-        service_id, service_name, unit, rate, charge_note, plan_hosteler, tag_no, order_key, tag_key)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, [
+        service_id, service_name, unit, rate, charge_note, plan_hosteler, tag_no, order_key, tag_key, dropoff_needed)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, [
       no, q.student.id, q.student.hostel_name, q.student.room_no, q.student.mobile, q.weight_kg, q.clothes_count, q.express ? 'EXPRESS' : 'REGULAR', note,
       q.within_kg, q.extra_kg, q.amount, q.amount > 0 ? 'DUE' : 'NONE', token, requestId ?? null, actorId, at, dayKey(), monthKey(), q.expected_at, at,
       q.service.id, q.service.name, q.service.unit, q.service.rate, q.charge_note, q.plan.hosteler ? 1 : 0, q.tag_no, codeKey(no), q.tag_no ? codeKey(q.tag_no) : null,
+      // Students confirm the drop-off with the code on their phone; walk-in customers have no app.
+      settings.sign_dropoff && q.student.kind !== 'WALKIN' ? 1 : 0,
     ]).catch((e: unknown) => {
       if (q.tag_no && isUniqueError(e)) throw new HttpError(409, `Card ${q.tag_no} was just given to another basket. Use another card.`, { code: 'CARD_IN_USE' });
       throw e;
@@ -639,6 +644,9 @@ export async function setStatus(actorId: number, ids: number[], status: 'RECEIVE
       const o = await getOrderRow(id);
       if (!OPEN.includes(o.status)) throw new HttpError(409, `${o.order_no} is ${o.status.toLowerCase()} and cannot be changed.`);
       if (o.status === status) continue;
+      if (await db.get(`SELECT id FROM orders WHERE id = ? AND ${awaitingSql()}`, [id])) {
+        throw new HttpError(409, `${o.order_no} is not confirmed by the student yet. Ask for the code on their phone first: until then it does not count as received.`, { code: 'NOT_CONFIRMED' });
+      }
       if (status === 'RECEIVED' && !opts.allowBackToReceived) throw new HttpError(403, `${o.order_no} is already ${o.status.toLowerCase()}. Only the admin can move it back to received.`);
       const now = nowIso();
       await db.run('UPDATE orders SET status = ?, ready_at = ?, updated_at = ? WHERE id = ?', [status, status === 'READY' ? now : o.ready_at, now, id]);
@@ -756,7 +764,7 @@ export async function runAutoAdvance(now = new Date()) {
   let washing = 0;
   let ready = 0;
   const toReady = await db.all<{ id: number; order_no: string; student_id: number; payment_status: string; amount: number }>(
-    `SELECT id, order_no, student_id, payment_status, amount FROM orders WHERE status IN ('RECEIVED','WASHING') AND expected_at <= ? ORDER BY id LIMIT 500`, [at]);
+    `SELECT id, order_no, student_id, payment_status, amount FROM orders WHERE status IN ('RECEIVED','WASHING') AND expected_at <= ? AND NOT ${awaitingSql()} ORDER BY id LIMIT 500`, [at]);
   for (const o of toReady) {
     const r = await db.run(`UPDATE orders SET status = 'READY', ready_at = ?, updated_at = ? WHERE id = ? AND status IN ('RECEIVED','WASHING')`, [at, at, o.id]);
     if (r.changes !== 1) continue;
@@ -765,7 +773,7 @@ export async function runAutoAdvance(now = new Date()) {
     await notify(o.student_id, `${o.order_no} is ready for pickup`, `Collect it in pickup hours (${s.pickup_from}–${s.pickup_to}) with your slip QR.${o.payment_status === 'DUE' ? ` Please pay ₹${o.amount} before pickup.` : ''}`, o.id);
   }
   const washingBefore = new Date(now.getTime() - s.auto_washing_hours * 3600_000).toISOString();
-  const toWash = await db.all<{ id: number }>(`SELECT id FROM orders WHERE status = 'RECEIVED' AND received_at <= ? ORDER BY id LIMIT 500`, [washingBefore]);
+  const toWash = await db.all<{ id: number }>(`SELECT id FROM orders WHERE status = 'RECEIVED' AND received_at <= ? AND NOT ${awaitingSql()} ORDER BY id LIMIT 500`, [washingBefore]);
   for (const o of toWash) {
     const r = await db.run(`UPDATE orders SET status = 'WASHING', updated_at = ? WHERE id = ? AND status = 'RECEIVED'`, [at, o.id]);
     if (r.changes !== 1) continue;

@@ -115,3 +115,11 @@ export const looseKey = (v: string) => v.toUpperCase().replace(/[^\p{L}\p{N}]/gu
 export const codeKey = (v: string) => looseKey(v).replace(/(^|\D)0+(?=\d)/g, '$1');
 
 export const likeContains = (q: string) => `%${q.replace(/[\\%_]/g, m => `\\${m}`)}%`;
+
+/**
+ * Open student orders whose drop-off the student has not confirmed with the code (or disputes): the clothes
+ * are at the counter, but the order does not count as received, cannot move on and is not handed over.
+ * `a` is the table alias with its dot ("o.") or '' for none.
+ */
+export const awaitingSql = (a = '') =>
+  `(${a}status IN ('RECEIVED','WASHING','READY') AND ${a}dropoff_needed = 1 AND (${a}dropoff_ack IS NULL OR ${a}dropoff_ack = 'DISPUTED'))`;

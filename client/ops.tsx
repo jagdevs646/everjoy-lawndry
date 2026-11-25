@@ -4,11 +4,12 @@ import { api, Complaint, Hostel, Order, Plan, Service, Student, Usage } from './
 import { eventLabel } from './student';
 import { CodeEntry, isConfirmed, SignoffRecord, useSignRules } from './signoff';
 import { ago, kg, planPeriod, plural, rupees, semesterOptions, shrinkPhoto, toast, useAction, useFormAction, useLoad, when } from './lib';
-import { Avatar, Button, Empty, ErrorNote, Field, Icon, Loading, PayPill, Photo, Segmented, Sheet, StatusPill, Stepper, UpiQr } from './ui';
+import { Avatar, Button, Empty, ErrorNote, Field, Icon, Loading, PayPill, Photo, Segmented, Sheet, isAwaiting, StatusPill, Stepper, UpiQr } from './ui';
 
 export type OpsSettings = { max_kg_per_order: number; express_enabled: boolean; express_fee: number; pay_before_pickup: boolean; monthly_kg_limit: number; monthly_order_limit: number; max_active_orders: number;
   allow_paid_extra: boolean; extra_rate_per_kg: number; upi_id: string; upi_name: string; has_upi_qr: boolean;
-  card_required?: boolean; card_series?: { prefix: string; suffix?: string; from: number; to: number; pad?: number }[]; semester_start?: string; semester_end?: string };
+  card_required?: boolean; card_series?: { prefix: string; suffix?: string; from: number; to: number; pad?: number }[]; semester_start?: string; semester_end?: string;
+  sign_dropoff?: boolean; sign_pickup?: boolean };
 export type CounterStudent = Student & { usage: Usage; open: Order[]; orders?: Order[]; plan: Plan };
 export type { Service };
 
@@ -21,7 +22,7 @@ const isOpen = (o: Order) => ['RECEIVED', 'WASHING', 'READY'].includes(o.status)
 
 export function OrderSheet({ id, close, onChanged, isAdmin, payFirst }: { id: number; close: () => void; onChanged?: () => void; isAdmin: boolean; payFirst: boolean }) {
   const d = useLoad(() => api<Order>(`/ops/orders/${id}`), [id]);
-  const [mode, setMode] = useState<'view' | 'handover' | 'fix' | 'cancel' | 'pay' | 'waive' | 'card' | 'sign'>('view');
+  const [mode, setMode] = useState<'view' | 'handover' | 'fix' | 'cancel' | 'pay' | 'waive' | 'card' | 'sign' | 'dropoff-override'>('view');
   const { busy, run } = useAction();
   const changed = (o: Order) => { d.set(o); setMode('view'); onChanged?.(); };
   const setStatus = async (status: string) => {
@@ -40,14 +41,14 @@ export function OrderSheet({ id, close, onChanged, isAdmin, payFirst }: { id: nu
         <ChangeCard o={o} onDone={changed} onCancel={() => setMode('view')} />
       ) : mode === 'fix' ? (
         <FixOrder o={o} onDone={changed} onCancel={() => setMode('view')} />
-      ) : mode === 'cancel' || mode === 'waive' ? (
+      ) : mode === 'cancel' || mode === 'waive' || mode === 'dropoff-override' ? (
         <ReasonForm o={o} kind={mode} onDone={changed} onCancel={() => setMode('view')} />
       ) : mode === 'pay' ? (
         <PayForm o={o} onDone={changed} onCancel={() => setMode('view')} />
       ) : (
         <div className="stack">
           <div className="os-head">
-            <StatusPill status={o.status} late={o.late} />
+            <StatusPill status={o.status} late={o.late} awaiting={isAwaiting(o)} />
             <PayPill o={o} />
             {o.service === 'EXPRESS' && <span className="pill express">Express</span>}
           </div>
@@ -69,9 +70,10 @@ export function OrderSheet({ id, close, onChanged, isAdmin, payFirst }: { id: nu
           {o.cancel_reason && <p className="note-line bad"><Icon name="x" size={16} />{o.cancel_reason}</p>}
           {isOpen(o) && (
             <>
+              {isAwaiting(o) && <p className="lane-note"><Icon name="lock" size={18} />Not confirmed: the student has not given the drop-off code yet{o.dropoff_ack === 'DISPUTED' ? ' and says something is wrong' : ''}. It doesn’t count as received and can’t move on until then.</p>}
               <div className="status-row" role="group" aria-label="Change status">
                 {(['RECEIVED', 'WASHING', 'READY'] as const).map(s => (
-                  <button key={s} className={o.status === s ? 'on' : ''} disabled={busy || o.status === s} onClick={() => setStatus(s)}>{s === 'READY' ? 'Ready' : s[0] + s.slice(1).toLowerCase()}</button>
+                  <button key={s} className={o.status === s ? 'on' : ''} disabled={busy || o.status === s || isAwaiting(o)} onClick={() => setStatus(s)}>{s === 'READY' ? 'Ready' : s[0] + s.slice(1).toLowerCase()}</button>
                 ))}
               </div>
               <Button tone="primary" size="lg" block icon="check" onClick={() => setMode('handover')}>Hand over to student</Button>
@@ -86,8 +88,11 @@ export function OrderSheet({ id, close, onChanged, isAdmin, payFirst }: { id: nu
           )}
           <h3 className="sub">Student confirmation</h3>
           <SignoffRecord o={o} showEvidence />
-          {isOpen(o) && !isConfirmed(o.dropoff_ack) && o.customer_kind !== 'WALKIN' && (
-            <Button size="sm" icon="lock" onClick={() => setMode('sign')}>Confirm the drop-off with the student’s code</Button>
+          {isOpen(o) && !isConfirmed(o.dropoff_ack) && o.dropoff_ack !== 'OVERRIDE' && o.customer_kind !== 'WALKIN' && (
+            <div className="minor-actions">
+              <Button size="sm" tone={isAwaiting(o) ? 'primary' : undefined} icon="lock" onClick={() => setMode('sign')}>Confirm the drop-off with the student’s code</Button>
+              {isAdmin && isAwaiting(o) && <Button size="sm" onClick={() => setMode('dropoff-override')}>Count as received without the code</Button>}
+            </div>
           )}
           <h3 className="sub">Timeline</h3>
           <ol className="timeline">
@@ -228,20 +233,20 @@ function FixOrder({ o, onDone, onCancel }: { o: Order; onDone: (o: Order) => voi
   );
 }
 
-function ReasonForm({ o, kind, onDone, onCancel }: { o: Order; kind: 'cancel' | 'waive'; onDone: (o: Order) => void; onCancel: () => void }) {
+function ReasonForm({ o, kind, onDone, onCancel }: { o: Order; kind: 'cancel' | 'waive' | 'dropoff-override'; onDone: (o: Order) => void; onCancel: () => void }) {
   const [reason, setReason] = useState('');
   const { busy, error, submit } = useFormAction();
   const save = async (e: FormEvent) => {
     e.preventDefault();
-    const r = await submit(() => api<Order>(`/ops/orders/${o.id}/${kind}`, { body: { reason } }), kind === 'cancel' ? `${o.order_no} cancelled` : 'Payment waived');
+    const r = await submit(() => api<Order>(`/ops/orders/${o.id}/${kind}`, { body: { reason } }), kind === 'cancel' ? `${o.order_no} cancelled` : kind === 'waive' ? 'Payment waived' : `${o.order_no} counted as received`);
     if (r) onDone(r);
   };
   return (
     <form className="stack" onSubmit={save}>
-      <p>{kind === 'cancel' ? `Cancel ${o.order_no}? The student is notified and the order no longer counts toward their monthly limit.` : `Waive ${rupees(o.amount)} for ${o.order_no}? This is recorded in the activity log.`}</p>
+      <p>{kind === 'cancel' ? `Cancel ${o.order_no}? The student is notified and the order no longer counts toward their monthly limit.` : kind === 'waive' ? `Waive ${rupees(o.amount)} for ${o.order_no}? This is recorded in the activity log.` : `Count ${o.order_no} as received without the student’s code? Use this only when the student cannot give the code (for example a lost phone). The reason is kept with the order and in the activity log.`}</p>
       <Field label="Reason"><input value={reason} onChange={e => setReason(e.target.value)} autoFocus /></Field>
       {error && <ErrorNote error={error} />}
-      <Button tone={kind === 'cancel' ? 'danger' : 'primary'} block busy={busy} disabled={reason.trim().length < 3}>{kind === 'cancel' ? 'Cancel order' : 'Waive payment'}</Button>
+      <Button tone={kind === 'cancel' ? 'danger' : 'primary'} block busy={busy} disabled={reason.trim().length < 3}>{kind === 'cancel' ? 'Cancel order' : kind === 'waive' ? 'Waive payment' : 'Count as received'}</Button>
       <Button tone="plain" block type="button" onClick={onCancel}>Back</Button>
     </form>
   );
@@ -337,7 +342,7 @@ export function StudentSheet({ id, close, onChanged, isAdmin, onOpenOrder }: { i
             <ul className="mini-orders">
               {s.orders.map(o => (
                 <li key={o.id}><button onClick={() => onOpenOrder(o.id)}>
-                  <b>{o.order_no}</b><span>{when(o.received_at, 'date')}, {o.clothes_count} clothes, {kg(o.weight_kg)}</span><StatusPill status={o.status} late={o.late} />
+                  <b>{o.order_no}</b><span>{when(o.received_at, 'date')}, {o.clothes_count} clothes, {kg(o.weight_kg)}</span><StatusPill status={o.status} late={o.late} awaiting={isAwaiting(o)} />
                 </button></li>
               ))}
             </ul>

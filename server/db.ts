@@ -459,10 +459,13 @@ export async function migrate() {
     ['orders', 'dropoff_ack_at', 'TEXT'],
     ['orders', 'pickup_ack', 'TEXT'],                              // student confirmed the collection: SIGNATURE | PHONE | OVERRIDE (admin)
     ['orders', 'pickup_ack_at', 'TEXT'],
+    ['orders', 'dropoff_needed', 'INTEGER NOT NULL DEFAULT 0'],        // 1 = the student must confirm this drop-off with the code
   ] as const;
+  const added = new Set<string>();
   for (const [table, column, def] of add) {
     try {
       await db.driver.script(`ALTER TABLE ${table} ADD COLUMN ${column} ${def}`);
+      added.add(`${table}.${column}`);
     } catch (e) {
       if (!/duplicate column|already exists/i.test(String((e as Error).message))) throw e;
     }
@@ -494,6 +497,13 @@ export async function migrate() {
     order_id INTEGER PRIMARY KEY, staff_id INTEGER NOT NULL, returned_count INTEGER NOT NULL, note TEXT, pay_method TEXT, pay_ref TEXT,
     status TEXT NOT NULL DEFAULT 'WAITING', reason TEXT, created_at TEXT NOT NULL, expires_at TEXT NOT NULL)`);
 
+  // Open student orders from before the column: they too count as received only once the student
+  // confirms with the code (or the admin overrides), unless the admin switched drop-off confirmation off.
+  if (added.has('orders.dropoff_needed')) {
+    await db.run(`UPDATE orders SET dropoff_needed = 1 WHERE status IN ('RECEIVED','WASHING','READY')
+      AND student_id IN (SELECT user_id FROM students WHERE kind != 'WALKIN')
+      AND COALESCE((SELECT value FROM settings WHERE key = 'sign_dropoff'), 'true') != 'false'`);
+  }
   // Fill the keys for orders made before they existed. Order nos. were all EJ-<number> then.
   await db.run(`UPDATE orders SET order_key = REPLACE(UPPER(order_no), '-', '') WHERE order_key IS NULL`);
   for (const r of await db.all<{ id: number; tag_no: string }>('SELECT id, tag_no FROM orders WHERE tag_no IS NOT NULL AND tag_key IS NULL')) {

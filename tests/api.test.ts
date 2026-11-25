@@ -1119,6 +1119,43 @@ describe('two-sided register: the student confirms with the code on their phone'
     expect(mine.confirm_requests).toEqual([]);
   });
 
+  it('a drop-off without the code is "not confirmed": not received and stuck until the code or an admin override', async () => {
+    const s = await newStudent();
+    const o = await order(s.id, 2, 6);
+    const id = o.body.id;
+    expect(o.body.dropoff_needed).toBe(1);
+    const lane = async (st: string) => (await staff.get(`/api/ops/orders?status=${st}&limit=500`)).body.rows as { id: number }[];
+    expect(has(await lane('UNCONFIRMED'), id)).toBe(true);
+    expect(has(await lane('RECEIVED'), id)).toBe(false);
+    const before = (await staff.get('/api/ops/summary')).body;
+    expect(before.open.unconfirmed).toBeGreaterThan(0);
+    const moved = await post(staff, '/api/ops/orders/status', { ids: [id], status: 'WASHING' });
+    expect(moved.status).toBe(409);
+    expect(moved.body.error).toContain('not confirmed');
+    // Only the admin may count it without the code.
+    expect((await post(staff, `/api/ops/orders/${id}/dropoff-override`, { reason: 'Lost phone' })).status).toBe(403);
+    // The student gives the code: now it is received and moves on.
+    const p = await popup(s.agent, id, 'DROPOFF');
+    const ok = await post(staff, `/api/ops/orders/${id}/confirm`, { kind: 'DROPOFF', code: await codeOf(p!.key, id, 'DROPOFF') });
+    expect(ok.status, ok.body.error).toBe(200);
+    expect(has(await lane('UNCONFIRMED'), id)).toBe(false);
+    expect(has(await lane('RECEIVED'), id)).toBe(true);
+    const after = (await staff.get('/api/ops/summary')).body;
+    expect(after.open.unconfirmed).toBe(before.open.unconfirmed - 1);
+    expect(after.today.received).toBe(before.today.received + 1);
+    expect((await post(staff, '/api/ops/orders/status', { ids: [id], status: 'WASHING' })).status).toBe(200);
+    // Lost phone: the admin counts another drop-off as received, with a reason on record.
+    const t = await newStudent();
+    const o2 = await order(t.id, 1, 3);
+    const ov = await post(admin, `/api/ops/orders/${o2.body.id}/dropoff-override`, { reason: 'Student lost their phone' });
+    expect(ov.status, ov.body.error).toBe(200);
+    expect(ov.body.dropoff_ack).toBe('OVERRIDE');
+    expect(ov.body.signoffs[0]).toMatchObject({ kind: 'DROPOFF', method: 'OVERRIDE', reason: 'Student lost their phone' });
+    expect(has(await lane('RECEIVED'), o2.body.id)).toBe(true);
+    expect(await popup(t.agent, o2.body.id, 'DROPOFF')).toBeUndefined();
+    expect((await post(admin, `/api/ops/orders/${o2.body.id}/dropoff-override`, { reason: 'again' })).status).toBe(409);
+  });
+
   it('five wrong codes cancel the request; a code from another order does not work', async () => {
     const s = await newStudent();
     const a = await order(s.id, 2, 4);

@@ -10,7 +10,7 @@ import { checkStudentEmail } from '../otp.js';
 import { COMPLAINT_CATEGORIES } from './student.js';
 import { checkRequestCode, getRequest, isConfirmed, openRequest, orderForSign, recordSignoff, statementFor, type Origin, type Proof } from '../signoff.js';
 import { announcementsFor, complaintDetail, findOrderByCode, listComplaints, listOrders, listStudents, orderDetail, studentProfile } from '../queries.js';
-import { codeKey, dayKey, handle, HttpError, MAX_ID, nowIso, parse, startOfLocalDayIso, zDate, zId, zText } from '../util.js';
+import { awaitingSql, codeKey, dayKey, handle, HttpError, MAX_ID, nowIso, parse, startOfLocalDayIso, zDate, zId, zText } from '../util.js';
 import { normaliseLogin, zIdCard, zMobile, zRoom } from './public.js';
 
 export const router = Router();
@@ -36,17 +36,17 @@ router.get('/ops/summary', handle(async (_req, res) => {
   const [
     received, kg, clothes, delivered, collected,
     openReceived, washing, ready, late,
-    pendingStudents, openComplaints, dues, settings, announcements, roomChanges, services,
+    pendingStudents, openComplaints, dues, settings, announcements, roomChanges, services, unconfirmed,
   ] = await Promise.all([
-    one(`SELECT COUNT(*) AS c FROM orders WHERE day_key = ? AND status != 'CANCELLED'`, today),
-    one(`SELECT COALESCE(ROUND(CAST(SUM(weight_kg) AS NUMERIC), 1), 0) AS c FROM orders WHERE day_key = ? AND status != 'CANCELLED'`, today),
-    one(`SELECT COALESCE(SUM(clothes_count),0) AS c FROM orders WHERE day_key = ? AND status != 'CANCELLED'`, today),
+    one(`SELECT COUNT(*) AS c FROM orders WHERE day_key = ? AND status != 'CANCELLED' AND NOT ${awaitingSql()}`, today),
+    one(`SELECT COALESCE(ROUND(CAST(SUM(weight_kg) AS NUMERIC), 1), 0) AS c FROM orders WHERE day_key = ? AND status != 'CANCELLED' AND NOT ${awaitingSql()}`, today),
+    one(`SELECT COALESCE(SUM(clothes_count),0) AS c FROM orders WHERE day_key = ? AND status != 'CANCELLED' AND NOT ${awaitingSql()}`, today),
     one(`SELECT COUNT(*) AS c FROM orders WHERE status = 'DELIVERED' AND delivered_at >= ?`, startOfLocalDayIso()),
     one(`SELECT COALESCE(SUM(amount),0) AS c FROM orders WHERE payment_status = 'PAID' AND paid_at >= ?`, startOfLocalDayIso()),
-    one(`SELECT COUNT(*) AS c FROM orders WHERE status = 'RECEIVED'`),
-    one(`SELECT COUNT(*) AS c FROM orders WHERE status = 'WASHING'`),
-    one(`SELECT COUNT(*) AS c FROM orders WHERE status = 'READY'`),
-    one(`SELECT COUNT(*) AS c FROM orders WHERE status IN ('RECEIVED','WASHING') AND expected_at < ?`, nowIso()),
+    one(`SELECT COUNT(*) AS c FROM orders WHERE status = 'RECEIVED' AND NOT ${awaitingSql()}`),
+    one(`SELECT COUNT(*) AS c FROM orders WHERE status = 'WASHING' AND NOT ${awaitingSql()}`),
+    one(`SELECT COUNT(*) AS c FROM orders WHERE status = 'READY' AND NOT ${awaitingSql()}`),
+    one(`SELECT COUNT(*) AS c FROM orders WHERE status IN ('RECEIVED','WASHING') AND expected_at < ? AND NOT ${awaitingSql()}`, nowIso()),
     one(`SELECT COUNT(*) AS c FROM students WHERE status = 'PENDING'`),
     one(`SELECT COUNT(*) AS c FROM complaints WHERE status != 'RESOLVED'`),
     one(`SELECT COALESCE(SUM(amount),0) AS c FROM orders WHERE payment_status = 'DUE' AND status != 'CANCELLED'`),
@@ -54,10 +54,11 @@ router.get('/ops/summary', handle(async (_req, res) => {
     announcementsFor(null),
     one(`SELECT COUNT(*) AS c FROM students WHERE pending_hostel_id IS NOT NULL`),
     listServices(),
+    one(`SELECT COUNT(*) AS c FROM orders WHERE ${awaitingSql()}`),
   ]);
   res.json({
     today: { received, kg, clothes, delivered, collected },
-    open: { received: openReceived, washing, ready, late },
+    open: { received: openReceived, washing, ready, late, unconfirmed },
     pending_students: pendingStudents,
     room_changes: roomChanges,
     services,
@@ -345,6 +346,25 @@ router.post('/ops/orders/:id/deliver', handle(async (req, res) => {
 }));
 
 /** Does the student have to confirm drop-off / pickup? (admin's choice; staff screens read it) */
+/**
+ * The admin alone may count a drop-off as received without the student's code (for example a lost phone),
+ * with a written reason. It is recorded like any confirmation, marked as an override.
+ */
+router.post('/ops/orders/:id/dropoff-override', requireRole('ADMIN'), handle(async (req, res) => {
+  const id = parse(zId, req.params.id);
+  const b = parse(z.object({ reason: zText(3, 200) }), req.body);
+  await db.tx(async () => {
+    await db.lockRow('orders', id);
+    const o = await orderForSign(id);
+    if (!['RECEIVED', 'WASHING', 'READY'].includes(o.status)) throw new HttpError(409, `${o.order_no} is ${o.status.toLowerCase()}.`);
+    if (isConfirmed(o.dropoff_ack) || o.dropoff_ack === 'OVERRIDE') throw new HttpError(409, `The drop-off of ${o.order_no} is already confirmed.`);
+    await db.run(`DELETE FROM confirm_requests WHERE order_id = ? AND kind = 'DROPOFF'`, [id]);
+    const at = nowIso();
+    await recordSignoff({ o, kind: 'DROPOFF', proof: { method: 'OVERRIDE', reason: b.reason }, staffId: actor(req).id, at, statement: statementFor('DROPOFF', o, at), origin: origin(req) });
+  });
+  res.json(await orderDetail(id));
+}));
+
 router.get('/ops/sign-rules', handle(async (_req, res) => { const s = await getSettings(); res.json({ sign_dropoff: s.sign_dropoff, sign_pickup: s.sign_pickup }); }));
 
 /**

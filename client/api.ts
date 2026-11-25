@@ -14,7 +14,7 @@ export type Order = {
   service_id?: number | null; service_name?: string | null; unit?: 'KG' | 'PIECE' | null; rate?: number | null; charge_note?: string | null; customer_kind?: 'HOSTELER' | 'WALKIN';
   tag_no?: string | null; student_photo?: string | null;
   // Two-sided register: what the student confirmed (SIGNATURE | PHONE | OVERRIDE | DISPUTED; null = not yet)
-  dropoff_ack?: string | null; dropoff_ack_at?: string | null; pickup_ack?: string | null; pickup_ack_at?: string | null;
+  dropoff_ack?: string | null; dropoff_ack_at?: string | null; dropoff_needed?: number; pickup_ack?: string | null; pickup_ack_at?: string | null;
   signoffs?: Signoff[];
   confirm_requests?: ConfirmRequest[];
 };

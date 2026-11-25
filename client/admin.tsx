@@ -4,7 +4,7 @@ import { ChangePassword } from './auth';
 import { ago, kg, planPeriod, plural, rupees, shiftDay, toast, todayKey, useAction, useFormAction, useLoad, useRoute, useScrollTop, when } from './lib';
 import { ComplaintSheet, OrderSheet, SemesterChips, StudentSheet } from './ops';
 import { GridFrame, useGrid } from './grid';
-import { Avatar, Brand, Button, Empty, ErrorNote, Field, Icon, IconButton, IconName, invalidatePaymentInfo, Loading, PayPill, Segmented, Sheet, StatusPill, Switch } from './ui';
+import { Avatar, Brand, Button, Empty, ErrorNote, Field, Icon, IconButton, IconName, invalidatePaymentInfo, Loading, PayPill, Segmented, Sheet, isAwaiting, StatusPill, Switch } from './ui';
 
 type Overview = {
   today: { orders: number; kg: number; delivered: number };
@@ -142,7 +142,7 @@ function OverviewPage(_: { open: Openers }) {
     { n: o.open.uncollected, text: `${plural(o.open.uncollected, 'order')} ready for over 3 days, not collected`, to: 'register?READY', icon: 'shirt' },
     { n: o.open.complaints, text: `${plural(o.open.complaints, 'complaint')} open`, to: 'complaints', icon: 'help', tone: 'bad' },
     { n: o.open.disputed ?? 0, text: `${plural(o.open.disputed ?? 0, 'drop-off')} the student says is wrong`, to: 'register?DISPUTED', icon: 'alert', tone: 'bad' },
-    { n: o.open.unsigned ?? 0, text: `${plural(o.open.unsigned ?? 0, 'drop-off')} not confirmed by the student for over 12 hours`, to: 'register?UNSIGNED', icon: 'edit' },
+    { n: o.open.unsigned ?? 0, text: `${plural(o.open.unsigned ?? 0, 'drop-off')} not confirmed by the student for over 12 hours`, to: 'register?UNCONFIRMED', icon: 'edit' },
     { n: o.open.dues, text: `${rupees(o.open.dues)} still to be collected`, to: 'register?DUE', icon: 'rupee' },
   ];
   const attention = items.filter(a => a.n > 0);
@@ -296,7 +296,7 @@ export function actionText(a: string) {
   return ({
     ORDER_CREATED: 'took order', ORDER_STATUS: 'updated', ORDER_DELIVERED: 'handed over', ORDER_CANCELLED: 'cancelled', ORDER_CORRECTED: 'corrected',
     DROPOFF_SIGNED: 'drop-off confirmed by student:', DROPOFF_DISPUTED: 'student disputes drop-off of', PICKUP_SIGNED: 'collection confirmed by student:',
-    PICKUP_DISPUTED: 'student disputes collection of', PICKUP_OVERRIDE: 'handed over without the student’s confirmation:',
+    PICKUP_DISPUTED: 'student disputes collection of', PICKUP_OVERRIDE: 'handed over without the student’s confirmation:', DROPOFF_OVERRIDE: 'counted as received without the student’s code:',
     PAYMENT_RECORDED: 'recorded payment for', PAYMENT_WAIVED: 'waived payment for', STUDENT_SIGNUP: 'registered as', STUDENT_APPROVED: 'approved', STUDENT_REJECTED: 'rejected',
     STUDENT_EDITED: 'edited student', STUDENT_SUSPENDED: 'put on hold', STUDENT_REACTIVATED: 'reactivated', STUDENT_RESUBMITTED: 'resubmitted details for', PROFILE_UPDATED: 'updated profile',
     PASSWORD_RESET: 'reset password for', PASSWORD_CHANGED: 'changed password', SETTINGS_CHANGED: 'changed rules', HOSTEL_ADDED: 'added hostel', HOSTEL_UPDATED: 'updated hostel',
@@ -336,7 +336,7 @@ function Register({ open }: { open: Openers }) {
         <label>To <input type="date" value={f.to} onChange={set('to')} /></label>
         <select value={f.status} onChange={set('status')} aria-label="Status">
           <option value="">Any status</option><option value="OPEN">In progress</option><option value="LATE">Late</option>
-          <option value="UNSIGNED">Drop-off not confirmed</option><option value="DISPUTED">Disputed by student</option>
+          <option value="UNCONFIRMED">Not confirmed by student</option><option value="DISPUTED">Disputed by student</option>
           <option value="RECEIVED">Received</option><option value="WASHING">Washing</option><option value="READY">Ready</option><option value="DELIVERED">Handed over</option><option value="CANCELLED">Cancelled</option>
         </select>
         <select value={f.hostel} onChange={set('hostel')} aria-label="Hostel">
@@ -364,7 +364,7 @@ function Register({ open }: { open: Openers }) {
                     <td>{o.service_name || 'Wash & fold'}{o.charge_note ? <small>{o.charge_note}</small> : null}</td>
                     <td className="num">{o.clothes_count}{o.returned_count != null && o.returned_count !== o.clothes_count && <small className="bad">{o.returned_count} back</small>}</td>
                     <td className="num">{Number(o.weight_kg).toFixed(1)}</td>
-                    <td><StatusPill status={o.status} late={o.late} /></td>
+                    <td><StatusPill status={o.status} late={o.late} awaiting={isAwaiting(o)} /></td>
                     <td>{o.amount > 0 ? <PayPill o={o} /> : <span className="muted">–</span>}</td>
                     <td>{o.delivered_at ? <>{when(o.delivered_at)}<small>{o.delivered_by_name}</small></> : <span className="muted">–</span>}</td>
                     <td><AckMarks o={o} /></td>

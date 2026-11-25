@@ -21,7 +21,7 @@ export const COMPLAINT_CATEGORIES = ['Missing clothes', 'Damaged clothes', 'Wron
 /** Student-facing order fields: own orders only, includes the QR token for the digital slip. */
 const MY_ORDER_COLS = `id, order_no, weight_kg, clothes_count, service, note, status, within_kg, extra_kg, amount, payment_status, paid_method, paid_at,
   qr_token, received_at, expected_at, ready_at, delivered_at, returned_count, cancel_reason, hostel_name, room_no, service_name, unit, rate, charge_note, tag_no,
-  dropoff_ack, dropoff_ack_at, pickup_ack, pickup_ack_at`;
+  dropoff_ack, dropoff_ack_at, pickup_ack, pickup_ack_at, dropoff_needed`;
 
 /** Never send the order's QR token to the phone: send the derived key that signs the rotating QR instead. */
 const withSlipKey = <T extends Record<string, unknown>>(o: T) => {

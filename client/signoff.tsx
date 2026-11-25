@@ -78,7 +78,8 @@ const HOW: Record<string, string> = {
   CODE: 'Confirmed with the student’s code', COUNTER: 'Walk-in, confirmed at the counter', SIGNATURE: 'Signed at the counter',
   PHONE: 'Confirmed on their phone', OVERRIDE: 'Handed over by the admin without the code', DISPUTED: 'Disputed by the student',
 };
-export const ackLabel = (ack?: string | null) => (ack ? HOW[ack] ?? ack : 'Not confirmed yet');
+export const ackLabel = (ack?: string | null, kind?: 'DROPOFF' | 'PICKUP') =>
+  (ack === 'OVERRIDE' && kind === 'DROPOFF' ? 'Counted as received by the admin without the code' : ack ? HOW[ack] ?? ack : 'Not confirmed yet');
 
 /* ---------------------------------------------------- counter: type the code */
 
@@ -180,7 +181,7 @@ export function SignoffRecord({ o, showEvidence }: { o: Order; showEvidence?: bo
         <div className="signoff-head">
           <Icon name={tone === 'ok' ? 'check' : tone === 'wait' ? 'clock' : 'alert'} size={18} />
           <b>{kind === 'DROPOFF' ? 'Drop-off' : 'Collection'}</b>
-          <span>{ackLabel(ack)}{at ? `, ${when(at, 'short')}` : ''}</span>
+          <span>{ackLabel(ack, kind)}{at ? `, ${when(at, 'short')}` : ''}</span>
         </div>
         {s && <p className="signoff-statement">“{s.statement}”</p>}
         {s?.reason && <p className={`signoff-reason${s.status === 'DISPUTED' ? ' bad' : ''}`}>{s.status === 'DISPUTED' ? 'Student says: ' : 'Reason: '}{s.reason}</p>}

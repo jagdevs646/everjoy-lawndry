@@ -121,13 +121,14 @@ export async function recordSignoff(p: {
   if (p.kind === 'DROPOFF') await db.run('UPDATE orders SET dropoff_ack = ?, dropoff_ack_at = ?, updated_at = ? WHERE id = ?', [ack, p.at, p.at, p.o.id]);
   else await db.run('UPDATE orders SET pickup_ack = ?, pickup_ack_at = ?, updated_at = ? WHERE id = ?', [ack, p.at, p.at, p.o.id]);
   const how = p.proof.method === 'CODE' ? 'confirmed with the code on their phone' : p.proof.method === 'COUNTER' ? 'walk-in customer, confirmed at the counter'
-    : p.proof.method === 'SIGNATURE' ? 'signed at the counter' : p.proof.method === 'PHONE' ? 'confirmed on their phone' : `handed over without the student's confirmation: ${reason}`;
+    : p.proof.method === 'SIGNATURE' ? 'signed at the counter' : p.proof.method === 'PHONE' ? 'confirmed on their phone'
+    : p.kind === 'DROPOFF' ? `drop-off counted as received by the admin without the student's code: ${reason}` : `handed over without the student's confirmation: ${reason}`;
   const what = p.kind === 'DROPOFF' ? 'drop-off' : 'collection';
   await db.run('INSERT INTO order_events (order_id, type, note, by_user, at) VALUES (?,?,?,?,?)', [
-    p.o.id, disputed ? `${p.kind}_DISPUTED` : `${p.kind}_SIGNED`, disputed ? `Student disputes the ${what}: ${reason}` : `Student ${how}`,
+    p.o.id, disputed ? `${p.kind}_DISPUTED` : `${p.kind}_SIGNED`, disputed ? `Student disputes the ${what}: ${reason}` : p.proof.method === 'OVERRIDE' ? `Admin: ${how}` : `Student ${how}`,
     disputed ? p.o.student_id : p.staffId, p.at,
   ]);
-  await logActivity(disputed ? p.o.student_id : p.staffId, disputed ? `${p.kind}_DISPUTED` : p.proof.method === 'OVERRIDE' ? 'PICKUP_OVERRIDE' : `${p.kind}_SIGNED`,
+  await logActivity(disputed ? p.o.student_id : p.staffId, disputed ? `${p.kind}_DISPUTED` : p.proof.method === 'OVERRIDE' ? `${p.kind}_OVERRIDE` : `${p.kind}_SIGNED`,
     'order', p.o.order_no, disputed ? String(reason) : p.proof.method === 'OVERRIDE' ? String(reason) : how);
   return id;
 }

@@ -4,11 +4,11 @@ import { ChangePassword } from './auth';
 import { go, kg, plural, requestId, rupees, toast, useAction, useFormAction, useLoad, useRoute, useScrollTop, when } from './lib';
 import { CardInput, ComplaintsBoard, CounterStudent, HandOver, OpsSettings, OrderSheet, serviceLine, StudentFacts, StudentLine, StudentSheet } from './ops';
 import { CodeEntry, useSignRules } from './signoff';
-import { Avatar, Brand, Button, Empty, ErrorNote, Field, Icon, IconName, Loading, PayPill, Scanner, Segmented, Sheet, StatusPill, Stepper } from './ui';
+import { Avatar, Brand, Button, Empty, ErrorNote, Field, Icon, IconName, Loading, PayPill, Scanner, Segmented, Sheet, isAwaiting, StatusPill, Stepper } from './ui';
 
 type Summary = {
   today: { received: number; kg: number; clothes: number; delivered: number; collected: number };
-  open: { received: number; washing: number; ready: number; late: number };
+  open: { received: number; washing: number; ready: number; late: number; unconfirmed: number };
   pending_students: number; room_changes: number; services: Service[]; open_complaints: number; dues: number; settings: OpsSettings; announcements: Announcement[];
 };
 
@@ -492,7 +492,7 @@ function OrderRow({ o, onOpen, selectable, selected, onSelect }: { o: Order; onO
         <span className="or-who"><b>{o.student_name}</b><small>{o.hostel_name}, room {o.room_no}</small></span>
         <span className="or-load">{o.clothes_count}<small>pcs</small></span>
         <span className="or-load">{Number(o.weight_kg).toFixed(1)}<small>kg</small></span>
-        <span className="or-state"><StatusPill status={o.status} late={o.late} />{o.payment_status === 'DUE' && <PayPill o={o} />}<small>{o.status === 'READY' ? `since ${when(o.ready_at, 'time')}` : `due ${when(o.expected_at, 'short')}`}</small></span>
+        <span className="or-state"><StatusPill status={o.status} late={o.late} awaiting={isAwaiting(o)} />{o.payment_status === 'DUE' && <PayPill o={o} />}<small>{o.status === 'READY' ? `since ${when(o.ready_at, 'time')}` : `due ${when(o.expected_at, 'short')}`}</small></span>
       </button>
     </li>
   );
@@ -501,6 +501,7 @@ function OrderRow({ o, onOpen, selectable, selected, onSelect }: { o: Order; onO
 /* ----------------------------------------------------------------- orders */
 
 const LANES = [
+  { key: 'UNCONFIRMED', label: 'Not confirmed' },
   { key: 'RECEIVED', label: 'Received' },
   { key: 'WASHING', label: 'Washing' },
   { key: 'READY', label: 'Ready' },
@@ -515,7 +516,7 @@ function Orders({ summary, onChanged, openOrder }: { summary?: Summary; onChange
   const list = useLoad(() => api<{ rows: Order[]; total: number }>(`/ops/orders?status=${lane}&limit=300${q ? `&q=${encodeURIComponent(q)}` : ''}`), [lane, q], { every: 30_000 });
   const { busy, run } = useAction();
   useEffect(() => setSel(new Set()), [lane, q]);
-  const counts: Record<Lane, number | undefined> = { RECEIVED: summary?.open.received, WASHING: summary?.open.washing, READY: summary?.open.ready, LATE: summary?.open.late };
+  const counts: Record<Lane, number | undefined> = { UNCONFIRMED: summary?.open.unconfirmed, RECEIVED: summary?.open.received, WASHING: summary?.open.washing, READY: summary?.open.ready, LATE: summary?.open.late };
   const rows = list.data?.rows ?? [];
   const move = async (status: 'WASHING' | 'READY' | 'RECEIVED') => {
     const ids = [...sel];
@@ -523,13 +524,14 @@ function Orders({ summary, onChanged, openOrder }: { summary?: Summary; onChange
     if (r) { toast(`${plural(r.changed, 'order')} moved to ${status === 'READY' ? 'Ready' : status.toLowerCase()}${status === 'READY' ? '. Students were notified.' : ''}`); setSel(new Set()); void list.reload(); onChanged(); }
   };
   const allOn = rows.length > 0 && rows.every(r => sel.has(r.id));
-  const nextFor: Record<Lane, ('WASHING' | 'READY' | 'RECEIVED')[]> = { RECEIVED: ['WASHING', 'READY'], WASHING: ['READY'], READY: ['WASHING'], LATE: ['WASHING', 'READY'] };
+  // Not confirmed: nothing moves until the student gives the code.
+  const nextFor: Record<Lane, ('WASHING' | 'READY' | 'RECEIVED')[]> = { UNCONFIRMED: [], RECEIVED: ['WASHING', 'READY'], WASHING: ['READY'], READY: ['WASHING'], LATE: ['WASHING', 'READY'] };
 
   return (
     <div className="sf-page orders">
       <h1>Orders</h1>
       <div className="lanes" role="tablist" aria-label="Order status">
-        {LANES.map(l => (
+        {LANES.filter(l => l.key !== 'UNCONFIRMED' || summary?.settings.sign_dropoff !== false || !!summary?.open.unconfirmed).map(l => (
           <button key={l.key} role="tab" aria-selected={lane === l.key} className={`${lane === l.key ? 'on' : ''} lane-${l.key.toLowerCase()}`} onClick={() => setLane(l.key)}>
             <b>{counts[l.key] ?? '–'}</b>{l.label}
           </button>
@@ -537,11 +539,12 @@ function Orders({ summary, onChanged, openOrder }: { summary?: Summary; onChange
       </div>
       <div className="orders-tools">
         <input className="filter-input" value={q} onChange={e => setQ(e.target.value)} placeholder="Search order no., name, room or ID" aria-label="Search orders" />
-        {rows.length > 0 && <label className="select-all"><input type="checkbox" checked={allOn} onChange={e => setSel(e.target.checked ? new Set(rows.map(r => r.id)) : new Set())} />Select all</label>}
+        {rows.length > 0 && lane !== 'UNCONFIRMED' && <label className="select-all"><input type="checkbox" checked={allOn} onChange={e => setSel(e.target.checked ? new Set(rows.map(r => r.id)) : new Set())} />Select all</label>}
       </div>
-      {!list.data ? (list.error ? <ErrorNote error={list.error} retry={list.reload} /> : <Loading />) : !rows.length ? <Empty icon="washer" title={lane === 'LATE' ? 'Nothing is late' : `No orders in ${lane.toLowerCase()}`} /> : (
+      {lane === 'UNCONFIRMED' && <p className="lane-note"><Icon name="lock" size={18} />Clothes taken in, but the student has not given the code from their phone yet. They don’t count as received and can’t move on until then. Open one and ask for the code.</p>}
+      {!list.data ? (list.error ? <ErrorNote error={list.error} retry={list.reload} /> : <Loading />) : !rows.length ? <Empty icon={lane === 'UNCONFIRMED' ? 'check' : 'washer'} title={lane === 'LATE' ? 'Nothing is late' : lane === 'UNCONFIRMED' ? 'Every drop-off is confirmed' : `No orders in ${lane.toLowerCase()}`} /> : (
         <ul className="order-rows">
-          {rows.map(o => <OrderRow key={o.id} o={o} onOpen={() => openOrder(o.id)} selectable selected={sel.has(o.id)} onSelect={on => { const n = new Set(sel); if (on) n.add(o.id); else n.delete(o.id); setSel(n); }} />)}
+          {rows.map(o => <OrderRow key={o.id} o={o} onOpen={() => openOrder(o.id)} selectable={lane !== 'UNCONFIRMED'} selected={sel.has(o.id)} onSelect={on => { const n = new Set(sel); if (on) n.add(o.id); else n.delete(o.id); setSel(n); }} />)}
         </ul>
       )}
       {sel.size > 0 && (

@@ -101,6 +101,7 @@ img { max-width: 100%; }
 /* --------------------------------------------------------------- pills */
 .pill { display: inline-flex; align-items: center; gap: 4px; padding: 3px 10px; border-radius: 999px; font-size: .78rem; font-weight: 700; white-space: nowrap; background: var(--surface-2); color: var(--ink-2); }
 .st-received { background: var(--st-received-bg); color: var(--st-received-fg); }
+.st-unconfirmed { background: var(--warn-soft); color: var(--warn); box-shadow: inset 0 0 0 1px currentColor; }
 .st-washing { background: var(--info-soft); color: var(--info); }
 .st-ready { background: var(--good-soft); color: var(--good); }
 .st-delivered { background: var(--surface-2); color: var(--muted); }
