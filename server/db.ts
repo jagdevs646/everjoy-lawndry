@@ -273,7 +273,7 @@ class Db {
 export const db = new Db();
 
 /** Every table, in an order that respects foreign keys (used for JSON backups). */
-export const TABLES = ['users', 'hostels', 'students', 'settings', 'services', 'counters', 'orders', 'order_events', 'notifications', 'announcements', 'complaints', 'complaint_updates', 'files', 'activity'] as const;
+export const TABLES = ['users', 'hostels', 'students', 'settings', 'services', 'counters', 'orders', 'order_events', 'order_signoffs', 'notifications', 'announcements', 'complaints', 'complaint_updates', 'files', 'activity'] as const;
 
 export async function migrate() {
   const { id, blob } = db.types;
@@ -455,6 +455,10 @@ export async function migrate() {
     ['students', 'left_at', 'TEXT'],                               // removed from the hostel list (left); history kept
     ['orders', 'order_key', 'TEXT'],                               // codeKey(order_no): an order no. is never given twice, however it is written
     ['orders', 'tag_key', 'TEXT'],                                 // codeKey(tag_no): one card on one open basket, however it is written
+    ['orders', 'dropoff_ack', 'TEXT'],                             // student confirmed the drop-off: SIGNATURE | PHONE | DISPUTED (NULL = not yet)
+    ['orders', 'dropoff_ack_at', 'TEXT'],
+    ['orders', 'pickup_ack', 'TEXT'],                              // student confirmed the collection: SIGNATURE | PHONE | OVERRIDE (admin)
+    ['orders', 'pickup_ack_at', 'TEXT'],
   ] as const;
   for (const [table, column, def] of add) {
     try {
@@ -470,6 +474,20 @@ export async function migrate() {
     attempts INTEGER NOT NULL DEFAULT 0, sends INTEGER NOT NULL DEFAULT 1, last_sent_at TEXT NOT NULL, expires_at TEXT NOT NULL, created_at TEXT NOT NULL)`);
   // One basket card can be on only one order that hasn't been collected yet (both SQLite and Postgres support this).
   await db.driver.script(`CREATE UNIQUE INDEX IF NOT EXISTS idx_orders_open_tag ON orders (tag_no) WHERE tag_no IS NOT NULL AND status IN ('RECEIVED','WASHING','READY')`);
+  // Two-sided register: every confirmation (or dispute) by the student, with the sentence they agreed to,
+  // the signature image (files table), who was at the counter and a SHA-256 fingerprint. Never updated
+  // except superseded_at (a correction asks the student to confirm again).
+  await db.driver.script(`CREATE TABLE IF NOT EXISTS order_signoffs (
+    id ${id}, order_id INTEGER NOT NULL REFERENCES orders(id), kind TEXT NOT NULL, method TEXT NOT NULL, status TEXT NOT NULL,
+    statement TEXT NOT NULL, signature TEXT, signature_sha TEXT, student_id INTEGER NOT NULL, staff_id INTEGER, reason TEXT,
+    clothes INTEGER, returned_count INTEGER, ip TEXT, user_agent TEXT, proof_hash TEXT NOT NULL, created_at TEXT NOT NULL, superseded_at TEXT)`);
+  await db.driver.script('CREATE INDEX IF NOT EXISTS idx_signoffs_order ON order_signoffs (order_id)');
+  await db.driver.script('CREATE INDEX IF NOT EXISTS idx_signoffs_signature ON order_signoffs (signature)');
+  // Hand-over waiting for the student to confirm on their phone (one per order, expires after a few minutes).
+  await db.driver.script(`CREATE TABLE IF NOT EXISTS handover_requests (
+    order_id INTEGER PRIMARY KEY, staff_id INTEGER NOT NULL, returned_count INTEGER NOT NULL, note TEXT, pay_method TEXT, pay_ref TEXT,
+    status TEXT NOT NULL DEFAULT 'WAITING', reason TEXT, created_at TEXT NOT NULL, expires_at TEXT NOT NULL)`);
+
   // Fill the keys for orders made before they existed. Order nos. were all EJ-<number> then.
   await db.run(`UPDATE orders SET order_key = REPLACE(UPPER(order_no), '-', '') WHERE order_key IS NULL`);
   for (const r of await db.all<{ id: number; tag_no: string }>('SELECT id, tag_no FROM orders WHERE tag_no IS NOT NULL AND tag_key IS NULL')) {

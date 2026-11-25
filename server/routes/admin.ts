@@ -73,6 +73,9 @@ router.get('/admin/overview', handle(async (_req, res) => {
       dues: one(`SELECT COALESCE(SUM(amount), 0) AS c FROM orders WHERE payment_status = 'DUE' AND status != 'CANCELLED'`),
       pending_students: one(`SELECT COUNT(*) AS c FROM students WHERE status = 'PENDING'`),
       complaints: one(`SELECT COUNT(*) AS c FROM complaints WHERE status != 'RESOLVED'`),
+      // Drop-offs the student has not confirmed for over 12 hours, and ones they dispute.
+      unsigned: one(`SELECT COUNT(*) AS c FROM orders WHERE status IN ('RECEIVED','WASHING','READY') AND dropoff_ack IS NULL AND received_at < ?`, new Date(Date.now() - 12 * 3600_000).toISOString()),
+      disputed: one(`SELECT COUNT(*) AS c FROM orders WHERE status IN ('RECEIVED','WASHING','READY') AND dropoff_ack = 'DISPUTED'`),
     }),
     totals: together({
       students: one(`SELECT COUNT(*) AS c FROM students WHERE status = 'ACTIVE'`),
@@ -273,6 +276,13 @@ router.get('/admin/report', handle(async (req, res) => {
   }));
 }));
 
+const ackText = (ack: unknown, at: unknown) => {
+  if (!ack) return '';
+  const when = at ? new Date(String(at)).toLocaleString('en-IN', { timeZone: process.env.APP_TZ || 'Asia/Kolkata', dateStyle: 'medium', timeStyle: 'short' }) : '';
+  const how = ({ SIGNATURE: 'Signed at counter', PHONE: 'Confirmed on phone', OVERRIDE: 'Admin override', DISPUTED: 'DISPUTED' } as Record<string, string>)[String(ack)] ?? String(ack);
+  return when ? `${how}, ${when}` : how;
+};
+
 /** Excel export that mirrors the old paper register, one row per order. */
 router.get('/admin/export', handle(async (req, res) => {
   const r = parse(range, req.query);
@@ -298,6 +308,8 @@ router.get('/admin/export', handle(async (req, res) => {
     'Delivered At': t(o.delivered_at),
     'Clothes Returned': o.returned_count ?? '',
     'Delivered By': o.delivered_by_name ?? '',
+    'Student Confirmed Drop-off': ackText(o.dropoff_ack, o.dropoff_ack_at),
+    'Student Confirmed Collection': ackText(o.pickup_ack, o.pickup_ack_at),
     'Extra kg': o.extra_kg,
     'Amount (₹)': o.amount,
     'Payment': o.payment_status,

@@ -1,7 +1,8 @@
 /* Building blocks shared by the staff counter and the admin office. */
-import { FormEvent, useEffect, useState } from 'react';
+import { FormEvent, useEffect, useRef, useState } from 'react';
 import { api, Complaint, Hostel, Order, Plan, Service, Student, Usage } from './api';
 import { eventLabel } from './student';
+import { DropoffSign, pickupSentence, SignaturePad, SignoffRecord, useSignRules } from './signoff';
 import { ago, kg, planPeriod, plural, rupees, semesterOptions, shrinkPhoto, toast, useAction, useFormAction, useLoad, when } from './lib';
 import { Avatar, Button, Empty, ErrorNote, Field, Icon, Loading, PayPill, Photo, Segmented, Sheet, StatusPill, Stepper, UpiQr } from './ui';
 
@@ -20,7 +21,7 @@ const isOpen = (o: Order) => ['RECEIVED', 'WASHING', 'READY'].includes(o.status)
 
 export function OrderSheet({ id, close, onChanged, isAdmin, payFirst }: { id: number; close: () => void; onChanged?: () => void; isAdmin: boolean; payFirst: boolean }) {
   const d = useLoad(() => api<Order>(`/ops/orders/${id}`), [id]);
-  const [mode, setMode] = useState<'view' | 'handover' | 'fix' | 'cancel' | 'pay' | 'waive' | 'card'>('view');
+  const [mode, setMode] = useState<'view' | 'handover' | 'fix' | 'cancel' | 'pay' | 'waive' | 'card' | 'sign'>('view');
   const { busy, run } = useAction();
   const changed = (o: Order) => { d.set(o); setMode('view'); onChanged?.(); };
   const setStatus = async (status: string) => {
@@ -30,7 +31,12 @@ export function OrderSheet({ id, close, onChanged, isAdmin, payFirst }: { id: nu
   return (
     <Sheet title={o ? o.order_no : 'Order'} onClose={close} size="md" className="order-sheet">
       {!o ? (d.error ? <ErrorNote error={d.error} retry={d.reload} /> : <Loading />) : mode === 'handover' ? (
-        <HandOver o={o} payFirst={payFirst} onDone={changed} onCancel={() => setMode('view')} />
+        <HandOver o={o} payFirst={payFirst} isAdmin={isAdmin} onDone={changed} onCancel={() => setMode('view')} />
+      ) : mode === 'sign' ? (
+        <div className="stack">
+          <DropoffSign o={o} onSigned={r => { d.set(r); onChanged?.(); }} />
+          <Button tone="plain" block onClick={() => { setMode('view'); void d.reload(); }}>Back</Button>
+        </div>
       ) : mode === 'card' ? (
         <ChangeCard o={o} onDone={changed} onCancel={() => setMode('view')} />
       ) : mode === 'fix' ? (
@@ -57,6 +63,9 @@ export function OrderSheet({ id, close, onChanged, isAdmin, payFirst }: { id: nu
             <div><dt>Service</dt><dd>{serviceLine(o)}{o.customer_kind === 'WALKIN' ? <small>Walk-in customer</small> : null}</dd></div>
             {o.amount > 0 && <div><dt>Amount</dt><dd>{rupees(o.amount)}<small>{o.charge_note || (o.extra_kg ? `${kg(o.extra_kg)} over limit` : '')}{o.paid_ref ? ` Ref ${o.paid_ref}` : ''}</small></dd></div>}
           </dl>
+          {o.handover_request?.status === 'WAITING' && isOpen(o) && (
+            <button type="button" className="sf-callout" onClick={() => setMode('handover')}><Icon name="phone" />Waiting for the student to confirm on their phone<Icon name="next" size={18} /></button>
+          )}
           {o.note && <p className="note-line"><Icon name="tag" size={16} />{o.note}</p>}
           {o.cancel_reason && <p className="note-line bad"><Icon name="x" size={16} />{o.cancel_reason}</p>}
           {isOpen(o) && (
@@ -75,6 +84,11 @@ export function OrderSheet({ id, close, onChanged, isAdmin, payFirst }: { id: nu
                 {isAdmin && o.payment_status === 'DUE' && <Button size="sm" onClick={() => setMode('waive')}>Waive payment</Button>}
               </div>
             </>
+          )}
+          <h3 className="sub">Student confirmation</h3>
+          <SignoffRecord o={o} showEvidence />
+          {isOpen(o) && o.dropoff_ack !== 'SIGNATURE' && o.dropoff_ack !== 'PHONE' && (
+            <Button size="sm" icon="edit" onClick={() => setMode('sign')}>Student signs the drop-off now</Button>
           )}
           <h3 className="sub">Timeline</h3>
           <ol className="timeline">
@@ -96,20 +110,50 @@ export function StudentLine({ o, photoSize = 44 }: { o: Pick<Order, 'student_nam
   );
 }
 
-/** The handover step: count clothes back, settle any payment, then release. */
-export function HandOver({ o, payFirst, onDone, onCancel }: { o: Order; payFirst: boolean; onDone: (o: Order) => void; onCancel?: () => void }) {
+/**
+ * The handover step: count clothes back, settle any payment, then the student confirms they received
+ * them, by signing on this screen or tapping "Yes" in their own app (the admin alone may skip it, with a reason).
+ */
+export function HandOver({ o, payFirst, onDone, onCancel, isAdmin }: { o: Order; payFirst: boolean; onDone: (o: Order) => void; onCancel?: () => void; isAdmin?: boolean }) {
+  const rules = useSignRules();
   const [count, setCount] = useState(String(o.clothes_count));
   const [note, setNote] = useState('');
   const [method, setMethod] = useState<'CASH' | 'UPI'>('CASH');
   const [ref, setRef] = useState('');
+  const walkIn = o.customer_kind === 'WALKIN';
+  const [how, setHow] = useState<'sign' | 'phone' | 'override'>('sign');
+  const [sig, setSig] = useState<string | null>(null);
+  const [why, setWhy] = useState('');
+  const [waiting, setWaiting] = useState<Order | null>(o.handover_request?.status === 'WAITING' ? o : null);
   const { busy, error, submit } = useFormAction();
   const mismatch = Number(count) !== o.clothes_count;
   const needsPay = o.payment_status === 'DUE';
+  const signNeeded = rules.sign_pickup;
+  // A signature is for one sentence: if the count, the note or the method changes, the student signs again.
+  useEffect(() => { setSig(null); }, [count, note, how]);
+  const proofOk = !signNeeded || how === 'phone' || (how === 'sign' && !!sig) || (how === 'override' && why.trim().length >= 5);
+  // The note is part of what the student signs only when the count differs (the server records it the same way).
+  const body = () => ({ returnedCount: Number(count), note: mismatch ? note : '', ...(needsPay ? { payMethod: method, payRef: ref } : {}) });
+
   const go = async (e: FormEvent) => {
     e.preventDefault();
-    const r = await submit(() => api<Order>(`/ops/orders/${o.id}/deliver`, { body: { returnedCount: Number(count), note, ...(needsPay ? { payMethod: method, payRef: ref } : {}) } }), `${o.order_no} handed over`);
+    if (signNeeded && how === 'phone') {
+      const r = await submit(() => api<Order>(`/ops/orders/${o.id}/handover-request`, { body: body() }));
+      if (r) setWaiting(r);
+      return;
+    }
+    const proof = how === 'override' && signNeeded ? { override: why.trim() } : sig ? { signature: sig, clothesCount: o.clothes_count } : {};
+    const r = await submit(() => api<Order>(`/ops/orders/${o.id}/deliver`, { body: { ...body(), ...proof } }), `${o.order_no} handed over`);
     if (r) onDone(r);
   };
+
+  if (waiting) return <PhoneWait o={waiting} onDone={onDone} onBack={() => setWaiting(null)} />;
+
+  const ways: { value: 'sign' | 'phone' | 'override'; label: string }[] = [
+    { value: 'sign', label: 'Sign here' },
+    ...(!walkIn ? [{ value: 'phone' as const, label: 'On their phone' }] : []),
+    ...(isAdmin ? [{ value: 'override' as const, label: 'Without (admin)' }] : []),
+  ];
   return (
     <form className="handover stack" onSubmit={go}>
       {o.status !== 'READY' && <p className="warn-line"><Icon name="alert" size={18} />This order is still marked “{o.status.toLowerCase()}”. Only hand over if the clothes are really done.</p>}
@@ -134,12 +178,86 @@ export function HandOver({ o, payFirst, onDone, onCancel }: { o: Order; payFirst
           </>}
         </div>
       )}
+
+      <section className="sign-box" aria-label="Student confirms they received the clothes">
+        <h2><Icon name="edit" size={18} />Student confirms they received it{signNeeded ? '' : ' (optional)'}</h2>
+        {signNeeded && ways.length > 1 && <Segmented label="How the student confirms" value={how} onChange={setHow} options={ways} />}
+        {(how === 'sign' || !signNeeded) && <>
+          <p className="sign-sentence">“{pickupSentence(o, Number(count) || 0, mismatch ? note : '')}”</p>
+          <SignaturePad key={`${count}|${note}|${how}`} onChange={setSig} />
+        </>}
+        {signNeeded && how === 'phone' && (
+          <p className="sign-or">We ask {o.student_name} to confirm in their Everjoy app: “{pickupSentence(o, Number(count) || 0, mismatch ? note : '')}” The hand-over completes when they tap <b>Yes</b>{needsPay ? `, and the ${rupees(o.amount)} payment is saved then` : ''}.</p>
+        )}
+        {signNeeded && how === 'override' && (
+          <Field label="Why can’t the student confirm?" hint="Saved in the register and the activity log.">
+            <input value={why} onChange={e => setWhy(e.target.value)} placeholder="e.g. hand injured; ID card and face checked" maxLength={200} />
+          </Field>
+        )}
+      </section>
+
       {error && <ErrorNote error={error} />}
-      <Button tone="primary" size="lg" block busy={busy} icon="check" disabled={mismatch && !note.trim()}>
-        Hand over {plural(Number(count) || 0, 'piece')}{needsPay ? `, ${rupees(o.amount)} received` : ''}
+      <Button tone="primary" size="lg" block busy={busy} icon={signNeeded && how === 'phone' ? 'phone' : 'check'} disabled={(mismatch && !note.trim()) || !proofOk}>
+        {signNeeded && how === 'phone' ? 'Send to the student’s phone' : <>Hand over {plural(Number(count) || 0, 'piece')}{needsPay ? `, ${rupees(o.amount)} received` : ''}</>}
       </Button>
       {onCancel && <Button tone="plain" block type="button" onClick={onCancel}>Back</Button>}
     </form>
+  );
+}
+
+/** Waiting for the student to tap "Yes, I received it" in their app. Completes by itself. */
+function PhoneWait({ o, onDone, onBack }: { o: Order; onDone: (o: Order) => void; onBack: () => void }) {
+  const [cur, setCur] = useState<Order>(o);
+  const [seen, setSeen] = useState(Date.now());   // when seconds_left was read (the server's clock decides the expiry)
+  const [, tick] = useState(0);
+  const done = useRef(false);
+  const { busy, run } = useAction();
+  useEffect(() => {
+    let live = true;
+    let busyPoll = false;
+    const t = setInterval(() => {
+      tick(n => n + 1);
+      if (busyPoll) return;
+      busyPoll = true;
+      api<Order>(`/ops/orders/${o.id}`).then(r => {
+        if (!live || done.current) return;
+        if (r.status === 'DELIVERED') { done.current = true; toast(`${r.order_no} handed over: the student confirmed`); onDone(r); return; }
+        setCur(r);
+        setSeen(Date.now());
+      }).catch(() => {}).finally(() => { busyPoll = false; });
+    }, 2500);
+    // Leaving this screen (another student, closing the order) withdraws the request, so the student
+    // can't confirm later from the hostel while the clothes are still at the counter.
+    return () => {
+      live = false;
+      clearInterval(t);
+      if (!done.current) void api(`/ops/orders/${o.id}/handover-request`, { method: 'DELETE' }).catch(() => {});
+    };
+  }, [o.id]);   // eslint-disable-line react-hooks/exhaustive-deps
+  const req = cur.handover_request as (Order['handover_request'] & { seconds_left?: number }) | null | undefined;
+  const left = req ? Math.max(0, (req.seconds_left ?? 600) - Math.round((Date.now() - seen) / 1000)) : 0;
+  const withdraw = async () => { if (await run(() => api(`/ops/orders/${o.id}/handover-request`, { method: 'DELETE' })) !== undefined) { done.current = true; onBack(); } };
+
+  if (req?.status === 'DISPUTED') return (
+    <div className="stack">
+      <div className="sign-dispute"><Icon name="alert" size={22} /><span><b>{cur.student_name} says something is wrong</b><small>“{req.reason}”. Do not hand over yet. Recount with them; a complaint was opened for the office.</small></span></div>
+      <Button block busy={busy} onClick={withdraw}>Back to the hand-over</Button>
+    </div>
+  );
+  if (!req || left === 0) return (
+    <div className="stack">
+      <p className="warn-line"><Icon name="clock" size={18} />The request to the student’s phone expired or was withdrawn.</p>
+      <Button block onClick={onBack}>Back to the hand-over</Button>
+    </div>
+  );
+  return (
+    <div className="phone-wait" role="status" aria-live="polite">
+      <span className="phone-wait-icon"><Icon name="phone" size={34} /></span>
+      <b>Waiting for {cur.student_name} to confirm on their phone</b>
+      <p>They see: “{pickupSentence(cur, req.returned_count, req.note)}” and tap <b>Yes, I received it</b>. Keep the clothes until this screen says handed over.</p>
+      <small>{Math.floor(left / 60)}:{String(left % 60).padStart(2, '0')} left</small>
+      <Button block tone="plain" busy={busy} onClick={withdraw}>Withdraw and let them sign here instead</Button>
+    </div>
   );
 }
 

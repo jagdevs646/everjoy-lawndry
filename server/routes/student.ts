@@ -5,7 +5,8 @@ import { AuthedRequest, requireRole } from '../auth.js';
 import { photoUpload, savePhoto } from '../files.js';
 import { checkStudentEmail, startChallenge } from '../otp.js';
 import { slipKey } from '../auth.js';
-import { getSettings, listServices, monthUsage, planStatus } from '../rules.js';
+import { deliverOrder, getSettings, listServices, monthUsage, planStatus, recordPayment } from '../rules.js';
+import { disputeComplaint, dropoffVersion, handoverVersion, orderForSign, recordSignoff, statementFor, type Origin } from '../signoff.js';
 import { announcementsFor, complaintDetail, listComplaints, orderDetail, studentProfile } from '../queries.js';
 import { HttpError, handle, nowIso, parse, zId, zText } from '../util.js';
 import { zIdCard, zMobile, zRoom } from './public.js';
@@ -19,7 +20,8 @@ export const COMPLAINT_CATEGORIES = ['Missing clothes', 'Damaged clothes', 'Wron
 
 /** Student-facing order fields: own orders only, includes the QR token for the digital slip. */
 const MY_ORDER_COLS = `id, order_no, weight_kg, clothes_count, service, note, status, within_kg, extra_kg, amount, payment_status, paid_method, paid_at,
-  qr_token, received_at, expected_at, ready_at, delivered_at, returned_count, cancel_reason, hostel_name, room_no, service_name, unit, rate, charge_note, tag_no`;
+  qr_token, received_at, expected_at, ready_at, delivered_at, returned_count, cancel_reason, hostel_name, room_no, service_name, unit, rate, charge_note, tag_no,
+  dropoff_ack, dropoff_ack_at, pickup_ack, pickup_ack_at`;
 
 /** Never send the order's QR token to the phone: send the derived key that signs the rotating QR instead. */
 const withSlipKey = <T extends Record<string, unknown>>(o: T) => {
@@ -49,6 +51,7 @@ router.get('/me/home', handle(async (req, res) => {
     unread,
     open_complaints: openComplaints,
     announcements,
+    pending: await pendingFor(user.id),
     info: {
       max_kg_per_order: s.max_kg_per_order, counter_hours: s.counter_hours, upi_id: s.upi_id, upi_name: s.upi_name,
       pay_before_pickup: s.pay_before_pickup, express_enabled: s.express_enabled, express_fee: s.express_fee,
@@ -57,6 +60,97 @@ router.get('/me/home', handle(async (req, res) => {
       dropoff_from: s.dropoff_from, dropoff_to: s.dropoff_to, pickup_from: s.pickup_from, pickup_to: s.pickup_to,
     },
   });
+}));
+
+/**
+ * What the student still has to confirm: drop-offs they have not confirmed yet, and a hand-over the
+ * counter is waiting on. Polled quickly by the app while an order is ready for pickup.
+ */
+async function pendingFor(studentId: number) {
+  const s = await getSettings();
+  // Not confirmed yet, or disputed (once it is sorted out, the student can still confirm).
+  const rows = s.sign_dropoff ? await db.all<{ id: number }>(`SELECT id FROM orders WHERE student_id = ? AND status IN ('RECEIVED','WASHING','READY')
+    AND (dropoff_ack IS NULL OR dropoff_ack = 'DISPUTED') ORDER BY id`, [studentId]) : [];
+  const at = nowIso();
+  const dropoff = [];
+  for (const r of rows.slice(0, 5)) {
+    const o = await orderForSign(r.id);
+    dropoff.push({ id: o.id, order_no: o.order_no, tag_no: o.tag_no, clothes_count: o.clothes_count, weight_kg: o.weight_kg, service_name: o.service_name,
+      statement: statementFor('DROPOFF', o, at), version: dropoffVersion(o), disputed: o.dropoff_ack === 'DISPUTED' });
+  }
+  const h = await db.get<{ order_id: number; returned_count: number; note: string | null; pay_method: string | null; status: string; reason: string | null; created_at: string; expires_at: string; staff_name: string }>(
+    `SELECT h.order_id, h.returned_count, h.note, h.pay_method, h.status, h.reason, h.created_at, h.expires_at, u.name AS staff_name FROM handover_requests h
+     JOIN orders o ON o.id = h.order_id JOIN users u ON u.id = h.staff_id WHERE o.student_id = ? AND h.status = 'WAITING' AND h.expires_at > ? ORDER BY h.created_at DESC LIMIT 1`, [studentId, at]);
+  let handover = null;
+  if (h) {
+    const o = await orderForSign(h.order_id);
+    const amount = (await db.get<{ amount: number; payment_status: string }>('SELECT amount, payment_status FROM orders WHERE id = ?', [h.order_id]))!;
+    handover = { ...h, order_no: o.order_no, tag_no: o.tag_no, clothes_count: o.clothes_count, amount: amount.payment_status === 'DUE' ? amount.amount : 0,
+      statement: statementFor('PICKUP', o, at, h.returned_count, h.note ?? ''), version: handoverVersion(o, h),
+      seconds_left: Math.max(0, Math.round((Date.parse(h.expires_at) - Date.now()) / 1000)) };
+  }
+  return { dropoff, handover };
+}
+
+router.get('/me/pending', handle(async (req, res) => res.json(await pendingFor(me(req).id))));
+
+const zAnswer = z.object({ confirm: z.boolean(), reason: z.string().trim().max(300).default(''), version: z.string().max(40).default('') })
+  .refine(b => b.confirm || b.reason.length >= 3, { message: 'Say what is wrong (a few words).', path: ['reason'] });
+const origin = (req: Request): Origin => ({ ip: req.ip, userAgent: req.get('user-agent') });
+
+/** "Yes, I gave this laundry" (or "Something is wrong") for a drop-off. */
+router.post('/me/orders/:id/dropoff', handle(async (req, res) => {
+  const user = me(req);
+  const id = parse(zId, req.params.id);
+  const b = parse(zAnswer, req.body);
+  await db.tx(async () => {
+    await db.lockRow('orders', id);
+    const o = await orderForSign(id);
+    if (o.student_id !== user.id) throw new HttpError(404, 'Order not found.');
+    if (!['RECEIVED', 'WASHING', 'READY'].includes(o.status)) throw new HttpError(409, `${o.order_no} is ${o.status.toLowerCase()}.`);
+    if (o.dropoff_ack === 'SIGNATURE' || o.dropoff_ack === 'PHONE') throw new HttpError(409, `You already confirmed ${o.order_no}.`);
+    if (b.version !== dropoffVersion(o)) throw new HttpError(409, `The counter changed ${o.order_no}. Check the new details and answer again.`, { code: 'CHANGED' });
+    const at = nowIso();
+    const statement = statementFor('DROPOFF', o, at);
+    if (b.confirm) await recordSignoff({ o, kind: 'DROPOFF', proof: { method: 'PHONE' }, staffId: null, at, statement, origin: origin(req) });
+    else {
+      if (o.dropoff_ack === 'DISPUTED') throw new HttpError(409, 'You already told the counter something is wrong with this order. They will contact you.');
+      await recordSignoff({ o, kind: 'DROPOFF', proof: { method: 'PHONE', dispute: b.reason }, staffId: null, at, statement, origin: origin(req) });
+      await disputeComplaint(o, 'DROPOFF', b.reason, at);
+    }
+  });
+  res.json({ ok: true, pending: await pendingFor(user.id) });
+}));
+
+/** "Yes, I received my clothes" for the hand-over the counter is waiting on (or "Something is wrong"). */
+router.post('/me/orders/:id/handover', handle(async (req, res) => {
+  const user = me(req);
+  const id = parse(zId, req.params.id);
+  const b = parse(zAnswer, req.body);
+  await db.tx(async () => {
+    await db.lockRow('orders', id);
+    const o = await orderForSign(id);
+    if (o.student_id !== user.id) throw new HttpError(404, 'Order not found.');
+    const h = await db.get<{ staff_id: number; returned_count: number; note: string | null; pay_method: 'CASH' | 'UPI' | null; pay_ref: string | null; status: string; expires_at: string }>(
+      'SELECT * FROM handover_requests WHERE order_id = ?', [id]) as { staff_id: number; returned_count: number; note: string | null; pay_method: 'CASH' | 'UPI' | null; pay_ref: string | null; status: string; created_at: string; expires_at: string } | undefined;
+    if (!h || h.status !== 'WAITING') throw new HttpError(409, 'The counter is not waiting for you to confirm this order.');
+    if (h.expires_at <= nowIso()) throw new HttpError(409, 'The request from the counter expired. Ask staff to send it again.');
+    if (b.version !== handoverVersion(o, h as typeof h & { created_at: string })) throw new HttpError(409, 'The counter changed what you are confirming. Check the new details and answer again.', { code: 'CHANGED' });
+    if (b.confirm) {
+      // Payment (if staff collected it) and the hand-over happen together, as if staff pressed "Hand over".
+      if (h.pay_method && (await db.get<{ payment_status: string }>('SELECT payment_status FROM orders WHERE id = ?', [id]))!.payment_status === 'DUE') {
+        await recordPayment(h.staff_id, id, h.pay_method, h.pay_ref ?? '');
+      }
+      await deliverOrder(h.staff_id, id, h.returned_count, h.note ?? '', { method: 'PHONE' }, origin(req));
+    } else {
+      const at = nowIso();
+      await db.run(`UPDATE handover_requests SET status = 'DISPUTED', reason = ? WHERE order_id = ?`, [b.reason, id]);
+      await recordSignoff({ o, kind: 'PICKUP', proof: { method: 'PHONE', dispute: b.reason }, staffId: h.staff_id, at,
+        statement: statementFor('PICKUP', o, at, h.returned_count, h.note ?? ''), origin: origin(req), returned: h.returned_count });
+      await disputeComplaint(o, 'PICKUP', b.reason, at);
+    }
+  });
+  res.json({ ok: true, pending: await pendingFor(user.id) });
 }));
 
 router.get('/me/orders', handle(async (req, res) => {

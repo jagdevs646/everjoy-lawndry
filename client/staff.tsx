@@ -3,6 +3,7 @@ import { Announcement, api, ApiError, Order, Service, Student, User } from './ap
 import { ChangePassword } from './auth';
 import { go, kg, plural, requestId, rupees, toast, useAction, useFormAction, useLoad, useRoute, useScrollTop, when } from './lib';
 import { CardInput, ComplaintsBoard, CounterStudent, HandOver, OpsSettings, OrderSheet, serviceLine, StudentFacts, StudentLine, StudentSheet } from './ops';
+import { DropoffSign, useSignRules } from './signoff';
 import { Avatar, Brand, Button, Empty, ErrorNote, Field, Icon, IconName, Loading, PayPill, Scanner, Segmented, Sheet, StatusPill, Stepper } from './ui';
 
 type Summary = {
@@ -38,7 +39,7 @@ export function StaffApp({ user, onSignOut, onUser, onAdmin }: { user: User; onS
       </header>
       <main className="sf-main">
         {page === 'counter' && <Counter settings={s?.settings} services={s?.services ?? []} onCreated={refresh} openOrder={setOrderId} openStudent={setStudentId} pending={s?.pending_students ?? 0} notices={s?.announcements ?? []} />}
-        {page === 'pickup' && <Pickup settings={s?.settings} onDone={refresh} openOrder={setOrderId} />}
+        {page === 'pickup' && <Pickup settings={s?.settings} onDone={refresh} openOrder={setOrderId} isAdmin={isAdmin} />}
         {page === 'orders' && <Orders summary={s} onChanged={refresh} openOrder={setOrderId} />}
         {page === 'students' && <Students openStudent={setStudentId} pending={s?.pending_students ?? 0} roomChanges={s?.room_changes ?? 0} />}
         {page === 'issues' && <div className="sf-page"><h1>Complaints</h1><ComplaintsBoard onOpenOrder={setOrderId} /></div>}
@@ -379,7 +380,10 @@ function OrderForm({ student, settings, services, onChangeStudent, onStudent, on
 
 function Created({ o, onNext, onOpen }: { o: Order; onNext: () => void; onOpen: () => void }) {
   const next = useRef<HTMLButtonElement>(null);
-  useEffect(() => { next.current?.focus(); }, []);
+  const rules = useSignRules();
+  const [signed, setSigned] = useState(false);
+  // When the student must sign, don't put the focus on "Next student".
+  useEffect(() => { if (!rules.sign_dropoff) next.current?.focus(); }, [rules.sign_dropoff]);
   return (
     <div className="sf-page created" role="status">
       {o.tag_no ? <>
@@ -392,7 +396,8 @@ function Created({ o, onNext, onOpen }: { o: Order; onNext: () => void; onOpen: 
       </>}
       <p className="created-meta">{o.student_name}{o.customer_kind === 'WALKIN' ? '' : `, room ${o.room_no}`}. {serviceLine(o)}: {plural(o.clothes_count, 'piece')}{Number(o.weight_kg) > 0 ? `, ${kg(o.weight_kg)}` : ''}{o.amount ? `. ${rupees(o.amount)} due at pickup` : ''}.</p>
       <p className="created-sub">{o.customer_kind === 'WALKIN' ? 'Walk-in: tell them the order no. They show it at pickup.' : 'The digital slip is already on the student’s phone.'}</p>
-      <Button ref={next} tone="primary" size="lg" block icon="plus" onClick={onNext}>Next student</Button>
+      {rules.sign_dropoff && <DropoffSign o={o} onSigned={() => setSigned(true)} />}
+      <Button ref={next} tone={rules.sign_dropoff && !signed ? 'quiet' : 'primary'} size="lg" block icon="plus" onClick={onNext}>{rules.sign_dropoff && !signed ? 'Next student (not signed yet)' : 'Next student'}</Button>
       <Button block onClick={onOpen}>Open this order</Button>
     </div>
   );
@@ -400,7 +405,7 @@ function Created({ o, onNext, onOpen }: { o: Order; onNext: () => void; onOpen: 
 
 /* ----------------------------------------------------------------- pickup */
 
-function Pickup({ settings, onDone, openOrder }: { settings?: OpsSettings; onDone: () => void; openOrder: (id: number) => void }) {
+function Pickup({ settings, onDone, openOrder, isAdmin }: { settings?: OpsSettings; onDone: () => void; openOrder: (id: number) => void; isAdmin?: boolean }) {
   const [code, setCode] = useState('');
   const [scan, setScan] = useState(true);
   const [found, setFound] = useState<Order | null>(null);
@@ -465,7 +470,7 @@ function Pickup({ settings, onDone, openOrder }: { settings?: OpsSettings; onDon
                   : found.via === 'CARD' ? `Found by card ${found.tag_no}: check the person matches the photo and their ID card before handing over.`
                   : 'Typed order no.: check the student’s physical ID card before handing over.'}</p>
               </div>
-              <HandOver o={found} payFirst={settings?.pay_before_pickup ?? true} onDone={o => { setHanded(o); onDone(); }} />
+              <HandOver o={found} payFirst={settings?.pay_before_pickup ?? true} isAdmin={isAdmin} onDone={o => { setHanded(o); onDone(); }} />
             </>
           )}
           <Button block onClick={() => openOrder(found.id)}>Order details</Button>

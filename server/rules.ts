@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { db, insertId, logActivity, nextCounter, notify } from './db.js';
 import { HttpError, MAX_ID, addDays, codeKey, dayKey, looseKey, localDateTimeIso, monthKey, nowIso, parse, round2 } from './util.js';
 import { slipKey } from './auth.js';
+import { orderForSign, recordSignoff, resetDropoff, statementFor, type Origin, type Proof } from './signoff.js';
 
 /* ---------------------------------------------------------------- settings */
 
@@ -85,6 +86,8 @@ export const settingsSchema = z.object({
   express_ready_after_days: z.coerce.number().int().min(0).max(14),
   auto_status: z.boolean(),                                           // move orders to washing / ready by themselves
   auto_washing_hours: z.coerce.number().min(1).max(168),             // "washing" this long after drop-off
+  sign_dropoff: z.boolean(),                                          // ask the student to confirm every drop-off (signature or app)
+  sign_pickup: z.boolean(),                                           // hand-over needs the student's signature or phone confirmation
 });
 export type Settings = z.infer<typeof settingsSchema>;
 
@@ -119,6 +122,8 @@ export const defaultSettings: Settings = {
   express_ready_after_days: 1,
   auto_status: true,
   auto_washing_hours: 24,
+  sign_dropoff: true,
+  sign_pickup: true,
 };
 
 /** When an order taken now will be ready: N days after today, at the start of pickup hours. */
@@ -659,20 +664,36 @@ export async function recordPayment(actorId: number, id: number, method: 'CASH' 
   });
 }
 
-export async function deliverOrder(actorId: number, id: number, returnedCount: number, note: string) {
+/** Checks before clothes leave the counter (also used before asking the student to confirm on their phone). */
+export async function checkHandover(id: number, returnedCount: number, note: string, paying = false) {
+  const s = await getSettings();
+  const o = await getOrderRow(id);
+  if (o.status === 'DELIVERED') throw new HttpError(409, `${o.order_no} was already handed over. Do not give clothes again.`);
+  if (o.status === 'CANCELLED') throw new HttpError(409, `${o.order_no} was cancelled.`);
+  if (s.pay_before_pickup && o.payment_status === 'DUE' && !paying) throw new HttpError(409, `Collect ₹${o.amount} before handing over ${o.order_no}.`);
+  if (returnedCount !== o.clothes_count && !note.trim()) throw new HttpError(422, `Count mismatch: ${o.clothes_count} given, ${returnedCount} returned. Add a note explaining why.`);
+  return { s, o };
+}
+
+/**
+ * Hand the clothes back. With "student confirms collection" on (default), `proof` is needed: the student's
+ * finger signature on the counter screen, their confirmation in the app, or (admin only) an override with a reason.
+ */
+export async function deliverOrder(actorId: number, id: number, returnedCount: number, note: string, proof?: Proof, origin?: Origin) {
   await db.tx(async () => {
     await db.lockRow('orders', id);
-    const s = await getSettings();
-    const o = await getOrderRow(id);
-    if (o.status === 'DELIVERED') throw new HttpError(409, `${o.order_no} was already handed over. Do not give clothes again.`);
-    if (o.status === 'CANCELLED') throw new HttpError(409, `${o.order_no} was cancelled.`);
-    if (s.pay_before_pickup && o.payment_status === 'DUE') throw new HttpError(409, `Collect ₹${o.amount} before handing over ${o.order_no}.`);
-    if (returnedCount !== o.clothes_count && !note.trim()) throw new HttpError(422, `Count mismatch: ${o.clothes_count} given, ${returnedCount} returned. Add a note explaining why.`);
+    const { s, o } = await checkHandover(id, returnedCount, note);
+    if (s.sign_pickup && !proof) throw new HttpError(409, 'The student must sign for their clothes on this screen, or confirm on their phone, before you hand them over.', { code: 'SIGN_NEEDED' });
     const at = nowIso();
     if (o.status !== 'READY') await addEvent(id, 'READY', 'Marked ready at handover', actorId);
     await db.run(`UPDATE orders SET status = 'DELIVERED', ready_at = COALESCE(ready_at, ?), delivered_by = ?, delivered_at = ?, returned_count = ?, updated_at = ? WHERE id = ?`,
       [at, actorId, at, returnedCount, at, id]);
     await addEvent(id, 'DELIVERED', `${returnedCount} of ${o.clothes_count} clothes returned${note ? `, ${note}` : ''}`, actorId);
+    if (proof) {
+      const so = await orderForSign(id);
+      await recordSignoff({ o: so, kind: 'PICKUP', proof, staffId: actorId, at, statement: statementFor('PICKUP', so, at, returnedCount, note.trim()), origin, returned: returnedCount });
+    }
+    await db.run('DELETE FROM handover_requests WHERE order_id = ?', [id]);
     await notify(o.student_id, `${o.order_no} handed over`, `${returnedCount} clothes returned. ${returnedCount !== o.clothes_count ? 'Count differed from drop-off — raise a complaint if something is missing.' : 'Thank you for using Everjoy Lawndry!'}`, id);
     await logActivity(actorId, 'ORDER_DELIVERED', 'order', o.order_no, `${returnedCount}/${o.clothes_count} clothes${note ? `, ${note}` : ''}`);
   });
@@ -684,6 +705,7 @@ export async function cancelOrder(actorId: number, id: number, reason: string) {
     const o = await getOrderRow(id);
     if (!OPEN.includes(o.status)) throw new HttpError(409, `${o.order_no} is ${o.status.toLowerCase()} and cannot be cancelled.`);
     await db.run(`UPDATE orders SET status = 'CANCELLED', cancel_reason = ?, payment_status = CASE WHEN payment_status = 'DUE' THEN 'NONE' ELSE payment_status END, updated_at = ? WHERE id = ?`, [reason, nowIso(), id]);
+    await db.run('DELETE FROM handover_requests WHERE order_id = ?', [id]);
     await addEvent(id, 'CANCELLED', reason, actorId);
     await notify(o.student_id, `${o.order_no} cancelled`, reason, id);
     await logActivity(actorId, 'ORDER_CANCELLED', 'order', o.order_no, reason);
@@ -708,7 +730,11 @@ export async function correctOrder(actorId: number, id: number, weightKg: number
     await db.run(`UPDATE orders SET weight_kg = ?, clothes_count = ?, within_kg = ?, extra_kg = ?, amount = ?, payment_status = ?, charge_note = ?, updated_at = ? WHERE id = ?`,
       [q.weight_kg, q.clothes_count, q.within_kg, q.extra_kg, q.amount, q.amount > 0 ? (o.payment_status === 'WAIVED' ? 'WAIVED' : 'DUE') : 'NONE', q.charge_note, nowIso(), id]);
     const detail = `${o.clothes_count}→${q.clothes_count} clothes, ${o.weight_kg}→${q.weight_kg} kg, ${reason}`;
+    await db.run('DELETE FROM handover_requests WHERE order_id = ?', [id]);   // the student would confirm old numbers
     await addEvent(id, 'CORRECTED', detail, actorId);
+    // The student confirmed the old count/weight: that confirmation no longer describes this order.
+    const ack = (o as unknown as { dropoff_ack: string | null }).dropoff_ack;
+    if (ack && (Number(o.clothes_count) !== q.clothes_count || Number(o.weight_kg) !== q.weight_kg)) await resetDropoff(o, actorId, nowIso());
     await notify(o.student_id, `${o.order_no} details corrected`, `Now ${q.clothes_count} clothes, ${q.weight_kg} kg. Reason: ${reason}`, id);
     await logActivity(actorId, 'ORDER_CORRECTED', 'order', o.order_no, detail);
   });

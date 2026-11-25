@@ -2,6 +2,7 @@ import { db } from './db.js';
 import crypto from 'node:crypto';
 import { QR_STEP_SECONDS, formatCard, getSettings, matchSeries, orderKeys, qrSignature } from './rules.js';
 import { codeKey, dayKey, HttpError, likeContains, nowIso } from './util.js';
+import { signoffsFor } from './signoff.js';
 
 /* Columns safe to show staff/admin. qr_token and request_id are never listed.
    The late flag takes one `?` (the current time), bound before any WHERE params. */
@@ -9,6 +10,7 @@ const ORDER_COLS = `o.id, o.order_no, o.student_id, o.hostel_name, o.room_no, o.
   o.status, o.within_kg, o.extra_kg, o.amount, o.payment_status, o.paid_method, o.paid_ref, o.paid_at, o.received_at, o.day_key,
   o.expected_at, o.ready_at, o.delivered_at, o.returned_count, o.cancel_reason,
   o.service_id, o.service_name, o.unit, o.rate, o.charge_note, st.kind AS customer_kind, o.tag_no, u.photo AS student_photo,
+  o.dropoff_ack, o.dropoff_ack_at, o.pickup_ack, o.pickup_ack_at,
   u.name AS student_name, st.id_card_no, rb.name AS received_by_name, dl.name AS delivered_by_name,
   CASE WHEN o.status IN ('RECEIVED','WASHING') AND o.expected_at < ? THEN 1 ELSE 0 END AS late`;
 const ORDER_FROM = `FROM orders o JOIN users u ON u.id = o.student_id JOIN students st ON st.user_id = o.student_id
@@ -24,6 +26,9 @@ function orderWhere(f: OrderFilters, now: string) {
   const where: string[] = [];
   const p: unknown[] = [];
   if (f.status === 'OPEN') where.push(`o.status IN ('RECEIVED','WASHING','READY')`);
+  // Still open and not confirmed / disputed by the student (closed orders can no longer be confirmed).
+  else if (f.status === 'UNSIGNED') where.push(`o.status IN ('RECEIVED','WASHING','READY') AND o.dropoff_ack IS NULL`);
+  else if (f.status === 'DISPUTED') where.push(`o.status IN ('RECEIVED','WASHING','READY') AND o.dropoff_ack = 'DISPUTED'`);
   else if (f.status === 'LATE') { where.push(`o.status IN ('RECEIVED','WASHING') AND o.expected_at < ?`); p.push(now); }
   else if (f.status) { where.push('o.status = ?'); p.push(f.status); }
   if (f.payment) { where.push('o.payment_status = ?'); p.push(f.payment); }
@@ -54,7 +59,11 @@ export async function orderDetail(id: number, opts: { includeQr?: boolean } = {}
   const o = await db.get<Record<string, unknown>>(`SELECT ${ORDER_COLS}${opts.includeQr ? ', o.qr_token' : ''} ${ORDER_FROM} WHERE o.id = ?`, [nowIso(), id]);
   if (!o) throw new HttpError(404, 'Order not found.');
   const events = await db.all(`SELECT e.type, e.note, e.at, u.name AS by_name, u.role AS by_role FROM order_events e LEFT JOIN users u ON u.id = e.by_user WHERE e.order_id = ? ORDER BY e.id`, [id]);
-  return { ...o, events };
+  const signoffs = await signoffsFor(id, !!opts.includeQr);
+  const handover = opts.includeQr ? undefined : await db.get<Record<string, unknown> & { expires_at: string }>(`SELECT h.returned_count, h.note, h.pay_method, h.status, h.reason, h.created_at, h.expires_at, u.name AS staff_name
+    FROM handover_requests h JOIN users u ON u.id = h.staff_id WHERE h.order_id = ? AND h.expires_at > ?`, [id, nowIso()]);
+  if (handover) handover.seconds_left = Math.max(0, Math.round((Date.parse(handover.expires_at) - Date.now()) / 1000));
+  return { ...o, events, signoffs, handover_request: handover ?? null };
 }
 
 export async function findOrderByCode(code: string) {

@@ -13,6 +13,21 @@ export type Order = {
   via?: 'QR' | 'NUMBER' | 'CARD';
   service_id?: number | null; service_name?: string | null; unit?: 'KG' | 'PIECE' | null; rate?: number | null; charge_note?: string | null; customer_kind?: 'HOSTELER' | 'WALKIN';
   tag_no?: string | null; student_photo?: string | null;
+  // Two-sided register: what the student confirmed (SIGNATURE | PHONE | OVERRIDE | DISPUTED; null = not yet)
+  dropoff_ack?: string | null; dropoff_ack_at?: string | null; pickup_ack?: string | null; pickup_ack_at?: string | null;
+  signoffs?: Signoff[];
+  handover_request?: { returned_count: number; note: string | null; pay_method: string | null; status: 'WAITING' | 'DISPUTED'; reason: string | null; created_at: string; expires_at: string; staff_name: string } | null;
+};
+export type Signoff = {
+  id: number; kind: 'DROPOFF' | 'PICKUP'; method: 'SIGNATURE' | 'PHONE' | 'OVERRIDE'; status: 'CONFIRMED' | 'DISPUTED'; statement: string;
+  signature: string | null; reason: string | null; created_at: string; superseded_at: string | null; returned_count: number | null; staff_name: string | null;
+  proof_hash?: string; ip?: string | null; user_agent?: string | null;
+};
+/** What the student still has to confirm (their app asks). */
+export type Pending = {
+  dropoff: { id: number; order_no: string; tag_no: string | null; clothes_count: number; weight_kg: number; service_name: string | null; statement: string; version: string; disputed?: boolean }[];
+  handover: { order_id: number; order_no: string; tag_no: string | null; clothes_count: number; returned_count: number; note: string | null; amount: number; pay_method: string | null; staff_name: string;
+    expires_at: string; seconds_left: number; statement: string; version: string } | null;
 };
 export type Student = {
   id: number; name: string; mobile: string; login_id: string; active: number; created_at: string; id_card_no: string; hostel_id: number; hostel_name: string;

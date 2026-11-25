@@ -8,7 +8,7 @@ import { Avatar, Brand, Button, Empty, ErrorNote, Field, Icon, IconButton, IconN
 type Overview = {
   today: { orders: number; kg: number; delivered: number };
   month: { orders: number; kg: number; revenue: number; students: number };
-  open: { in_progress: number; ready: number; late: number; uncollected: number; dues: number; pending_students: number; complaints: number };
+  open: { in_progress: number; ready: number; late: number; uncollected: number; dues: number; pending_students: number; complaints: number; unsigned?: number; disputed?: number };
   totals: { students: number; staff: number };
   days: { day: string; orders: number; kg: number }[];
   hostels: { name: string; orders: number; kg: number }[];
@@ -139,6 +139,8 @@ function OverviewPage(_: { open: Openers }) {
     { n: o.open.late, text: `${plural(o.open.late, 'order')} past the promised time`, to: 'register?LATE', icon: 'clock', tone: 'bad' },
     { n: o.open.uncollected, text: `${plural(o.open.uncollected, 'order')} ready for over 3 days, not collected`, to: 'register?READY', icon: 'shirt' },
     { n: o.open.complaints, text: `${plural(o.open.complaints, 'complaint')} open`, to: 'complaints', icon: 'help', tone: 'bad' },
+    { n: o.open.disputed ?? 0, text: `${plural(o.open.disputed ?? 0, 'drop-off')} the student says is wrong`, to: 'register?DISPUTED', icon: 'alert', tone: 'bad' },
+    { n: o.open.unsigned ?? 0, text: `${plural(o.open.unsigned ?? 0, 'drop-off')} not confirmed by the student for over 12 hours`, to: 'register?UNSIGNED', icon: 'edit' },
     { n: o.open.dues, text: `${rupees(o.open.dues)} still to be collected`, to: 'register?DUE', icon: 'rupee' },
   ];
   const attention = items.filter(a => a.n > 0);
@@ -276,9 +278,23 @@ function DayBars({ days, by = 'day', unit = 'order' }: { days: Overview['days'];
   );
 }
 
+/** Register column: did the student confirm the drop-off (in) and the collection (out)? */
+function AckMarks({ o }: { o: Order }) {
+  const mark = (label: string, ack?: string | null, show = true) => {
+    if (!show) return null;
+    const tone = ack === 'SIGNATURE' || ack === 'PHONE' ? 'ok' : ack === 'DISPUTED' ? 'bad' : ack === 'OVERRIDE' ? 'warn' : 'wait';
+    const title = `${label}: ${ack === 'SIGNATURE' ? 'signed at the counter' : ack === 'PHONE' ? 'confirmed on phone' : ack === 'DISPUTED' ? 'disputed' : ack === 'OVERRIDE' ? 'admin override' : 'not confirmed'}`;
+    return <span className={`ack-mark ${tone}`} title={title} aria-label={title}>{label} {tone === 'ok' ? '✓' : tone === 'wait' ? '–' : '!'}</span>;
+  };
+  if (o.status === 'CANCELLED') return <span className="muted">–</span>;
+  return <span className="ack-marks">{mark('In', o.dropoff_ack)}{mark('Out', o.pickup_ack, o.status === 'DELIVERED')}</span>;
+}
+
 export function actionText(a: string) {
   return ({
     ORDER_CREATED: 'took order', ORDER_STATUS: 'updated', ORDER_DELIVERED: 'handed over', ORDER_CANCELLED: 'cancelled', ORDER_CORRECTED: 'corrected',
+    DROPOFF_SIGNED: 'drop-off confirmed by student:', DROPOFF_DISPUTED: 'student disputes drop-off of', PICKUP_SIGNED: 'collection confirmed by student:',
+    PICKUP_DISPUTED: 'student disputes collection of', PICKUP_OVERRIDE: 'handed over without the student’s confirmation:',
     PAYMENT_RECORDED: 'recorded payment for', PAYMENT_WAIVED: 'waived payment for', STUDENT_SIGNUP: 'registered as', STUDENT_APPROVED: 'approved', STUDENT_REJECTED: 'rejected',
     STUDENT_EDITED: 'edited student', STUDENT_SUSPENDED: 'put on hold', STUDENT_REACTIVATED: 'reactivated', STUDENT_RESUBMITTED: 'resubmitted details for', PROFILE_UPDATED: 'updated profile',
     PASSWORD_RESET: 'reset password for', PASSWORD_CHANGED: 'changed password', SETTINGS_CHANGED: 'changed rules', HOSTEL_ADDED: 'added hostel', HOSTEL_UPDATED: 'updated hostel',
@@ -317,6 +333,7 @@ function Register({ open }: { open: Openers }) {
         <label>To <input type="date" value={f.to} onChange={set('to')} /></label>
         <select value={f.status} onChange={set('status')} aria-label="Status">
           <option value="">Any status</option><option value="OPEN">In progress</option><option value="LATE">Late</option>
+          <option value="UNSIGNED">Drop-off not confirmed</option><option value="DISPUTED">Disputed by student</option>
           <option value="RECEIVED">Received</option><option value="WASHING">Washing</option><option value="READY">Ready</option><option value="DELIVERED">Handed over</option><option value="CANCELLED">Cancelled</option>
         </select>
         <select value={f.hostel} onChange={set('hostel')} aria-label="Hostel">
@@ -332,7 +349,7 @@ function Register({ open }: { open: Openers }) {
           <p className="muted small">{list.data.total} {list.data.total === 1 ? 'order' : 'orders'}{f.from ? ` from ${when(`${f.from}T12:00:00`, 'date')}` : ''}{f.to ? ` to ${when(`${f.to}T12:00:00`, 'date')}` : ''}</p>
           <div className="ledger-wrap">
             <table className="ledger">
-              <thead><tr><th>Order</th><th>Card</th><th>Date in</th><th>Student</th><th>Room</th><th>Service</th><th className="num">Clothes</th><th className="num">Kg</th><th>Status</th><th>Payment</th><th>Handed over</th></tr></thead>
+              <thead><tr><th>Order</th><th>Card</th><th>Date in</th><th>Student</th><th>Room</th><th>Service</th><th className="num">Clothes</th><th className="num">Kg</th><th>Status</th><th>Payment</th><th>Handed over</th><th>Student signed</th></tr></thead>
               <tbody>
                 {list.data.rows.map(o => (
                   <tr key={o.id} onClick={() => open.order(o.id)} tabIndex={0} onKeyDown={e => e.key === 'Enter' && open.order(o.id)}>
@@ -347,6 +364,7 @@ function Register({ open }: { open: Openers }) {
                     <td><StatusPill status={o.status} late={o.late} /></td>
                     <td>{o.amount > 0 ? <PayPill o={o} /> : <span className="muted">–</span>}</td>
                     <td>{o.delivered_at ? <>{when(o.delivered_at)}<small>{o.delivered_by_name}</small></> : <span className="muted">–</span>}</td>
+                    <td><AckMarks o={o} /></td>
                   </tr>
                 ))}
               </tbody>
@@ -660,7 +678,7 @@ type Settings = {
   pay_before_pickup: boolean; upi_id: string; upi_name: string; upi_qr_file?: string; semester_start: string; semester_end: string; counter_hours: string;
   student_email_otp: boolean; student_email_domain: string; card_required: boolean; card_series: Series[]; order_no_format: OrderNoFormat;
   dropoff_from: string; dropoff_to: string; pickup_from: string; pickup_to: string; ready_after_days: number; express_ready_after_days: number;
-  auto_status: boolean; auto_washing_hours: number;
+  auto_status: boolean; auto_washing_hours: number; sign_dropoff: boolean; sign_pickup: boolean;
 };
 
 const SETTING_TABS = [
@@ -729,6 +747,14 @@ function Settings() {
               <h2>Over the free limit</h2>
               <Switch checked={draft.allow_paid_extra} onChange={v => setDraft({ ...draft, allow_paid_extra: v })} label="Let students pay for extra kg" hint="The counter offers two choices: take clothes back, or charge for the extra kg. Off = only take clothes back." />
               {draft.allow_paid_extra && <Field label="Price per extra kg (₹)"><input type="number" min="0" value={draft.extra_rate_per_kg} onChange={num('extra_rate_per_kg')} /></Field>}
+            </section>
+            <section className="ad-card settings-group">
+              <h2>Student confirmation (two-sided register)</h2>
+              <p className="muted small">Like signing the paper register: the student confirms what they gave and what they got back, by signing with a finger on the counter screen or tapping Yes in their app. Each confirmation keeps the exact sentence, the time, who was at the counter and a tamper-proof fingerprint.</p>
+              <Switch checked={draft.sign_dropoff} onChange={v => setDraft({ ...draft, sign_dropoff: v })} label="Student confirms every drop-off"
+                hint="The counter shows a signature pad after each order, and the student's app asks “Did you give this?”. Disputes open a complaint." />
+              <Switch checked={draft.sign_pickup} onChange={v => setDraft({ ...draft, sign_pickup: v })} label="No hand-over without the student's confirmation"
+                hint="Staff can hand over only after the student signs on the counter screen or confirms on their phone. Only the admin can skip it, with a written reason." />
             </section>
             <section className="ad-card settings-group">
               <h2>Express</h2>

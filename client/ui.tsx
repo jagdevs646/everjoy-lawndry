@@ -150,14 +150,18 @@ export function Progress({ status }: { status: OrderStatus }) {
 /** Bottom sheet on phones, centred dialog on wider screens. Escape and the backdrop close it. */
 export function Sheet({ title, onClose, children, size = 'md', footer, className = '' }: { title: ReactNode; onClose: () => void; children: ReactNode; size?: 'sm' | 'md' | 'lg'; footer?: ReactNode; className?: string }) {
   const ref = useRef<HTMLDivElement>(null);
+  // The latest onClose, so a parent re-rendering (a new function each time) doesn't re-run the focus step
+  // and pull the cursor out of a field the person is typing in.
+  const close = useRef(onClose);
+  close.current = onClose;
   useEffect(() => {
     const prev = document.activeElement as HTMLElement | null;
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') close.current(); };
     document.addEventListener('keydown', onKey);
     document.body.classList.add('no-scroll');
     ref.current?.focus();
     return () => { document.removeEventListener('keydown', onKey); document.body.classList.remove('no-scroll'); prev?.focus?.(); };
-  }, [onClose]);
+  }, []);
   return createPortal(
     <div className="sheet-backdrop" onMouseDown={e => { if (e.target === e.currentTarget) onClose(); }}>
       <div className={`sheet sheet-${size} ${className}`} role="dialog" aria-modal="true" aria-label={typeof title === 'string' ? title : undefined} tabIndex={-1} ref={ref}>

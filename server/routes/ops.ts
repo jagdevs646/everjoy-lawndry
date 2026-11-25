@@ -4,9 +4,10 @@ import bcrypt from 'bcryptjs';
 import { z } from 'zod';
 import { db, insertId, logActivity, notify } from '../db.js';
 import { AuthedRequest, requireRole } from '../auth.js';
-import { addEvent, cancelOrder, cardInUse, checkCard, isUniqueError, nextFreeCard, correctOrder, createOrder, deliverOrder, getOrderRow, getSettings, listServices, monthUsage, orderInput, planStatus, quote, recordPayment, setStatus } from '../rules.js';
+import { addEvent, cancelOrder, cardInUse, checkHandover, checkCard, isUniqueError, nextFreeCard, correctOrder, createOrder, deliverOrder, getOrderRow, getSettings, listServices, monthUsage, orderInput, planStatus, quote, recordPayment, setStatus } from '../rules.js';
 import { photoUpload, savePhoto } from '../files.js';
 import { checkStudentEmail } from '../otp.js';
+import { HANDOVER_REQUEST_MINUTES, orderForSign, recordSignoff, statementFor, type Origin, type Proof } from '../signoff.js';
 import { announcementsFor, complaintDetail, findOrderByCode, listComplaints, listOrders, listStudents, orderDetail, studentProfile } from '../queries.js';
 import { codeKey, dayKey, handle, HttpError, MAX_ID, nowIso, parse, startOfLocalDayIso, zDate, zId, zText } from '../util.js';
 import { normaliseLogin, zIdCard, zMobile, zRoom } from './public.js';
@@ -73,6 +74,7 @@ async function pickSettings() {
     monthly_kg_limit: s.monthly_kg_limit, monthly_order_limit: s.monthly_order_limit, max_active_orders: s.max_active_orders,
     allow_paid_extra: s.allow_paid_extra, extra_rate_per_kg: s.extra_rate_per_kg,
     upi_id: s.upi_id, upi_name: s.upi_name, has_upi_qr: !!s.upi_qr_file,
+    sign_dropoff: s.sign_dropoff, sign_pickup: s.sign_pickup,
     card_required: s.card_required, card_series: s.card_series, semester_start: s.semester_start, semester_end: s.semester_end,
     dropoff_from: s.dropoff_from, dropoff_to: s.dropoff_to, pickup_from: s.pickup_from, pickup_to: s.pickup_to, auto_status: s.auto_status,
   };
@@ -300,19 +302,91 @@ router.post('/ops/orders/:id/waive', requireRole('ADMIN'), handle(async (req, re
   res.json(await orderDetail(id));
 }));
 
+const origin = (req: { ip?: string; get: (h: string) => string | undefined }): Origin => ({ ip: req.ip, userAgent: req.get('user-agent') });
+const zHandover = z.object({
+  returnedCount: z.coerce.number().int().min(0, 'Count cannot be negative').max(300),
+  note: z.string().trim().max(200).default(''),
+  payMethod: z.enum(['CASH', 'UPI']).optional(),
+  payRef: z.string().trim().max(60).default(''),
+});
+const zSignature = z.string().max(90_000, 'The signature image is too large. Clear it and sign again.');
+
 router.post('/ops/orders/:id/deliver', handle(async (req, res) => {
   const id = parse(zId, req.params.id);
-  const b = parse(z.object({
-    returnedCount: z.coerce.number().int().min(0, 'Count cannot be negative').max(300),
-    note: z.string().trim().max(200).default(''),
-    payMethod: z.enum(['CASH', 'UPI']).optional(),
-    payRef: z.string().trim().max(60).default(''),
+  const b = parse(zHandover.extend({
+    signature: zSignature.optional(),                       // student's finger signature on this screen
+    clothesCount: z.coerce.number().int().optional(),       // what the signing screen showed as given
+    override: z.string().trim().max(200).optional(),        // admin only: hand over without it, and why
   }), req.body);
+  const me = actor(req);
+  if (b.signature && b.clothesCount !== undefined && b.clothesCount !== (await getOrderRow(id)).clothes_count) {
+    throw new HttpError(409, 'The order was changed while the student signed. Show them the new count and sign again.', { code: 'CHANGED' });
+  }
+  let proof: Proof | undefined;
+  if (b.signature) proof = { method: 'SIGNATURE', signature: b.signature };
+  else if (b.override !== undefined) {
+    if (me.role !== 'ADMIN') throw new HttpError(403, 'Only the admin can hand over without the student’s signature.');
+    if (b.override.length < 5) throw new HttpError(422, 'Write why the student could not sign (at least a few words).');
+    proof = { method: 'OVERRIDE', reason: b.override };
+  }
   await db.tx(async () => {   // payment + handover succeed or fail together
     await db.lockRow('orders', id);
-    if (b.payMethod && (await getOrderRow(id)).payment_status === 'DUE') await recordPayment(actor(req).id, id, b.payMethod, b.payRef);
-    await deliverOrder(actor(req).id, id, b.returnedCount, b.note);
+    // Count, payment and status first (what staff must fix), then the signature, all before taking money.
+    const { s } = await checkHandover(id, b.returnedCount, b.note, !!b.payMethod);
+    if (s.sign_pickup && !proof) throw new HttpError(409, 'The student must sign for their clothes on this screen, or confirm on their phone, before you hand them over.', { code: 'SIGN_NEEDED' });
+    if (b.payMethod && (await getOrderRow(id)).payment_status === 'DUE') await recordPayment(me.id, id, b.payMethod, b.payRef);
+    await deliverOrder(me.id, id, b.returnedCount, b.note, proof, origin(req));
   });
+  res.json(await orderDetail(id));
+}));
+
+/** Does the student have to confirm drop-off / pickup? (admin's choice; staff screens read it) */
+router.get('/ops/sign-rules', handle(async (_req, res) => { const s = await getSettings(); res.json({ sign_dropoff: s.sign_dropoff, sign_pickup: s.sign_pickup }); }));
+
+/** The student signs the drop-off on the counter screen ("I gave 8 clothes, 3 kg…"). */
+router.post('/ops/orders/:id/sign', handle(async (req, res) => {
+  const id = parse(zId, req.params.id);
+  const b = parse(z.object({ signature: zSignature, clothesCount: z.coerce.number().int().optional(), weightKg: z.coerce.number().optional() }), req.body);
+  await db.tx(async () => {
+    await db.lockRow('orders', id);
+    const o = await orderForSign(id);
+    if ((b.clothesCount !== undefined && b.clothesCount !== o.clothes_count) || (b.weightKg !== undefined && Number(b.weightKg) !== Number(o.weight_kg))) {
+      throw new HttpError(409, `${o.order_no} was changed (now ${o.clothes_count} clothes). Show the student the new details and sign again.`, { code: 'CHANGED' });
+    }
+    if (!['RECEIVED', 'WASHING', 'READY'].includes(o.status)) throw new HttpError(409, `${o.order_no} is ${o.status.toLowerCase()}; the drop-off can no longer be signed.`);
+    if (o.dropoff_ack === 'SIGNATURE' || o.dropoff_ack === 'PHONE') throw new HttpError(409, `The student already confirmed the drop-off of ${o.order_no}.`);
+    const at = nowIso();
+    await recordSignoff({ o, kind: 'DROPOFF', proof: { method: 'SIGNATURE', signature: b.signature }, staffId: actor(req).id, at, statement: statementFor('DROPOFF', o, at), origin: origin(req) });
+  });
+  res.json(await orderDetail(id));
+}));
+
+/**
+ * Hand over by phone: staff count the clothes, then the student taps "Yes, I received them" in their own
+ * app. The hand-over completes at that moment (with payment, if any). Expires after a few minutes.
+ */
+router.post('/ops/orders/:id/handover-request', handle(async (req, res) => {
+  const id = parse(zId, req.params.id);
+  const b = parse(zHandover, req.body);
+  await db.tx(async () => {
+    await db.lockRow('orders', id);
+    const { o } = await checkHandover(id, b.returnedCount, b.note, !!b.payMethod);
+    const kind = await db.get<{ kind: string }>('SELECT kind FROM students WHERE user_id = ?', [o.student_id]);
+    if (kind?.kind === 'WALKIN') throw new HttpError(409, 'Walk-in customers have no app: ask them to sign on this screen.');
+    const at = nowIso();
+    await db.run('DELETE FROM handover_requests WHERE order_id = ?', [id]);
+    await db.run('INSERT INTO handover_requests (order_id, staff_id, returned_count, note, pay_method, pay_ref, status, created_at, expires_at) VALUES (?,?,?,?,?,?,?,?,?)', [
+      id, actor(req).id, b.returnedCount, b.note || null, o.payment_status === 'DUE' ? b.payMethod ?? null : null, b.payRef || null, 'WAITING', at,
+      new Date(Date.now() + HANDOVER_REQUEST_MINUTES * 60_000).toISOString(),
+    ]);
+    await notify(o.student_id, `Confirm you received ${o.order_no}`, `Open the app and confirm you got ${b.returnedCount} clothes back, or say what is wrong.`, id);
+  });
+  res.json(await orderDetail(id));
+}));
+
+router.delete('/ops/orders/:id/handover-request', handle(async (req, res) => {
+  const id = parse(zId, req.params.id);
+  await db.run('DELETE FROM handover_requests WHERE order_id = ?', [id]);
   res.json(await orderDetail(id));
 }));
 
