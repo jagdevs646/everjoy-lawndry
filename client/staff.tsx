@@ -49,6 +49,28 @@ export function StaffApp({ user, onSignOut, onUser, onAdmin }: { user: User; onS
         <Tab to="orders" icon="washer" label="Orders" on={page === 'orders'} badge={s?.open.late} alert />
         <Tab to="students" icon="users" label="Students" on={page === 'students'} badge={(s?.pending_students ?? 0) + (s?.room_changes ?? 0)} />
         <Tab to="issues" icon="help" label="Issues" on={page === 'issues'} badge={s?.open_complaints} />
+        {/* Computer only: today's numbers and the account, under the menu */}
+        {s && (
+          <div className="sf-side-stats" aria-label="Counter today">
+            <h2>Today</h2>
+            <dl>
+              <div><dt>Taken in</dt><dd>{s.today.received}</dd></div>
+              <div><dt>Weight</dt><dd>{kg(s.today.kg)}</dd></div>
+              <div><dt>Handed back</dt><dd>{s.today.delivered}</dd></div>
+            </dl>
+            <h2>Now</h2>
+            <dl>
+              <div><dt>Received</dt><dd>{s.open.received}</dd></div>
+              <div><dt>Washing</dt><dd>{s.open.washing}</dd></div>
+              <div><dt>On the shelf</dt><dd>{s.open.ready}</dd></div>
+              <div className={s.open.late ? 'late' : ''}><dt>Late</dt><dd>{s.open.late}</dd></div>
+            </dl>
+          </div>
+        )}
+        <button type="button" className="sf-side-user" onClick={() => setMenu(true)}>
+          <span className="avatar">{user.name.split(' ').map(x => x[0]).slice(0, 2).join('')}</span>
+          <span><b>{user.name}</b><small>{isAdmin ? 'Admin' : 'Staff'}, {user.login_id}</small></span>
+        </button>
       </nav>
       {orderId && <OrderSheet id={orderId} isAdmin={isAdmin} payFirst={s?.settings.pay_before_pickup ?? true} close={() => setOrderId(null)} onChanged={refresh} />}
       {studentId && <StudentSheet id={studentId} isAdmin={isAdmin} close={() => setStudentId(null)} onChanged={refresh} onOpenOrder={id => { setStudentId(null); setOrderId(id); }} />}
@@ -91,14 +113,18 @@ function Counter({ settings, services, onCreated, openOrder, openStudent, pendin
       {!student ? (
         <>
           <h1>New order</h1>
-          <FindStudent onFound={setStudent} />
-          {pending > 0 && <button className="sf-callout" onClick={() => go('students')}><Icon name="card" />{plural(pending, 'student')} waiting for approval<Icon name="next" size={18} /></button>}
-          {notices.map(n => <p key={n.id} className="sf-notice"><Icon name="megaphone" size={18} /><span><b>{n.title}</b> {n.body}</span></p>)}
-          <ol className="how">
-            <li>Scan or type the student’s ID card no.</li>
-            <li>Weigh the clothes and count the pieces.</li>
-            <li>Take the order. Write the order no. on the bag tag.</li>
-          </ol>
+          <div className="counter-cols">
+            <div className="counter-find"><FindStudent onFound={setStudent} /></div>
+            <div className="counter-side">
+              {pending > 0 && <button className="sf-callout" onClick={() => go('students')}><Icon name="card" />{plural(pending, 'student')} waiting for approval<Icon name="next" size={18} /></button>}
+              {notices.map(n => <p key={n.id} className="sf-notice"><Icon name="megaphone" size={18} /><span><b>{n.title}</b> {n.body}</span></p>)}
+              <ol className="how">
+                <li>Scan or type the student’s ID card no.</li>
+                <li>Weigh the clothes and count the pieces.</li>
+                <li>Take the order. Write the order no. on the bag tag.</li>
+              </ol>
+            </div>
+          </div>
         </>
       ) : (
         <OrderForm student={student} settings={settings} services={services} onChangeStudent={() => setStudent(null)} onStudent={setStudent}
@@ -269,6 +295,8 @@ function OrderForm({ student, settings, services, onChangeStudent, onStudent, on
         ) : <ErrorNote error={`This account is ${student.status.toLowerCase()}${student.review_note ? `: ${student.review_note}` : ''}. Orders cannot be taken.`} />
       ) : (
         <>
+          <div className="of-cols">
+          <div className="of-fields">
           {services.length > 1 && (
             <div className="service-chips" role="radiogroup" aria-label="Service">
               {services.map(x => (
@@ -301,7 +329,9 @@ function OrderForm({ student, settings, services, onChangeStudent, onStudent, on
             <summary>Add a note</summary>
             <input value={note} onChange={e => setNote(e.target.value)} placeholder="e.g. 1 blanket, white kurta wash separately" maxLength={200} aria-label="Note" />
           </details>
+          </div>
 
+          <div className="of-side">
           {over ? (
             <div className="over-choice" role="group" aria-label="Over the free limit">
               <p><Icon name="alert" size={18} /><span>{quoteError}</span></p>
@@ -339,6 +369,8 @@ function OrderForm({ student, settings, services, onChangeStudent, onStudent, on
           )}
           {error && <ErrorNote error={error} />}
           <Button tone="primary" size="lg" block busy={busy} disabled={!quote || !!quoteError || (cardNeeded && !tag)}>Take order{tag ? ` on card ${tag}` : ''}: {c || 0} clothes{w ? `, ${kg(w)}` : ''}</Button>
+          </div>
+          </div>
         </>
       )}
     </form>

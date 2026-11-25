@@ -55,6 +55,13 @@ export function StudentApp({ user, onSignOut, onUser }: { user: User; onSignOut:
         <Tab to="orders" icon="list" label="My orders" on={tab === 'orders'} />
         <Tab to="help" icon="help" label="Help" on={tab === 'help'} badge={data?.open_complaints} />
         <Tab to="me" icon="user" label="Profile" on={tab === 'me'} />
+        {/* Computer only: who is signed in, under the menu */}
+        {data && (
+          <a href="#/me" className="st-side-user">
+            <Avatar name={data.profile.name} photo={data.profile.photo} size={40} />
+            <span><b>{data.profile.name}</b><small>{data.profile.id_card_no}</small></span>
+          </a>
+        )}
       </nav>
       {overlay === 'slip' && arg && <Slip id={Number(arg)} cached={data?.open} close={closeOverlay} />}
       {overlay === 'inbox' && <Inbox close={() => { closeOverlay(); void home.reload(); }} />}
@@ -79,6 +86,7 @@ function HomePage({ home }: { home: Home }) {
   const ready = open.filter(o => o.status === 'READY');
   return (
     <div className="st-home">
+      <div className="home-main">
       <section className="hello">
         <button className="hello-photo" onClick={() => go('me')} aria-label="Profile"><Avatar name={p.name} photo={p.photo} size={56} /></button>
         <div>
@@ -106,7 +114,9 @@ function HomePage({ home }: { home: Home }) {
           </button>
         </>
       )}
+      </div>
 
+      <div className="home-side">
       {info.dropoff_from && <p className="timings-line"><Icon name="clock" size={16} />Give laundry {t12(info.dropoff_from)}–{t12(info.dropoff_to!)} · Collect {t12(info.pickup_from!)}–{t12(info.pickup_to!)}</p>}
       {home.due > 0 && <PayDue amount={home.due} info={info} orders={open.filter(o => o.payment_status === 'DUE')} />}
 
@@ -123,6 +133,7 @@ function HomePage({ home }: { home: Home }) {
           ))}
         </section>
       )}
+      </div>
     </div>
   );
 }

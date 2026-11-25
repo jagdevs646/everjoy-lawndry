@@ -14,6 +14,10 @@ import './styles/base.css';
 import './styles/student.css';
 import './styles/staff.css';
 import './styles/admin.css';
+import './styles/desktop.css';
+
+// The Android/iOS app always keeps the phone layout; a browser on a computer gets the desktop layout (desktop.css).
+document.documentElement.dataset.device = isApp ? 'app' : 'web';
 
 // Staff and admin screens (and the camera scanner) load only for those roles, keeping the student download small.
 const StaffApp = lazy(() => import('./staff').then(m => ({ default: m.StaffApp })));

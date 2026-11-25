@@ -1,0 +1,114 @@
+/* Desktop layout for students and staff on a computer browser.
+   Phones (the Android/iOS app, or a phone's browser) keep the mobile layout: the app is marked
+   html[data-device='app'] and never gets these rules, and a phone browser is narrower than 1024px.
+   The wrappers added for the desktop columns are invisible (display: contents) on phones, so the
+   mobile screens look exactly as before. */
+
+.counter-cols, .counter-find, .counter-side,
+.of-cols, .of-fields, .of-side,
+.home-main, .home-side { display: contents; }
+.sf-tabs .sf-side-stats, .sf-tabs .sf-side-user, .st-tabs .st-side-user { display: none; }
+
+@media (min-width: 1024px) {
+  /* ---------------------------------------------------------------- staff */
+  html[data-device='web'] .sf-shell {
+    display: grid; grid-template-columns: 252px minmax(0, 1fr); grid-template-rows: auto 1fr;
+    min-height: 100vh; padding-bottom: 0;
+  }
+  html[data-device='web'] .sf-top { grid-column: 1 / -1; padding: 12px 28px; height: 64px; }
+  html[data-device='web'] .sf-top .sf-today,
+  html[data-device='web'] .sf-top .sf-user { display: none; }
+  html[data-device='web'] .sf-tabs {
+    position: sticky; top: 64px; left: auto; right: auto; bottom: auto; transform: none; width: auto;
+    grid-column: 1; grid-row: 2; align-self: start; height: calc(100vh - 64px); overflow-y: auto;
+    display: flex; flex-direction: column; gap: 4px; padding: 20px 14px;
+    border: 0; border-right: 1px solid #383F46; border-radius: 0; background: #22272B;
+  }
+  html[data-device='web'] .sf-tabs > a {
+    display: flex; align-items: center; gap: 12px; padding: 10px 12px; border-radius: 12px;
+    font-size: .975rem; font-weight: 700; color: var(--ink-2);
+  }
+  html[data-device='web'] .sf-tabs > a:hover { background: rgba(255, 255, 255, .05); color: var(--ink); }
+  html[data-device='web'] .sf-tabs > a.on { background: var(--accent-soft); color: var(--accent); }
+  html[data-device='web'] .sf-tabs > a.on .tab-icon,
+  html[data-device='web'] .sf-tabs .tab-icon { width: 28px; height: 28px; background: none; }
+  html[data-device='web'] .sf-tabs > a { position: relative; }
+  html[data-device='web'] .sf-tabs .tab-icon { position: static; }
+  html[data-device='web'] .sf-tabs .tab-icon .dot-badge { top: 50%; right: 12px; transform: translateY(-50%); min-width: 22px; height: 22px; line-height: 22px; border-radius: 11px; }
+
+  html[data-device='web'] .sf-side-stats { display: grid; gap: 8px; margin-top: 22px; padding: 16px 12px 4px; border-top: 1px solid #383F46; }
+  html[data-device='web'] .sf-side-stats h2 { font-size: .8rem; font-weight: 700; color: var(--muted); margin-top: 4px; }
+  html[data-device='web'] .sf-side-stats dl { margin: 0 0 6px; display: grid; gap: 4px; }
+  html[data-device='web'] .sf-side-stats dl > div { display: flex; justify-content: space-between; gap: 8px; font-size: .9rem; }
+  html[data-device='web'] .sf-side-stats dt { color: var(--ink-2); }
+  html[data-device='web'] .sf-side-stats dd { margin: 0; font-weight: 800; font-stretch: 85%; font-variant-numeric: tabular-nums; }
+  html[data-device='web'] .sf-side-stats .late dd { color: var(--bad); }
+  html[data-device='web'] .sf-side-user {
+    display: flex; align-items: center; gap: 10px; margin-top: auto; padding: 12px; border: 0; border-top: 1px solid #383F46;
+    background: none; color: var(--ink); text-align: left; border-radius: 0;
+  }
+  html[data-device='web'] .sf-side-user:hover { background: rgba(255, 255, 255, .05); }
+  html[data-device='web'] .sf-side-user > span:last-child { display: grid; min-width: 0; }
+  html[data-device='web'] .sf-side-user small { color: var(--muted); font-size: .8rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+  html[data-device='web'] .sf-main { grid-column: 2; grid-row: 2; width: 100%; max-width: 1280px; margin: 0; padding: 30px 40px 56px; }
+  html[data-device='web'] .sf-page h1 { font-size: 2rem; }
+
+  /* New order: search on the left, notices and steps on the right */
+  html[data-device='web'] .counter-cols { display: grid; grid-template-columns: minmax(0, 1.5fr) minmax(300px, 1fr); gap: 28px; align-items: start; }
+  html[data-device='web'] .counter-find, html[data-device='web'] .counter-side { display: grid; gap: 16px; align-content: start; }
+  html[data-device='web'] .counter-side .how { margin: 0; padding: 16px 16px 16px 36px; border-radius: var(--radius); background: var(--surface); }
+
+  html[data-device='web'] .created { max-width: 760px; margin: 0 auto; }
+
+  /* -------------------------------------------------------------- student */
+  html[data-device='web'] .st-shell {
+    max-width: 1280px; display: grid; grid-template-columns: 236px minmax(0, 1fr); grid-template-rows: auto auto 1fr;
+    column-gap: 44px; padding: 0 36px 56px;
+  }
+  html[data-device='web'] .st-top { grid-column: 1 / -1; padding: 18px 0 14px; }
+  html[data-device='web'] .offline-bar { grid-column: 2; margin: 0 0 12px; }
+  html[data-device='web'] .st-tabs {
+    position: sticky; top: 88px; left: auto; bottom: auto; transform: none; width: auto;
+    grid-column: 1; grid-row: 2 / span 2; align-self: start;
+    display: flex; flex-direction: column; gap: 4px; padding: 10px; border: 0; border-radius: var(--radius); background: var(--surface);
+    box-shadow: 0 1px 0 var(--line), 0 18px 40px -28px rgba(27, 42, 74, .35);
+  }
+  html[data-device='web'] .st-tabs > a { display: flex; align-items: center; gap: 12px; padding: 11px 12px; border-radius: 12px; font-size: 1rem; color: var(--ink-2); }
+  html[data-device='web'] .st-tabs > a:hover { background: var(--surface-2); color: var(--ink); }
+  html[data-device='web'] .st-tabs > a.on { background: var(--accent-soft); color: var(--accent-text); }
+  html[data-device='web'] .st-tabs .tab-icon,
+  html[data-device='web'] .st-tabs > a.on .tab-icon { width: 28px; height: 28px; background: none; }
+  html[data-device='web'] .st-tabs > a { position: relative; }
+  html[data-device='web'] .st-tabs .tab-icon { position: static; }
+  html[data-device='web'] .st-tabs .tab-icon .dot-badge { top: 50%; right: 12px; transform: translateY(-50%); min-width: 22px; height: 22px; line-height: 22px; border-radius: 11px; }
+  html[data-device='web'] .st-side-user {
+    display: flex; align-items: center; gap: 10px; margin-top: 10px; padding: 12px 10px 4px; border-top: 1px solid var(--line);
+    color: var(--ink); text-decoration: none;
+  }
+  html[data-device='web'] .st-side-user > span { display: grid; min-width: 0; }
+  html[data-device='web'] .st-side-user b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  html[data-device='web'] .st-side-user small { color: var(--muted); font-size: .8rem; }
+  html[data-device='web'] .st-main { grid-column: 2; padding: 4px 0 24px; min-width: 0; }
+
+  /* Home: laundry at the counter on the left; timings, payment, monthly use and notices on the right */
+  html[data-device='web'] .st-home { grid-template-columns: minmax(0, 1.6fr) minmax(300px, 1fr); gap: 32px; align-items: start; }
+  html[data-device='web'] .home-main, html[data-device='web'] .home-side { display: grid; gap: 18px; align-content: start; }
+  html[data-device='web'] .home-side { position: sticky; top: 88px; }
+  html[data-device='web'] .hello h1 { font-size: 2.75rem; }
+  html[data-device='web'] .tag-stack { grid-template-columns: repeat(auto-fill, minmax(330px, 1fr)); }
+  html[data-device='web'] .st-page { max-width: 880px; }
+}
+
+/* Order form: what was given on the left; the price check and "Take order" stay in view on the right.
+   Needs room for both, so it starts at 1280px (narrower laptops keep one column). */
+@media (min-width: 1280px) {
+  html[data-device='web'] .of-cols { display: grid; grid-template-columns: minmax(0, 1fr) 360px; gap: 24px; align-items: start; }
+  html[data-device='web'] .of-fields, html[data-device='web'] .of-side { display: grid; gap: 14px; align-content: start; }
+  html[data-device='web'] .of-side { position: sticky; top: 88px; }
+  html[data-device='web'] .of-side .verdict { min-height: 120px; align-content: center; }
+}
+
+@media (min-width: 1440px) {
+  html[data-device='web'] .st-shell { grid-template-columns: 260px minmax(0, 1fr); }
+}
