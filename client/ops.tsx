@@ -7,7 +7,7 @@ import { Avatar, Button, Empty, ErrorNote, Field, Icon, Loading, PayPill, Photo,
 
 export type OpsSettings = { max_kg_per_order: number; express_enabled: boolean; express_fee: number; pay_before_pickup: boolean; monthly_kg_limit: number; monthly_order_limit: number; max_active_orders: number;
   allow_paid_extra: boolean; extra_rate_per_kg: number; upi_id: string; upi_name: string; has_upi_qr: boolean;
-  card_required?: boolean; card_series?: { prefix: string; from: number; to: number }[]; semester_start?: string; semester_end?: string };
+  card_required?: boolean; card_series?: { prefix: string; suffix?: string; from: number; to: number; pad?: number }[]; semester_start?: string; semester_end?: string };
 export type CounterStudent = Student & { usage: Usage; open: Order[]; orders?: Order[]; plan: Plan };
 export type { Service };
 
@@ -153,8 +153,8 @@ function ChangeCard({ o, onDone, onCancel }: { o: Order; onDone: (o: Order) => v
   };
   return (
     <form className="stack" onSubmit={save}>
-      <Field label="Basket card no." hint="The card tied to this basket, e.g. A1002">
-        <input value={tag} onChange={e => setTag(e.target.value.toUpperCase())} autoCapitalize="characters" autoFocus />
+      <Field label="Basket card no." hint="The no. on the card tied to this basket">
+        <input value={tag} onChange={e => setTag(e.target.value.toUpperCase())} autoCapitalize="characters" spellCheck={false} maxLength={40} autoFocus />
       </Field>
       {error && <ErrorNote error={error} />}
       <Button tone="primary" block busy={busy}>Save card</Button>

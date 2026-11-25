@@ -209,7 +209,8 @@ function OrderForm({ student, settings, services, onChangeStudent, onStudent, on
 
   const body = () => ({ studentId: student.id, serviceId: service?.id, weightKg: needsWeight ? w : (w || 0), clothesCount: c, express, acceptExtra, tagNo: tag });
   const cardNeeded = !!settings?.card_required;
-  const cardExample = settings?.card_series?.[0] ? `${settings.card_series[0].prefix}${settings.card_series[0].from}` : 'A1002';
+  const first = settings?.card_series?.[0];
+  const cardExample = first ? `${first.prefix}${String(first.from).padStart(first.pad ?? 0, '0')}${first.suffix ?? ''}` : 'A1002';
   // Live rule check: the same server function that saves the order.
   useEffect(() => {
     setQuote(null); setQuoteError(''); setOver(null);
@@ -293,7 +294,7 @@ function OrderForm({ student, settings, services, onChangeStudent, onStudent, on
           </div>
           <label className={`card-box${cardNeeded && !tag ? ' need' : ''}`}>
             <span>Basket card no.{cardNeeded ? '' : ' (optional)'}</span>
-            <input value={tag} onChange={e => setTag(e.target.value.toUpperCase().replace(/\s/g, ''))} placeholder={cardExample} autoCapitalize="characters" autoComplete="off" spellCheck={false} maxLength={12} aria-label="Basket card no." />
+            <input value={tag} onChange={e => setTag(e.target.value.toUpperCase().replace(/\s/g, ''))} placeholder={cardExample} autoCapitalize="characters" autoComplete="off" spellCheck={false} maxLength={40} aria-label="Basket card no." />
             <small>The card hung on this basket. Used to find it at pickup.</small>
           </label>
           {settings?.express_enabled && (

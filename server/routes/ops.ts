@@ -343,7 +343,7 @@ router.patch('/ops/orders/:id', handle(async (req, res) => {
 /** Change the basket card on an order that hasn't been collected (wrong card typed, card lost). */
 router.patch('/ops/orders/:id/card', handle(async (req, res) => {
   const id = parse(zId, req.params.id);
-  const b = parse(z.object({ tagNo: z.string().trim().max(20) }), req.body);
+  const b = parse(z.object({ tagNo: z.string().trim().max(60) }), req.body);
   const s = await getSettings();
   const card = checkCard(s, b.tagNo);
   await db.tx(async () => {

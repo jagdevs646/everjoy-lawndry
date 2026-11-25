@@ -620,7 +620,7 @@ type Settings = {
   max_kg_per_order: number; max_active_orders: number; monthly_order_limit: number; monthly_kg_limit: number; allow_paid_extra: boolean;
   extra_rate_per_kg: number; express_enabled: boolean; express_fee: number; regular_turnaround_hours: number; express_turnaround_hours: number;
   pay_before_pickup: boolean; upi_id: string; upi_name: string; upi_qr_file?: string; semester_start: string; semester_end: string; counter_hours: string;
-  student_email_otp: boolean; student_email_domain: string; card_required: boolean; card_series: { prefix: string; from: number; to: number }[];
+  student_email_otp: boolean; student_email_domain: string; card_required: boolean; card_series: Series[];
   dropoff_from: string; dropoff_to: string; pickup_from: string; pickup_to: string; ready_after_days: number; express_ready_after_days: number;
   auto_status: boolean; auto_washing_hours: number;
 };
@@ -642,7 +642,7 @@ function Settings() {
   const s = useLoad(() => api<Settings>('/admin/settings'), []);
   const [draft, setDraft] = useState<Settings | null>(null);
   const [tab, setTab] = useState<SettingTab>(() => { try { return (sessionStorage.getItem('ej-settings-tab') as SettingTab) || 'orders'; } catch { return 'orders'; } });
-  const { busy, error, submit } = useFormAction();
+  const { busy, error, setError, submit } = useFormAction();
   useEffect(() => { if (s.data) setDraft(d => d && JSON.stringify(d) !== JSON.stringify(s.data) && d.upi_qr_file !== s.data!.upi_qr_file ? { ...d, upi_qr_file: s.data!.upi_qr_file } : s.data!); }, [s.data]);
   useEffect(() => { try { sessionStorage.setItem('ej-settings-tab', tab); } catch { /* ignore */ } }, [tab]);
   if (!draft) return <Loading />;
@@ -769,21 +769,15 @@ function Settings() {
         )}
 
         {tab === 'cards' && (
-          <div className="settings-cards one">
-            <section className="ad-card settings-group">
-              <h2>Basket cards</h2>
-              <p className="muted small">The numbered cards hung on each laundry basket (A1002, A628…). Staff type the card no. at drop-off and find the basket by it at pickup. A card can be on only one basket until it is collected.</p>
-              <Switch checked={draft.card_required} onChange={v => setDraft({ ...draft, card_required: v })} label="Card no. needed for every order" />
-              <CardSeries series={draft.card_series} onChange={card_series => setDraft({ ...draft, card_series })} />
-            </section>
-          </div>
+          <CardSeries series={draft.card_series} onChange={card_series => setDraft({ ...draft, card_series })}
+            required={draft.card_required} onRequired={v => setDraft({ ...draft, card_required: v })} />
         )}
 
         {tab !== 'services' && (
           <div className={`save-bar${dirty ? ' dirty' : ''}`}>
             {error && <ErrorNote error={error} />}
             <span>{dirty ? 'You have unsaved changes.' : 'All changes saved.'}</span>
-            <Button type="button" tone="plain" disabled={!dirty} onClick={() => setDraft(s.data!)}>Undo</Button>
+            <Button type="button" tone="plain" disabled={!dirty} onClick={() => { setDraft(s.data!); setError(''); }}>Undo</Button>
             <Button tone="primary" busy={busy} disabled={!dirty}>Save rules</Button>
           </div>
         )}
@@ -1163,32 +1157,121 @@ function MailStatus() {
   return <p className="mail-off"><Icon name="alert" size={16} />Email is not set up on the server yet, so email codes are off. See SECURITY-TODO.md → “Email codes (Brevo)”.</p>;
 }
 
-type Series = { prefix: string; from: number; to: number };
-/** The admin's card series, e.g. A 1–3000 and B 1–500. */
-function CardSeries({ series, onChange }: { series: Series[]; onChange: (s: Series[]) => void }) {
-  const [n, setN] = useState({ prefix: 'A', from: '1', to: '3000' });
-  const add = () => {
-    const from = Number(n.from), to = Number(n.to);
-    if (!Number.isInteger(from) || !Number.isInteger(to) || from > to) { toast('“From” must be a number not bigger than “To”.', 'bad'); return; }
-    onChange([...series, { prefix: n.prefix.trim().toUpperCase(), from, to }]);
+type Series = { prefix: string; suffix: string; from: number; to: number; pad: number };
+
+/** Only letters and digits, like the server: staff can type a card no. without its signs and spaces. */
+const looseCard = (v: string) => v.toUpperCase().replace(/[^\p{L}\p{N}]/gu, '');
+const formatCard = (x: Series, n: number) => `${x.prefix}${String(n).padStart(x.pad, '0')}${x.suffix}`;
+const cardCount = (x: Series) => (x.to - x.from + 1).toLocaleString('en-IN');
+
+/** Ready-made patterns the admin can start from. */
+const CARD_PATTERNS: Series[] = [
+  { prefix: 'A', suffix: '', from: 1, to: 3000, pad: 0 },
+  { prefix: 'BLUE-', suffix: '', from: 1, to: 500, pad: 3 },
+  { prefix: 'H1/', suffix: '', from: 1, to: 200, pad: 0 },
+  { prefix: '', suffix: '-B', from: 1, to: 999, pad: 0 },
+  { prefix: '#', suffix: '', from: 100, to: 999, pad: 0 },
+];
+
+type SeriesForm = { prefix: string; suffix: string; from: string; to: string; zeros: boolean };
+const BLANK_SERIES: SeriesForm = { prefix: '', suffix: '', from: '1', to: '', zeros: false };
+const toForm = (x: Series): SeriesForm => ({ prefix: x.prefix, suffix: x.suffix, from: String(x.from).padStart(x.pad, '0'), to: String(x.to).padStart(x.pad, '0'), zeros: x.pad > 0 });
+
+/** Basket cards tab: the card series the counter uses (anything before and after the number), and a builder with a live preview. */
+function CardSeries({ series, onChange, required, onRequired }: { series: Series[]; onChange: (s: Series[]) => void; required: boolean; onRequired: (v: boolean) => void }) {
+  const [f, setF] = useState<SeriesForm>(BLANK_SERIES);
+  const [editing, setEditing] = useState<number | null>(null);
+  const from = Number(f.from), to = Number(f.to);
+  const draft: Series = {
+    prefix: f.prefix.toUpperCase().replace(/\s+/g, ' ').trimStart(),
+    suffix: f.suffix.toUpperCase().replace(/\s+/g, ' ').trimEnd(),
+    from, to, pad: f.zeros ? Math.max(f.from.length, f.to.length) : 0,
   };
+  const problem = !f.from || !f.to ? 'Enter the first and the last number.'
+    : from > to ? '“From” must not be bigger than “To”.'
+    : draft.prefix.length > 12 || draft.suffix.length > 12 ? 'Up to 12 characters before and after the number.'
+    : /[<>"`\\]/.test(draft.prefix + draft.suffix) ? 'These signs can’t be used: < > " ` \\'
+    : /^EJ\d*$/.test(looseCard(draft.prefix)) ? 'Cards can’t start with EJ: EJ-… is used for order numbers.'
+    : series.some((x, i) => i !== editing && looseCard(x.prefix) === looseCard(draft.prefix) && looseCard(x.suffix) === looseCard(draft.suffix) && x.from <= to && from <= x.to)
+      ? 'These cards overlap a series you already have.'
+      : null;
+  const sample = problem ? [] : [...new Set([from, from + 1, from + 2].filter(n => n < to))];
+  const digits = (v: string) => v.replace(/\D/g, '').slice(0, 6);
+
+  const save = () => {
+    if (problem) return;
+    const next = [...series];
+    if (editing !== null) next[editing] = draft; else next.push(draft);
+    onChange(next);
+    setF(BLANK_SERIES);
+    setEditing(null);
+  };
+  const edit = (i: number) => { setF(toForm(series[i])); setEditing(i); };
+  const remove = (i: number) => { onChange(series.filter((_, j) => j !== i)); if (editing === i) { setEditing(null); setF(BLANK_SERIES); } };
+
   return (
-    <div className="stack">
-      {series.length ? (
-        <ul className="series-list">
-          {series.map((x, i) => (
-            <li key={i}><b className="card-no">{x.prefix}{x.from}</b> to <b className="card-no">{x.prefix}{x.to}</b>
-              <Button size="sm" tone="plain" icon="x" type="button" aria-label={`Remove ${x.prefix} series`} onClick={() => onChange(series.filter((_, j) => j !== i))} /></li>
+    <div className="settings-cards cards-tab">
+      <section className="ad-card settings-group">
+        <h2>Basket cards</h2>
+        <p className="muted small">The numbered card hung on each laundry basket. Staff type the card no. at drop-off and find the basket by it at pickup. A card stays on one basket until it is collected, then it can be used again.</p>
+        <Switch checked={required} onChange={onRequired} label="Card no. needed for every order" hint="Off: staff can leave it empty." />
+        <div className="series-head"><h3>Your card series</h3>{series.length > 0 && <span className="muted small">{series.length} of 20</span>}</div>
+        {series.length ? (
+          <ul className="series-list">
+            {series.map((x, i) => (
+              <li key={i} className={editing === i ? 'editing' : ''}>
+                <span className="series-range"><b className="card-no">{formatCard(x, x.from)}</b><span className="muted">to</span><b className="card-no">{formatCard(x, x.to)}</b></span>
+                <small className="muted">{cardCount(x)} cards</small>
+                <span className="series-actions">
+                  <Button size="sm" tone="plain" type="button" onClick={() => edit(i)}>Edit</Button>
+                  <Button size="sm" tone="plain" icon="x" type="button" aria-label={`Remove series ${formatCard(x, x.from)}`} onClick={() => remove(i)} />
+                </span>
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <p className="series-empty">No series yet, so staff can type any card no. Add a series to accept only your own cards.</p>
+        )}
+      </section>
+
+      <section className="ad-card settings-group series-builder">
+        <h2>{editing !== null ? 'Change series' : 'Add a series'}</h2>
+        <p className="muted small">Put anything before or after the number: letters, a word, signs like - / # or a hostel code.</p>
+        <div className="series-fields">
+          <Field label="Before the number"><input value={f.prefix} onChange={e => setF({ ...f, prefix: e.target.value.slice(0, 12) })} placeholder="e.g. A, BLUE-, H1/" autoCapitalize="characters" spellCheck={false} /></Field>
+          <Field label="From"><input inputMode="numeric" value={f.from} onChange={e => { const v = digits(e.target.value); setF({ ...f, from: v, zeros: f.zeros || (v.length > 1 && v.startsWith('0')) }); }} placeholder="1" /></Field>
+          <Field label="To"><input inputMode="numeric" value={f.to} onChange={e => setF({ ...f, to: digits(e.target.value) })} placeholder="3000" /></Field>
+          <Field label="After the number"><input value={f.suffix} onChange={e => setF({ ...f, suffix: e.target.value.slice(0, 12) })} placeholder="e.g. -B, /H2" autoCapitalize="characters" spellCheck={false} /></Field>
+        </div>
+        <label className="check-line"><input type="checkbox" checked={f.zeros} onChange={e => setF({ ...f, zeros: e.target.checked })} />Same number of digits on every card (0001, 0002 … 3000)</label>
+
+        <div className={`card-preview${problem ? ' empty' : ''}`} aria-live="polite">
+          {problem ? <span>{f.to || f.prefix || f.suffix ? problem : 'Fill in the boxes to see how the cards will look.'}</span> : (
+            <>
+              <span className="card-preview-label">Cards will look like</span>
+              <span className="card-preview-row">
+                {sample.map(n => <b key={n} className="card-no">{formatCard(draft, n)}</b>)}
+                {to - from > 3 && <span className="muted">…</span>}
+                <b className="card-no">{formatCard(draft, to)}</b>
+              </span>
+              <small>{cardCount(draft)} cards. Staff can type them without signs or spaces: {looseCard(formatCard(draft, to)).toLowerCase()} finds {formatCard(draft, to)}.</small>
+            </>
+          )}
+        </div>
+
+        <div className="series-buttons">
+          {editing !== null && <Button type="button" tone="plain" onClick={() => { setEditing(null); setF(BLANK_SERIES); }}>Cancel</Button>}
+          <Button type="button" tone="primary" icon={editing !== null ? 'check' : 'plus'} disabled={!!problem || series.length >= 20 && editing === null} onClick={save}>{editing !== null ? 'Update series' : 'Add series'}</Button>
+        </div>
+
+        <div className="series-patterns">
+          <span className="muted small">Start from an example:</span>
+          {CARD_PATTERNS.map(x => (
+            <button key={formatCard(x, x.from)} type="button" onClick={() => { setF(toForm(x)); }}>{formatCard(x, x.from)} – {formatCard(x, x.to)}</button>
           ))}
-        </ul>
-      ) : <p className="muted small">No series set: staff can type any card no. (letters then numbers).</p>}
-      <div className="series-add">
-        <Field label="Letters"><input value={n.prefix} onChange={e => setN({ ...n, prefix: e.target.value.toUpperCase().replace(/[^A-Z]/g, '').slice(0, 3) })} placeholder="A" /></Field>
-        <Field label="From"><input inputMode="numeric" value={n.from} onChange={e => setN({ ...n, from: e.target.value.replace(/\D/g, '') })} /></Field>
-        <Field label="To"><input inputMode="numeric" value={n.to} onChange={e => setN({ ...n, to: e.target.value.replace(/\D/g, '') })} /></Field>
-        <Button type="button" icon="plus" onClick={add}>Add series</Button>
-      </div>
-      <p className="muted small">Remember to press “Save rules” below.</p>
+        </div>
+        <p className="muted small">Then press “Save rules” below. Two series that could give the same card no. are not allowed.</p>
+      </section>
     </div>
   );
 }

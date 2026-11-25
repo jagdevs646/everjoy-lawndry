@@ -820,6 +820,27 @@ describe('basket card no.', () => {
     expect(moved.body.tag_no).toBe('A7');
     await put(admin, '/api/admin/settings', { card_series: [], card_required: false });
   });
+
+  it('a series can have words and signs before and after the number', async () => {
+    // "H" 1–500 and "H1-" 1–100 can both read H11, so the counter could mix them up.
+    expect((await put(admin, '/api/admin/settings', { card_series: [{ prefix: 'H', from: 1, to: 500 }, { prefix: 'H1-', from: 1, to: 100 }] })).status).toBe(400);
+    expect((await put(admin, '/api/admin/settings', { card_series: [{ prefix: 'EJ-', from: 1, to: 9 }] })).status).toBe(400);
+    const ok = await put(admin, '/api/admin/settings', { card_series: [{ prefix: 'blue-', suffix: '/b', from: 1, to: 500, pad: 3 }, { prefix: '#', from: 100, to: 999 }], card_required: true });
+    expect(ok.status, ok.body.error).toBe(200);
+    expect(ok.body.card_series[0]).toEqual({ prefix: 'BLUE-', suffix: '/B', from: 1, to: 500, pad: 3 });
+    const s = await newStudent();
+    const o = await order(s.id, 2, 3, { tagNo: 'blue 7 b' });
+    expect(o.status, o.body.error).toBe(201);
+    expect(o.body.tag_no).toBe('BLUE-007/B');
+    expect((await order(s.id, 2, 3, { tagNo: 'BLUE-501/B' })).status).toBe(422);
+    const t = await newStudent();
+    expect((await order(t.id, 2, 3, { tagNo: 'BLUE-007/B' })).status).toBe(409);
+    expect((await post(staff, '/api/ops/scan', { code: 'blue7b' })).body).toMatchObject({ id: o.body.id, via: 'CARD', tag_no: 'BLUE-007/B' });
+    const hash = await order(t.id, 2, 3, { tagNo: '# 250' });
+    expect(hash.body.tag_no).toBe('#250');
+    expect((await post(staff, '/api/ops/scan', { code: '#250' })).body.id).toBe(hash.body.id);
+    await put(admin, '/api/admin/settings', { card_series: [], card_required: false });
+  });
 });
 
 describe('round 2 review fixes', () => {

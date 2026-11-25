@@ -57,7 +57,9 @@ export function parse<T extends z.ZodType>(schema: T, value: unknown): z.infer<T
   if (!result.success) {
     const issue = result.error.issues[0];
     const field = issue.path.join('.');
-    throw new HttpError(400, field && !issue.message.toLowerCase().includes(field.toLowerCase()) ? `${label(field)}: ${issue.message}` : issue.message);
+    // A custom check with params.whole writes its own full sentence.
+    const whole = issue.code === 'custom' && (issue as { params?: { whole?: boolean } }).params?.whole;
+    throw new HttpError(400, field && !whole && !issue.message.toLowerCase().includes(field.toLowerCase()) ? `${label(field)}: ${issue.message}` : issue.message);
   }
   return result.data;
 }

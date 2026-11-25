@@ -26,12 +26,27 @@ export const settingsSchema = z.object({
   student_email_otp: z.boolean(),                                   // new phones/browsers need a code from the university email
   student_email_domain: z.string().trim().toLowerCase().max(80).regex(/^@?[a-z0-9.-]*$/, 'Enter a domain like university.edu.in'),
   card_required: z.boolean(),                                       // a basket card no. is needed for every order
+  // Card series: anything before and after the number (letters, words, signs), e.g. A1–A3000, BLUE-001–BLUE-500, 1/H–200/H.
   card_series: z.array(z.object({
-    prefix: z.string().trim().toUpperCase().regex(/^[A-Z]{0,3}$/, 'Card letters: up to 3 letters (or none)')
-      .refine(v => v !== 'EJ', 'EJ is used for order numbers. Choose other letters for cards.'),
+    prefix: z.string().max(40).default(''),
+    suffix: z.string().max(40).default(''),
     from: z.coerce.number().int().min(0).max(999999),
     to: z.coerce.number().int().min(0).max(999999),
-  }).refine(s => s.from <= s.to, 'In a card series, "from" must not be bigger than "to"')).max(20),
+    pad: z.coerce.number().int().min(0).max(6).default(0),           // digits with leading zeros: 4 → A0001
+  }).transform(x => ({
+    prefix: tidyCardText(x.prefix).trimStart(), suffix: tidyCardText(x.suffix).trimEnd(), from: x.from, to: x.to, pad: x.pad,
+  })).superRefine((x, ctx) => {
+    const bad = (message: string) => ctx.addIssue({ code: 'custom', message, params: { whole: true } });
+    if (x.prefix.length > 12 || x.suffix.length > 12) bad('Card series: up to 12 characters before and after the number.');
+    if (/[\u0000-\u001f\u007f<>"`\\]/.test(x.prefix + x.suffix)) bad('Card series: these signs can’t be used: < > " ` \\');
+    if (x.from > x.to) bad(`Card series ${x.prefix}…${x.suffix}: “from” must not be bigger than “to”.`);
+    if (/^EJ\d*$/.test(looseCard(x.prefix))) bad('Cards can’t start with EJ: EJ-… is used for order numbers. Choose other letters for cards.');
+  })).max(20).superRefine((list, ctx) => {
+    for (let i = 0; i < list.length; i++) for (let j = i + 1; j < list.length; j++) {
+      const same = seriesClash(list[i], list[j]);
+      if (same) ctx.addIssue({ code: 'custom', params: { whole: true }, message: `Card series ${seriesLabel(list[i])} and ${seriesLabel(list[j])} can give the same card no. (${same}). Change the letters or the numbers so they can’t be mixed up.` });
+    }
+  }),
   counter_hours: z.string().trim().max(120),
   // Counter timings (campus time). Students give laundry in the drop-off hours and collect in the pickup hours.
   dropoff_from: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, 'Use a time like 18:00'),
@@ -91,6 +106,8 @@ export async function getSettings(): Promise<Settings> {
   // Older installs stored over_limit_action; BLOCK meant "no paid extra".
   if (stored.allow_paid_extra === undefined && stored.over_limit_action) stored.allow_paid_extra = stored.over_limit_action === 'CHARGE';
   const merged = { ...defaultSettings, ...stored };
+  // Series saved before prefix/suffix/leading zeros existed.
+  merged.card_series = (merged.card_series ?? []).map((x: Partial<CardSeries>) => ({ prefix: x.prefix ?? '', suffix: x.suffix ?? '', from: Number(x.from), to: Number(x.to), pad: x.pad ?? 0 }));
   return Object.fromEntries(Object.keys(defaultSettings).map(k => [k, (merged as Record<string, unknown>)[k]])) as Settings;
 }
 
@@ -165,26 +182,86 @@ export async function monthUsage(studentId: number, excludeOrderId = 0) {
 
 /* ------------------------------------------------------------ basket cards */
 
-/** "a 1002", "A-1002" → "A1002". */
-export const normaliseCard = (v: string) => v.trim().toUpperCase().replace(/[\s-]/g, '').replace(/^([A-Z]{0,3})0+(?=\d)/, '$1');   // A012 = A12
+export type CardSeries = { prefix: string; suffix: string; from: number; to: number; pad: number };
+
+/** Upper case, one space between words. */
+function tidyCardText(v: string) { return v.toUpperCase().replace(/\s+/g, ' '); }
+
+/** Only the letters and digits: "blue / 0012-h" → "BLUE0012H". Staff can type a card no. with or without its signs and spaces. */
+export function looseCard(v: string) { return v.toUpperCase().replace(/[^\p{L}\p{N}]/gu, ''); }
+
+/** How a card of this series is written: what comes before, the number (with leading zeros if set), what comes after. */
+export function formatCard(x: CardSeries, n: number) { return `${x.prefix}${String(n).padStart(x.pad, '0')}${x.suffix}`; }
+
+export function seriesLabel(x: CardSeries) { return `${formatCard(x, x.from)} – ${formatCard(x, x.to)}`; }
+
+/** The number of the card in this series that `loose` (already looseCard-ed) stands for, or null. */
+function seriesNumber(x: CardSeries, loose: string) {
+  const lp = looseCard(x.prefix), ls = looseCard(x.suffix);
+  if (loose.length <= lp.length + ls.length || !loose.startsWith(lp) || !loose.endsWith(ls)) return null;
+  const mid = loose.slice(lp.length, loose.length - ls.length);
+  if (!/^\d{1,9}$/.test(mid)) return null;
+  const n = Number(mid);
+  return n >= x.from && n <= x.to ? n : null;
+}
+
+/** A card both series accept (so staff could mix them up), or null. */
+function seriesClash(a: CardSeries, b: CardSeries) {
+  const [pa, pb, sa, sb] = [a.prefix, b.prefix, a.suffix, b.suffix].map(looseCard);
+  const fits = (x: string, y: string, atEnd: boolean) => {
+    const [short, long] = x.length <= y.length ? [x, y] : [y, x];
+    const rest = atEnd ? long.slice(0, long.length - short.length) : long.slice(short.length);
+    return (atEnd ? long.endsWith(short) : long.startsWith(short)) && /^\d*$/.test(rest);
+  };
+  if (!fits(pa, pb, false) || !fits(sa, sb, true)) return null;
+  if (pa === pb && sa === sb) return Math.max(a.from, b.from) <= Math.min(a.to, b.to) ? formatCard(a, Math.max(a.from, b.from)) : null;
+  // Rare (e.g. "H" and "H1"): try every card of the smaller series.
+  const [p, q] = a.to - a.from <= b.to - b.from ? [a, b] : [b, a];
+  for (let n = p.from; n <= p.to; n++) if (seriesNumber(q, looseCard(formatCard(p, n))) !== null) return formatCard(p, n);
+  return null;
+}
+
+/** The card written the way its series writes it ("a-12" → "A-0012"), or null if no series has it. */
+export function matchSeries(series: CardSeries[], raw: string) {
+  const loose = looseCard(raw);
+  for (const x of series) {
+    const n = seriesNumber(x, loose);
+    if (n !== null) return formatCard(x, n);
+  }
+  return null;
+}
+
+/** Without a series: "a 1002", "A-1002" → "A1002" (and A012 = A12). */
+export const normaliseCard = (v: string) => v.trim().toUpperCase().replace(/[\s-]/g, '').replace(/^([A-Z]{0,3})0+(?=\d)/, '$1');
+
+/** Every way a typed card no. may have been saved: in its series' format, or plain (from before a series was set). */
+export function cardCandidates(series: CardSeries[], raw: string) {
+  const out = new Set<string>();
+  const m = matchSeries(series, raw);
+  if (m) out.add(m);
+  const plain = normaliseCard(raw);
+  if (plain && plain.length <= 40) out.add(plain);
+  return [...out];
+}
 
 /**
- * Check a basket card no. against the admin's card series (if any). Returns the clean card no.,
- * or null when none was given and none is required.
+ * Check a basket card no. against the admin's card series (if any). Returns the card no. written the
+ * series' way, or null when none was given and none is required.
  */
 export function checkCard(s: Settings, raw: string | undefined | null) {
-  const v = normaliseCard(String(raw ?? ''));
-  if (!v) {
-    if (s.card_required) throw new HttpError(422, 'Enter the basket card no. (e.g. A1002).');
+  const typed = String(raw ?? '').trim();
+  if (!looseCard(typed)) {
+    if (s.card_required) throw new HttpError(422, `Enter the basket card no. (e.g. ${s.card_series[0] ? formatCard(s.card_series[0], s.card_series[0].from) : 'A1002'}).`);
     return null;
   }
-  if (!/^[A-Z]{0,3}\d{1,6}$/.test(v)) throw new HttpError(422, `“${v}” doesn't look like a card no. Use letters then numbers, e.g. A1002.`);
   if (s.card_series.length) {
-    const m = /^([A-Z]{0,3})(\d+)$/.exec(v)!;
-    const n = Number(m[2]);
-    const ok = s.card_series.some(x => x.prefix === m[1] && n >= x.from && n <= x.to);
-    if (!ok) throw new HttpError(422, `Card ${v} is not in the card series set by the admin (${s.card_series.map(x => `${x.prefix}${x.from}–${x.prefix}${x.to}`).join(', ')}).`);
+    const v = matchSeries(s.card_series, typed);
+    if (!v) throw new HttpError(422, `Card ${tidyCardText(typed)} is not in the card series set by the admin (${s.card_series.map(seriesLabel).join(', ')}).`);
+    return v;
   }
+  const v = normaliseCard(typed);
+  if (/^EJ\d+$/.test(looseCard(v))) throw new HttpError(422, `${v} looks like an order no. Type the no. written on the basket card.`);
+  if (v.length > 30 || /[\u0000-\u001f\u007f<>"`\\]/.test(v)) throw new HttpError(422, `“${v}” doesn't look like a card no.`);
   return v;
 }
 
@@ -214,7 +291,7 @@ export const orderInput = z.object({
   service: z.enum(['REGULAR', 'EXPRESS']).optional(),   // older clients: EXPRESS = express
   acceptExtra: z.boolean().default(false),               // staff chose "charge for the extra kg"
   note: z.string().trim().max(200).optional().default(''),
-  tagNo: z.string().trim().max(20).optional().default(''), // basket card no. written on the physical card
+  tagNo: z.string().trim().max(60).optional().default(''), // basket card no. written on the physical card
 });
 export type OrderInput = z.input<typeof orderInput>;
 
