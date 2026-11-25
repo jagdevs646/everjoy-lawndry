@@ -422,4 +422,7 @@ body.col-resizing { cursor: col-resize; user-select: none; }
   .grid-view .grid-select, .grid-view .grid-wrap-toggle { display: none; }
   .ledger-wrap.grid .ledger td { border-right: 0; }
   .ledger-wrap.grid .ledger tbody tr:nth-child(even) td { background: none; }
+  /* Phone cards always wrap: "Wrap text" is a desktop table setting. One long unwrapped line
+     would make the phone zoom the whole page out to fit it. */
+  .ad-main .ledger-wrap.grid .ledger td, .ad-main .ledger-wrap.grid .ledger td.nowrap { white-space: normal; overflow-wrap: anywhere; text-overflow: clip; }
 }
