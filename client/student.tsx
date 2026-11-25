@@ -323,6 +323,7 @@ function Slip({ id, cached, close }: { id: number; cached?: Order[]; close: () =
  */
 function CodePopup({ r, onClose, onDone }: { r: Pending['requests'][number]; onClose: () => void; onDone: (p?: Pending) => void }) {
   const { code, left, failed } = useRotatingCode(r.key, r.order_id, r.kind, r.step_seconds);
+  useNoScreenshots();   // the code is only for the person at the counter
   const [wrong, setWrong] = useState(false);
   const [reason, setReason] = useState('');
   const { busy, error, submit } = useFormAction();

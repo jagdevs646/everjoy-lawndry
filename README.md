@@ -129,6 +129,16 @@ On a Mac:
 
 No Mac? A cloud Mac build service (e.g. Codemagic, or GitHub Actions macOS runners) can build and upload it to TestFlight.
 
+**Same as Android, except screenshots.** The iPhone app runs the same screens and server. iOS does not let apps block screenshots, so the app's `PrivacyScreen` plugin (in `ios/App/App/SceneDelegate.swift`) instead covers the screen while it is recorded, mirrored or AirPlayed and in the app switcher, and shows a note after a screenshot of the slip QR, the ID QR or a confirmation code. Those change every 30 seconds anyway, so a screenshot is useless at the counter.
+
+*Optional:* set `EJScreenshotShield` to `YES` in `ios/App/App/Info.plist` to make the whole app come out blank in screenshots and recordings. It relies on how iOS draws password fields, which has changed between iOS versions, so turn it on only after testing on real iPhones (old and new iOS): the app must still look and scroll normally, and only screenshots should be blank.
+
+**First test on an iPhone** (none of the iOS-only parts have been run yet):
+1. Sign in as a student; close and reopen the app: you stay signed in (Keychain).
+2. Open a slip: the QR changes every 30 s. Take a screenshot: a note says it won't work. Start a screen recording: the screen is covered. Swipe to the app switcher: the slip is hidden.
+3. At the counter (another phone or the website), take an order for that student: the code pop-up opens on the iPhone; the counter accepts the code. Do the same for a hand-over.
+4. Staff on an iPhone: scan a slip QR with the camera (allow camera access), add a profile photo (allow photos).
+
 ### How the app signs in (for developers)
 
 - The website uses an httpOnly cookie. The app runs on a different origin (`https://localhost` on Android, `capacitor://localhost` on iOS), where WebViews don't reliably keep cookies. So the app sends `x-ej-client: app`, receives the same signed token in the JSON reply, and sends it back as `Authorization: Bearer …`.

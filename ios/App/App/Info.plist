@@ -69,6 +69,8 @@
 	<key>NSCameraUsageDescription</key>
 	<string>Staff use the camera to scan laundry slip QR codes and ID cards. Students can photograph damaged clothes for a complaint.</string>
 	<key>NSPhotoLibraryUsageDescription</key>
-	<string>Choose a photo of damaged or missing clothes to attach to a complaint.</string>
+	<string>Choose your profile photo, or a photo of damaged or missing clothes to attach to a complaint.</string>
+	<key>EJScreenshotShield</key>
+	<false/>
 </dict>
 </plist>

@@ -4,7 +4,7 @@ import QRCode from 'qrcode';
 import { api, blobUrl, fileObjectUrl, type Order, type OrderStatus, type PaymentInfo } from './api';
 import { registerPlugin } from '@capacitor/core';
 import { isApp, platformName } from './platform';
-import { serverNow, useToasts } from './lib';
+import { serverNow, toast, useToasts } from './lib';
 
 /* ------------------------------------------------------------------ icons */
 
@@ -255,17 +255,36 @@ export function Avatar({ name, photo, size = 40, className = '' }: { name: strin
 
 /* --------------------------------------------------------- privacy screen */
 
-const PrivacyScreen = registerPlugin<{ enable(): Promise<void>; disable(): Promise<void> }>('PrivacyScreen');
+type PrivacyPlugin = {
+  enable(): Promise<void>;
+  disable(): Promise<void>;
+  addListener(event: 'screenshotTaken', fn: () => void): Promise<{ remove: () => Promise<void> }>;
+};
+const PrivacyScreen = registerPlugin<PrivacyPlugin>('PrivacyScreen');
 /**
- * While a slip or ID QR is on screen, the Android app blocks screenshots and screen recording
- * (and hides the screen in the recent-apps view). The website and iPhone can't block screenshots;
- * there the slip QR changes every 30 s instead, so a screenshot stops working.
+ * While a slip QR, the ID QR or a confirmation code is on screen:
+ *  - Android app: screenshots and screen recording are blocked, and the recent-apps view is blank.
+ *  - iPhone app: iOS can't block screenshots, so the screen is covered while it is recorded or shared
+ *    and in the app switcher, and a screenshot gets a note that it won't work.
+ *  - Website: nothing can be blocked. Everywhere, the QR and the code change every 30 seconds, so a
+ *    screenshot stops working within a minute or two.
  */
+let privacyHolders = 0;   // screens asking for protection now (the slip and the code pop-up can be open together)
 export function useNoScreenshots(active = true) {
   useEffect(() => {
-    if (!active || !isApp || platformName !== 'android') return;
-    PrivacyScreen.enable().catch(() => {});
-    return () => { PrivacyScreen.disable().catch(() => {}); };
+    if (!active || !isApp || (platformName !== 'android' && platformName !== 'ios')) return;
+    if (privacyHolders++ === 0) PrivacyScreen.enable().catch(() => {});
+    let sub: { remove: () => Promise<void> } | undefined;
+    let live = true;
+    if (platformName === 'ios') {
+      PrivacyScreen.addListener('screenshotTaken', () => toast('Screenshots don’t work at the counter: the QR and the code change every 30 seconds.', 'bad'))
+        .then(s => { if (live) sub = s; else void s.remove(); }).catch(() => {});
+    }
+    return () => {
+      live = false;
+      void sub?.remove();
+      if (--privacyHolders === 0) PrivacyScreen.disable().catch(() => {});
+    };
   }, [active]);
 }
 
