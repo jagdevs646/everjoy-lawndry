@@ -4,11 +4,11 @@ import bcrypt from 'bcryptjs';
 import { z } from 'zod';
 import { db, insertId, logActivity, notify } from '../db.js';
 import { AuthedRequest, requireRole } from '../auth.js';
-import { addEvent, cancelOrder, cardInUse, checkCard, correctOrder, createOrder, deliverOrder, getOrderRow, getSettings, listServices, monthUsage, orderInput, planStatus, quote, recordPayment, setStatus } from '../rules.js';
+import { addEvent, cancelOrder, cardInUse, checkCard, isUniqueError, correctOrder, createOrder, deliverOrder, getOrderRow, getSettings, listServices, monthUsage, orderInput, planStatus, quote, recordPayment, setStatus } from '../rules.js';
 import { photoUpload, savePhoto } from '../files.js';
 import { checkStudentEmail } from '../otp.js';
 import { announcementsFor, complaintDetail, findOrderByCode, listComplaints, listOrders, listStudents, orderDetail, studentProfile } from '../queries.js';
-import { dayKey, handle, HttpError, MAX_ID, nowIso, parse, startOfLocalDayIso, zDate, zId, zText } from '../util.js';
+import { codeKey, dayKey, handle, HttpError, MAX_ID, nowIso, parse, startOfLocalDayIso, zDate, zId, zText } from '../util.js';
 import { normaliseLogin, zIdCard, zMobile, zRoom } from './public.js';
 
 export const router = Router();
@@ -352,9 +352,12 @@ router.patch('/ops/orders/:id/card', handle(async (req, res) => {
     if (!['RECEIVED', 'WASHING', 'READY'].includes(o.status)) throw new HttpError(409, `${o.order_no} is ${o.status.toLowerCase()}; its card can't be changed.`);
     if (card) {
       const busy = await cardInUse(card, id);
-      if (busy) throw new HttpError(409, `Card ${card} is still on ${busy.order_no}. Use another card.`, { code: 'CARD_IN_USE' });
+      if (busy) throw new HttpError(409, `Card ${card} is still on ${busy.order_no} (${busy.status.toLowerCase()}, not collected). Use another card.`, { code: 'CARD_IN_USE' });
     }
-    await db.run('UPDATE orders SET tag_no = ?, updated_at = ? WHERE id = ?', [card, nowIso(), id]);
+    await db.run('UPDATE orders SET tag_no = ?, tag_key = ?, updated_at = ? WHERE id = ?', [card, card ? codeKey(card) : null, nowIso(), id]).catch((e: unknown) => {
+      if (isUniqueError(e)) throw new HttpError(409, `Card ${card} was just given to another basket. Use another card.`, { code: 'CARD_IN_USE' });
+      throw e;
+    });
     await addEvent(id, 'CARD', card ? `Basket card ${card}` : 'Basket card removed', actor(req).id);
     await logActivity(actor(req).id, 'ORDER_CARD', 'order', o.order_no, card ?? 'removed');
   });

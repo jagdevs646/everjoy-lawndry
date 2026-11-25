@@ -620,7 +620,7 @@ type Settings = {
   max_kg_per_order: number; max_active_orders: number; monthly_order_limit: number; monthly_kg_limit: number; allow_paid_extra: boolean;
   extra_rate_per_kg: number; express_enabled: boolean; express_fee: number; regular_turnaround_hours: number; express_turnaround_hours: number;
   pay_before_pickup: boolean; upi_id: string; upi_name: string; upi_qr_file?: string; semester_start: string; semester_end: string; counter_hours: string;
-  student_email_otp: boolean; student_email_domain: string; card_required: boolean; card_series: Series[];
+  student_email_otp: boolean; student_email_domain: string; card_required: boolean; card_series: Series[]; order_no_format: OrderNoFormat;
   dropoff_from: string; dropoff_to: string; pickup_from: string; pickup_to: string; ready_after_days: number; express_ready_after_days: number;
   auto_status: boolean; auto_washing_hours: number;
 };
@@ -631,6 +631,7 @@ const SETTING_TABS = [
   { key: 'services', label: 'Prices & services' },
   { key: 'payments', label: 'Payments' },
   { key: 'students', label: 'Students & sign-in' },
+  { key: 'orderno', label: 'Order numbers' },
   { key: 'cards', label: 'Basket cards' },
 ] as const;
 type SettingTab = typeof SETTING_TABS[number]['key'];
@@ -768,8 +769,12 @@ function Settings() {
           </div>
         )}
 
+        {tab === 'orderno' && (
+          <OrderNoStyle f={draft.order_no_format} saved={s.data!.order_no_format} onChange={order_no_format => setDraft({ ...draft, order_no_format })} />
+        )}
+
         {tab === 'cards' && (
-          <CardSeries series={draft.card_series} onChange={card_series => setDraft({ ...draft, card_series })}
+          <CardSeries series={draft.card_series} orderFormat={draft.order_no_format} onChange={card_series => setDraft({ ...draft, card_series })}
             required={draft.card_required} onRequired={v => setDraft({ ...draft, card_required: v })} />
         )}
 
@@ -1173,12 +1178,24 @@ const CARD_PATTERNS: Series[] = [
   { prefix: '#', suffix: '', from: 100, to: 999, pad: 0 },
 ];
 
+/** Text equal apart from extra digits on the inside (A and A1). Same check as the server. */
+const textFits = (x: string, y: string, atEnd: boolean) => {
+  const [short, long] = x.length <= y.length ? [x, y] : [y, x];
+  const rest = atEnd ? long.slice(0, long.length - short.length) : long.slice(short.length);
+  return (atEnd ? long.endsWith(short) : long.startsWith(short)) && /^\d*$/.test(rest);
+};
+/** Could a card of this series be read as an order no.? */
+const looksLikeOrders = (x: Series, f: OrderNoFormat) => {
+  const d = todayKey();
+  return textFits(looseCard(x.prefix), looseCard(fillDate(f.prefix.toUpperCase(), d)), false) && textFits(looseCard(x.suffix), looseCard(fillDate(f.suffix.toUpperCase(), d)), true);
+};
+
 type SeriesForm = { prefix: string; suffix: string; from: string; to: string; zeros: boolean };
 const BLANK_SERIES: SeriesForm = { prefix: '', suffix: '', from: '1', to: '', zeros: false };
 const toForm = (x: Series): SeriesForm => ({ prefix: x.prefix, suffix: x.suffix, from: String(x.from).padStart(x.pad, '0'), to: String(x.to).padStart(x.pad, '0'), zeros: x.pad > 0 });
 
 /** Basket cards tab: the card series the counter uses (anything before and after the number), and a builder with a live preview. */
-function CardSeries({ series, onChange, required, onRequired }: { series: Series[]; onChange: (s: Series[]) => void; required: boolean; onRequired: (v: boolean) => void }) {
+function CardSeries({ series, orderFormat, onChange, required, onRequired }: { series: Series[]; orderFormat: OrderNoFormat; onChange: (s: Series[]) => void; required: boolean; onRequired: (v: boolean) => void }) {
   const [f, setF] = useState<SeriesForm>(BLANK_SERIES);
   const [editing, setEditing] = useState<number | null>(null);
   const from = Number(f.from), to = Number(f.to);
@@ -1191,7 +1208,7 @@ function CardSeries({ series, onChange, required, onRequired }: { series: Series
     : from > to ? '“From” must not be bigger than “To”.'
     : draft.prefix.length > 12 || draft.suffix.length > 12 ? 'Up to 12 characters before and after the number.'
     : /[<>"`\\]/.test(draft.prefix + draft.suffix) ? 'These signs can’t be used: < > " ` \\'
-    : /^EJ\d*$/.test(looseCard(draft.prefix)) ? 'Cards can’t start with EJ: EJ-… is used for order numbers.'
+    : looksLikeOrders(draft, orderFormat) ? `These cards look like your order numbers (${formatOrderNo(orderFormat, orderFormat.start)}). Use other letters or signs.`
     : series.some((x, i) => i !== editing && looseCard(x.prefix) === looseCard(draft.prefix) && looseCard(x.suffix) === looseCard(draft.suffix) && x.from <= to && from <= x.to)
       ? 'These cards overlap a series you already have.'
       : null;
@@ -1275,6 +1292,136 @@ function CardSeries({ series, onChange, required, onRequired }: { series: Series
     </div>
   );
 }
+
+/* ---------------------------------------------------------- order numbers */
+
+type OrderNoFormat = { prefix: string; suffix: string; pad: number; start: number; reset: 'NEVER' | 'YEARLY' | 'FY' | 'MONTHLY' };
+const ORDER_DATE_PARTS = ['{YYYY}', '{YY}', '{MM}', '{FY}'];
+
+/** Indian financial year: 2026-11-25 → "26-27" (April to March). */
+const financialYear = (day: string) => {
+  const y = Number(day.slice(0, 4)), m = Number(day.slice(5, 7));
+  const a = m >= 4 ? y : y - 1;
+  return `${String(a % 100).padStart(2, '0')}-${String((a + 1) % 100).padStart(2, '0')}`;
+};
+const fillDate = (t: string, day: string) =>
+  t.replace(/\{YYYY\}/g, day.slice(0, 4)).replace(/\{YY\}/g, day.slice(2, 4)).replace(/\{MM\}/g, day.slice(5, 7)).replace(/\{FY\}/g, financialYear(day));
+const formatOrderNo = (f: OrderNoFormat, n: number, day = todayKey()) =>
+  `${fillDate(f.prefix.toUpperCase(), day)}${String(n).padStart(f.pad, '0')}${fillDate(f.suffix.toUpperCase(), day)}`;
+
+/** Same rules as the server, so the admin sees the problem while typing. */
+function orderNoProblem(f: OrderNoFormat) {
+  const all = (f.prefix + f.suffix).toUpperCase();
+  if (!f.start || f.start < 1) return 'Enter the first number (1 or more).';
+  if (f.prefix.length > 20 || f.suffix.length > 20) return 'Up to 20 characters before and after the number.';
+  if (/[<>"`\\:]/.test(all)) return 'These signs can’t be used: < > " ` \\ :';
+  const unknown = (all.match(/\{[^}]*\}?/g) ?? []).filter(t => !ORDER_DATE_PARTS.includes(t));
+  if (unknown.length) return `${unknown[0]} is not a date part. Use the date buttons below.`;
+  const has = (...t: string[]) => t.some(p => all.includes(p));
+  if (f.reset === 'YEARLY' && !has('{YYYY}', '{YY}')) return 'Numbers start again every year, so add the year to the order no. Otherwise numbers would repeat.';
+  if (f.reset === 'FY' && !has('{FY}')) return 'Numbers start again every financial year, so add the financial year to the order no. Otherwise numbers would repeat.';
+  if (f.reset === 'MONTHLY' && !(has('{MM}') && has('{YYYY}', '{YY}', '{FY}'))) return 'Numbers start again every month, so add the month and the year to the order no. Otherwise numbers would repeat.';
+  return null;
+}
+
+const ORDER_PATTERNS: { label: string; f: OrderNoFormat }[] = [
+  { label: 'EJ-1001', f: { prefix: 'EJ-', suffix: '', pad: 0, start: 1001, reset: 'NEVER' } },
+  { label: 'INV/26-27/0001', f: { prefix: 'INV/{FY}/', suffix: '', pad: 4, start: 1, reset: 'FY' } },
+  { label: 'LDY2611-001', f: { prefix: 'LDY{YY}{MM}-', suffix: '', pad: 3, start: 1, reset: 'MONTHLY' } },
+  { label: '2026/00001/EVJ', f: { prefix: '{YYYY}/', suffix: '/EVJ', pad: 5, start: 1, reset: 'YEARLY' } },
+  { label: 'EVERJOY#5001', f: { prefix: 'EVERJOY#', suffix: '', pad: 0, start: 5001, reset: 'NEVER' } },
+];
+const DATE_BUTTONS = [
+  { part: '{YYYY}', label: 'Year', example: (d: string) => d.slice(0, 4) },
+  { part: '{YY}', label: 'Year (short)', example: (d: string) => d.slice(2, 4) },
+  { part: '{MM}', label: 'Month', example: (d: string) => d.slice(5, 7) },
+  { part: '{FY}', label: 'Financial year', example: financialYear },
+];
+const RESET_LABEL: Record<OrderNoFormat['reset'], string> = {
+  NEVER: 'Never: keep counting up',
+  FY: 'Every financial year (1 April)',
+  YEARLY: 'Every year (1 January)',
+  MONTHLY: 'Every month',
+};
+
+/** Order numbers tab: the admin's own style of order no. (like an invoice no.), with a live preview. */
+function OrderNoStyle({ f, saved, onChange }: { f: OrderNoFormat; saved: OrderNoFormat; onChange: (f: OrderNoFormat) => void }) {
+  const info = useLoad(() => api<{ last: { order_no: string; received_at: string } | null; next: string; next_n: number; total: number }>('/admin/order-no'), [JSON.stringify(saved)]);
+  const [focus, setFocus] = useState<'prefix' | 'suffix'>('prefix');
+  const today = todayKey();
+  const problem = orderNoProblem(f);
+  const set = (patch: Partial<OrderNoFormat>) => onChange({ ...f, ...patch });
+  const addPart = (part: string) => set(focus === 'prefix' ? { prefix: f.prefix + part } : { suffix: f.suffix + part });
+  const changed = JSON.stringify(f) !== JSON.stringify(saved);
+  // Same style as saved: numbering carries on from the counter. A new style starts at "Start at".
+  const sameCounter = f.prefix.toUpperCase() === saved.prefix && f.suffix.toUpperCase() === saved.suffix && f.reset === saved.reset;
+  const base = sameCounter && info.data ? Math.max(f.start, info.data.next_n) : f.start;
+
+  return (
+    <div className="settings-cards cards-tab">
+      <section className="ad-card settings-group">
+        <h2>Order numbers</h2>
+        <p className="muted small">Every order gets its own no., like an invoice no. It is printed on the student’s slip, in the register and in reports.</p>
+        <dl className="order-no-facts">
+          <div><dt>Last order no. given</dt><dd>{info.data?.last ? <><b className="order-no-chip">{info.data.last.order_no}</b><small className="muted">{when(info.data.last.received_at, 'date')}</small></> : <span className="muted">No orders yet</span>}</dd></div>
+          <div><dt>Next order no.</dt><dd>{info.data ? <b className="order-no-chip next">{info.data.next}</b> : <span className="muted">…</span>}{changed && <small className="muted">Changes after you save</small>}</dd></div>
+          <div><dt>Orders so far</dt><dd>{info.data ? info.data.total.toLocaleString('en-IN') : '…'}</dd></div>
+        </dl>
+        <ul className="rule-list">
+          <li><Icon name="check" size={16} />An order no. is never given twice. If your style would repeat a no. that was used before, that no. is skipped.</li>
+          <li><Icon name="check" size={16} />A new style applies to new orders only. Old orders keep their numbers.</li>
+          <li><Icon name="check" size={16} />Staff can find an order by typing it without signs or spaces, e.g. {codeLike(formatOrderNo(f, f.start || 1, today))}.</li>
+        </ul>
+      </section>
+
+      <section className="ad-card settings-group series-builder">
+        <h2>Order no. style</h2>
+        <p className="muted small">Put anything before or after the number: letters, a word, signs like - / # and the date.</p>
+        <div className="series-fields order-fields">
+          <Field label="Before the number"><input value={f.prefix} onFocus={() => setFocus('prefix')} onChange={e => set({ prefix: e.target.value.slice(0, 20) })} placeholder="e.g. EJ-, INV/" autoCapitalize="characters" spellCheck={false} /></Field>
+          <Field label="Start at"><input inputMode="numeric" value={f.start || ''} onChange={e => set({ start: Number(e.target.value.replace(/\D/g, '').slice(0, 8)) })} placeholder="1001" /></Field>
+          <Field label="Digits">
+            <select value={f.pad} onChange={e => set({ pad: Number(e.target.value) })}>
+              <option value={0}>1, 2, 3 …</option>
+              {[3, 4, 5, 6].map(d => <option key={d} value={d}>{'1'.padStart(d, '0')}</option>)}
+            </select>
+          </Field>
+          <Field label="After the number"><input value={f.suffix} onFocus={() => setFocus('suffix')} onChange={e => set({ suffix: e.target.value.slice(0, 20) })} placeholder="e.g. /H1" autoCapitalize="characters" spellCheck={false} /></Field>
+        </div>
+        <div className="date-parts">
+          <span className="muted small">Add the date {focus === 'prefix' ? 'before' : 'after'} the number:</span>
+          {DATE_BUTTONS.map(b => <button key={b.part} type="button" onClick={() => addPart(b.part)}>{b.label} <b>{b.example(today)}</b></button>)}
+        </div>
+        <Field label="Start numbering again">
+          <select value={f.reset} onChange={e => set({ reset: e.target.value as OrderNoFormat['reset'] })}>
+            {(Object.keys(RESET_LABEL) as OrderNoFormat['reset'][]).map(k => <option key={k} value={k}>{RESET_LABEL[k]}</option>)}
+          </select>
+        </Field>
+
+        <div className={`card-preview${problem ? ' empty' : ''}`} aria-live="polite">
+          {problem ? <span>{problem}</span> : (
+            <>
+              <span className="card-preview-label">New orders will look like</span>
+              <span className="card-preview-row">
+                {[0, 1, 2].map(i => <b key={i} className="order-no-chip">{formatOrderNo(f, base + i, today)}</b>)}
+                <span className="muted">…</span>
+              </span>
+              {sameCounter && base > f.start && <small>Numbering carries on after the last order in this style ({base - 1}).</small>}
+              {f.reset !== 'NEVER' && <small>On {f.reset === 'MONTHLY' ? 'the 1st of next month' : f.reset === 'FY' ? '1 April' : '1 January'} the date part changes and numbering starts again at {f.start}.</small>}
+            </>
+          )}
+        </div>
+
+        <div className="series-patterns">
+          <span className="muted small">Start from an example:</span>
+          {ORDER_PATTERNS.map(x => <button key={x.label} type="button" onClick={() => onChange(x.f)}>{formatOrderNo(x.f, x.f.start, today)}</button>)}
+        </div>
+        <p className="muted small">Then press “Save rules” below.</p>
+      </section>
+    </div>
+  );
+}
+const codeLike = (no: string) => no.toLowerCase().replace(/[^\p{L}\p{N}]/gu, '');
 
 /* ------------------------------------------------------------------ stats */
 

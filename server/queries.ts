@@ -1,7 +1,7 @@
 import { db } from './db.js';
 import crypto from 'node:crypto';
-import { QR_STEP_SECONDS, cardCandidates, getSettings, normaliseCard, qrSignature } from './rules.js';
-import { dayKey, HttpError, likeContains, nowIso } from './util.js';
+import { QR_STEP_SECONDS, getSettings, matchSeries, orderKeys, qrSignature } from './rules.js';
+import { codeKey, dayKey, HttpError, likeContains, nowIso } from './util.js';
 
 /* Columns safe to show staff/admin. qr_token and request_id are never listed.
    The late flag takes one `?` (the current time), bound before any WHERE params. */
@@ -33,10 +33,9 @@ function orderWhere(f: OrderFilters, now: string) {
   if (f.studentId) { where.push('o.student_id = ?'); p.push(f.studentId); }
   if (f.q) {
     const q = f.q.trim();
-    const digits = q.replace(/^EJ-?/i, '');
     const like = likeContains(q);
-    where.push(`(o.order_no = ? OR o.tag_no = ? OR LOWER(o.tag_no) LIKE LOWER(?) ESCAPE '\\' OR LOWER(st.id_card_no) LIKE LOWER(?) ESCAPE '\\' OR LOWER(u.name) LIKE LOWER(?) ESCAPE '\\' OR o.room_no = ? OR LOWER(o.mobile) LIKE LOWER(?) ESCAPE '\\')`);
-    p.push(`EJ-${digits}`, normaliseCard(q), like, like, like, q, like);
+    where.push(`(o.order_key = ? OR LOWER(o.order_no) LIKE LOWER(?) ESCAPE '\\' OR o.tag_key = ? OR LOWER(o.tag_no) LIKE LOWER(?) ESCAPE '\\' OR LOWER(st.id_card_no) LIKE LOWER(?) ESCAPE '\\' OR LOWER(u.name) LIKE LOWER(?) ESCAPE '\\' OR o.room_no = ? OR LOWER(o.mobile) LIKE LOWER(?) ESCAPE '\\')`);
+    p.push(codeKey(q), like, codeKey(q), like, like, like, q, like);
   }
   return { sql: where.length ? `WHERE ${where.join(' AND ')}` : '', p };
 }
@@ -77,28 +76,24 @@ export async function findOrderByCode(code: string) {
     // The old fixed QR could be screenshotted and shared, so it is no longer accepted.
     throw new HttpError(409, 'This is an old-style slip QR. Ask the student to update the app or reload the website and open the slip again, or check their ID card and use the card no.');
   }
-  const byOrderNo = async (digits: string) => db.get<{ id: number }>('SELECT id FROM orders WHERE order_no = ?', [`EJ-${digits}`]);
-  // "EJ-1042" / "EJ1042" is always an order no. (card series can't start with EJ).
-  const ej = /^EJ-?(\d{1,10})$/i.exec(raw.replace(/\s/g, ''));
-  if (ej) {
-    const row = await byOrderNo(ej[1]);
-    if (!row) throw new HttpError(404, `No order found for “${raw}”.`);
-    return { id: row.id, via: 'NUMBER' as const };
-  }
-  // A basket card on an order that hasn't been collected yet, typed with or without its signs and spaces.
+  // Typed with or without signs, spaces and leading zeros: "ej 1042", "a-0012", "inv 26 27 7".
+  const key = codeKey(raw);
+  if (!key) throw new HttpError(404, `No open basket card or order found for “${raw}”.`);
   const s = await getSettings();
-  const cards = cardCandidates(s.card_series, raw);
-  const hits = cards.length ? await db.all<{ id: number; order_no: string; tag_no: string }>(
-    `SELECT id, order_no, tag_no FROM orders WHERE tag_no IN (${cards.map(() => '?').join(',')}) AND status IN ('RECEIVED','WASHING','READY')`, cards) : [];
-  if (hits.length > 1) throw new HttpError(409, `More than one basket matches “${raw}”: ${hits.map(h => `card ${h.tag_no} on ${h.order_no}`).join(', ')}. Type the card no. exactly as written on the card.`);
-  const c = hits[0];
-  // Only digits: could also be an order no.
-  const plain = normaliseCard(raw);
-  const o = /^\d{1,10}$/.test(plain) ? await byOrderNo(plain) : undefined;
-  if (c && o && c.id !== o.id) throw new HttpError(409, `Card ${c.tag_no} is on ${c.order_no}, and there is also an order EJ-${plain}. Type EJ-${plain} for the order, or check the card.`);
+  // An order no.: exactly, or (only digits typed) the number part in today's style or the old EJ- style.
+  type Hit = { id: number; order_no: string; tag_no: string | null };
+  const byKeys = (keys: string[]) => db.all<Hit>(`SELECT id, order_no, tag_no FROM orders WHERE order_key IN (${keys.map(() => '?').join(',')}) ORDER BY id DESC LIMIT 5`, keys);
+  let orders = await byKeys([key]);
+  if (!orders.length && /^\d+$/.test(key)) orders = await byKeys(orderKeys(s.order_no_format, raw));
+  // A basket card on an order that hasn't been collected yet (one card is on one open basket at most).
+  const c = await db.get<Hit>(`SELECT id, order_no, tag_no FROM orders WHERE tag_key = ? AND status IN ('RECEIVED','WASHING','READY')`, [key]);
+  const o = orders[0];
+  if (orders.length > 1) throw new HttpError(409, `More than one order matches “${raw}”: ${orders.map(x => x.order_no).join(', ')}. Type the full order no.`);
+  if (c && o && c.id !== o.id) throw new HttpError(409, `Card ${c.tag_no} is on ${c.order_no}, and there is also an order ${o.order_no}. Type the full order no. for the order, or check the card.`);
   if (c) return { id: c.id, via: 'CARD' as const };
   if (o) return { id: o.id, via: 'NUMBER' as const };
-  if (cards.length && !/^\d+$/.test(plain)) throw new HttpError(404, `No basket is waiting on card ${cards[0]}.`);
+  const card = matchSeries(s.card_series, raw);
+  if (card) throw new HttpError(404, `No basket is waiting on card ${card}.`);
   throw new HttpError(404, `No open basket card or order found for “${raw}”.`);
 }
 

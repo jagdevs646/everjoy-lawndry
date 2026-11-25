@@ -15,7 +15,7 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import fs from 'node:fs';
 import path from 'node:path';
-import { nowIso } from './util.js';
+import { nowIso, codeKey } from './util.js';
 
 export type Row = Record<string, any>;
 export type Dialect = 'sqlite' | 'postgres';
@@ -452,7 +452,9 @@ export async function migrate() {
     ['students', 'email_verified_at', 'TEXT'],
     ['students', 'valid_from', 'TEXT'],                             // hostel plan start (semester), YYYY-MM-DD
     ['orders', 'tag_no', 'TEXT'],
-    ['students', 'left_at', 'TEXT'],                               // removed from the hostel list (left); history kept                                   // basket card no. (A1002…), reused once the order is collected                         // 1 = hostel prices when taken (kept for corrections)
+    ['students', 'left_at', 'TEXT'],                               // removed from the hostel list (left); history kept
+    ['orders', 'order_key', 'TEXT'],                               // codeKey(order_no): an order no. is never given twice, however it is written
+    ['orders', 'tag_key', 'TEXT'],                                 // codeKey(tag_no): one card on one open basket, however it is written
   ] as const;
   for (const [table, column, def] of add) {
     try {
@@ -468,6 +470,17 @@ export async function migrate() {
     attempts INTEGER NOT NULL DEFAULT 0, sends INTEGER NOT NULL DEFAULT 1, last_sent_at TEXT NOT NULL, expires_at TEXT NOT NULL, created_at TEXT NOT NULL)`);
   // One basket card can be on only one order that hasn't been collected yet (both SQLite and Postgres support this).
   await db.driver.script(`CREATE UNIQUE INDEX IF NOT EXISTS idx_orders_open_tag ON orders (tag_no) WHERE tag_no IS NOT NULL AND status IN ('RECEIVED','WASHING','READY')`);
+  // Fill the keys for orders made before they existed. Order nos. were all EJ-<number> then.
+  await db.run(`UPDATE orders SET order_key = REPLACE(UPPER(order_no), '-', '') WHERE order_key IS NULL`);
+  for (const r of await db.all<{ id: number; tag_no: string }>('SELECT id, tag_no FROM orders WHERE tag_no IS NOT NULL AND tag_key IS NULL')) {
+    await db.run('UPDATE orders SET tag_key = ? WHERE id = ?', [codeKey(r.tag_no), r.id]);
+  }
+  for (const sql of [
+    'CREATE UNIQUE INDEX IF NOT EXISTS idx_orders_order_key ON orders (order_key)',
+    `CREATE UNIQUE INDEX IF NOT EXISTS idx_orders_open_tag_key ON orders (tag_key) WHERE tag_key IS NOT NULL AND status IN ('RECEIVED','WASHING','READY')`,
+  ]) {
+    try { await db.driver.script(sql); } catch (e) { console.warn(`Could not add a uniqueness check (${(e as Error).message}). The app still checks before saving.`); }
+  }
   // One account per university email (emails are new in this version, so no existing rows clash).
   await db.driver.script('DROP INDEX IF EXISTS idx_students_email');
   await db.driver.script('CREATE UNIQUE INDEX IF NOT EXISTS idx_students_email_u ON students (lower(email)) WHERE email IS NOT NULL');

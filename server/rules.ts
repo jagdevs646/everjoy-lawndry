@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 import { z } from 'zod';
 import { db, insertId, logActivity, nextCounter, notify } from './db.js';
-import { HttpError, MAX_ID, addDays, dayKey, localDateTimeIso, monthKey, nowIso, parse, round2 } from './util.js';
+import { HttpError, MAX_ID, addDays, codeKey, dayKey, looseKey, localDateTimeIso, monthKey, nowIso, parse, round2 } from './util.js';
 import { slipKey } from './auth.js';
 
 /* ---------------------------------------------------------------- settings */
@@ -40,12 +40,30 @@ export const settingsSchema = z.object({
     if (x.prefix.length > 12 || x.suffix.length > 12) bad('Card series: up to 12 characters before and after the number.');
     if (/[\u0000-\u001f\u007f<>"`\\]/.test(x.prefix + x.suffix)) bad('Card series: these signs can’t be used: < > " ` \\');
     if (x.from > x.to) bad(`Card series ${x.prefix}…${x.suffix}: “from” must not be bigger than “to”.`);
-    if (/^EJ\d*$/.test(looseCard(x.prefix))) bad('Cards can’t start with EJ: EJ-… is used for order numbers. Choose other letters for cards.');
   })).max(20).superRefine((list, ctx) => {
     for (let i = 0; i < list.length; i++) for (let j = i + 1; j < list.length; j++) {
       const same = seriesClash(list[i], list[j]);
       if (same) ctx.addIssue({ code: 'custom', params: { whole: true }, message: `Card series ${seriesLabel(list[i])} and ${seriesLabel(list[j])} can give the same card no. (${same}). Change the letters or the numbers so they can’t be mixed up.` });
     }
+  }),
+  // Order no. style, like an invoice no.: anything before and after the number, and date parts ({YYYY} {YY} {MM} {FY}).
+  order_no_format: z.object({
+    prefix: z.string().max(40).default('EJ-'),
+    suffix: z.string().max(40).default(''),
+    pad: z.coerce.number().int().min(0).max(8).default(0),          // digits with leading zeros: 4 → 0001
+    start: z.coerce.number().int().min(1).max(99999999).default(1001),
+    reset: z.enum(['NEVER', 'YEARLY', 'FY', 'MONTHLY']).default('NEVER'),   // numbers start again from "start"
+  }).transform(x => ({ ...x, prefix: tidyCardText(x.prefix).trimStart(), suffix: tidyCardText(x.suffix).trimEnd() })).superRefine((x, ctx) => {
+    const bad = (message: string) => ctx.addIssue({ code: 'custom', message, params: { whole: true } });
+    const all = x.prefix + x.suffix;
+    if (x.prefix.length > 20 || x.suffix.length > 20) bad('Order no.: up to 20 characters before and after the number.');
+    if (/[\u0000-\u001f\u007f<>"`\\:]/.test(all)) bad('Order no.: these signs can’t be used: < > " ` \\ :');
+    const unknown = (all.match(/\{[^}]*\}?/g) ?? []).filter(t => !ORDER_DATE_PARTS.includes(t));
+    if (unknown.length) bad(`Order no.: ${unknown[0]} is not a date part. Use {YYYY}, {YY}, {MM} or {FY}.`);
+    const has = (...t: string[]) => t.some(p => all.includes(p));
+    if (x.reset === 'YEARLY' && !has('{YYYY}', '{YY}')) bad('Order numbers start again every year, so put the year ({YYYY} or {YY}) in the order no. Otherwise numbers would repeat.');
+    if (x.reset === 'FY' && !has('{FY}')) bad('Order numbers start again every financial year, so put {FY} (e.g. 26-27) in the order no. Otherwise numbers would repeat.');
+    if (x.reset === 'MONTHLY' && !(has('{MM}') && has('{YYYY}', '{YY}', '{FY}'))) bad('Order numbers start again every month, so put the month and year ({MM} and {YY}) in the order no. Otherwise numbers would repeat.');
   }),
   counter_hours: z.string().trim().max(120),
   // Counter timings (campus time). Students give laundry in the drop-off hours and collect in the pickup hours.
@@ -81,6 +99,7 @@ export const defaultSettings: Settings = {
   student_email_domain: '',
   card_required: false,
   card_series: [],
+  order_no_format: { prefix: 'EJ-', suffix: '', pad: 0, start: 1001, reset: 'NEVER' },
   counter_hours: 'Mon–Sat, 8:00 AM – 7:00 PM',
   dropoff_from: '18:00',
   dropoff_to: '20:00',
@@ -107,6 +126,7 @@ export async function getSettings(): Promise<Settings> {
   if (stored.allow_paid_extra === undefined && stored.over_limit_action) stored.allow_paid_extra = stored.over_limit_action === 'CHARGE';
   const merged = { ...defaultSettings, ...stored };
   // Series saved before prefix/suffix/leading zeros existed.
+  merged.order_no_format = { ...defaultSettings.order_no_format, ...(merged.order_no_format ?? {}) };
   merged.card_series = (merged.card_series ?? []).map((x: Partial<CardSeries>) => ({ prefix: x.prefix ?? '', suffix: x.suffix ?? '', from: Number(x.from), to: Number(x.to), pad: x.pad ?? 0 }));
   return Object.fromEntries(Object.keys(defaultSettings).map(k => [k, (merged as Record<string, unknown>)[k]])) as Settings;
 }
@@ -116,6 +136,8 @@ export async function saveSettings(actorId: number, input: unknown): Promise<Set
     const before = await getSettings();
     const next = parse(settingsSchema, { ...before, ...(input as object) });
     if (next.semester_start && next.semester_end && next.semester_start > next.semester_end) throw new HttpError(400, 'The semester start must be before its end.');
+    const lookAlike = next.card_series.find(x => cardLooksLikeOrderNo(x, next.order_no_format));
+    if (lookAlike) throw new HttpError(400, `Card series ${seriesLabel(lookAlike)} looks like your order numbers (${formatOrderNo(next.order_no_format, next.order_no_format.start)}). Use other letters or signs for cards, so a card is never mixed up with an order.`);
     const changed = (Object.keys(next) as (keyof Settings)[]).filter(k => JSON.stringify(next[k]) !== JSON.stringify(before[k]));
     for (const k of changed) {
       await db.run('INSERT INTO settings (key, value, updated_at, updated_by) VALUES (?,?,?,?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at, updated_by = excluded.updated_by',
@@ -188,7 +210,14 @@ export type CardSeries = { prefix: string; suffix: string; from: number; to: num
 function tidyCardText(v: string) { return v.toUpperCase().replace(/\s+/g, ' '); }
 
 /** Only the letters and digits: "blue / 0012-h" → "BLUE0012H". Staff can type a card no. with or without its signs and spaces. */
-export function looseCard(v: string) { return v.toUpperCase().replace(/[^\p{L}\p{N}]/gu, ''); }
+export function looseCard(v: string) { return looseKey(v); }
+
+/** One text "fits" the other if they are equal apart from extra digits on the inside (A and A1, -B and 1-B). */
+function textFits(x: string, y: string, atEnd: boolean) {
+  const [short, long] = x.length <= y.length ? [x, y] : [y, x];
+  const rest = atEnd ? long.slice(0, long.length - short.length) : long.slice(short.length);
+  return (atEnd ? long.endsWith(short) : long.startsWith(short)) && /^\d*$/.test(rest);
+}
 
 /** How a card of this series is written: what comes before, the number (with leading zeros if set), what comes after. */
 export function formatCard(x: CardSeries, n: number) { return `${x.prefix}${String(n).padStart(x.pad, '0')}${x.suffix}`; }
@@ -208,12 +237,7 @@ function seriesNumber(x: CardSeries, loose: string) {
 /** A card both series accept (so staff could mix them up), or null. */
 function seriesClash(a: CardSeries, b: CardSeries) {
   const [pa, pb, sa, sb] = [a.prefix, b.prefix, a.suffix, b.suffix].map(looseCard);
-  const fits = (x: string, y: string, atEnd: boolean) => {
-    const [short, long] = x.length <= y.length ? [x, y] : [y, x];
-    const rest = atEnd ? long.slice(0, long.length - short.length) : long.slice(short.length);
-    return (atEnd ? long.endsWith(short) : long.startsWith(short)) && /^\d*$/.test(rest);
-  };
-  if (!fits(pa, pb, false) || !fits(sa, sb, true)) return null;
+  if (!textFits(pa, pb, false) || !textFits(sa, sb, true)) return null;
   if (pa === pb && sa === sb) return Math.max(a.from, b.from) <= Math.min(a.to, b.to) ? formatCard(a, Math.max(a.from, b.from)) : null;
   // Rare (e.g. "H" and "H1"): try every card of the smaller series.
   const [p, q] = a.to - a.from <= b.to - b.from ? [a, b] : [b, a];
@@ -260,15 +284,90 @@ export function checkCard(s: Settings, raw: string | undefined | null) {
     return v;
   }
   const v = normaliseCard(typed);
-  if (/^EJ\d+$/.test(looseCard(v))) throw new HttpError(422, `${v} looks like an order no. Type the no. written on the basket card.`);
+  if (cardLooksLikeOrderNo({ prefix: v, suffix: '', from: 0, to: 0, pad: 0 }, s.order_no_format, true)) throw new HttpError(422, `${v} looks like an order no. Type the no. written on the basket card.`);
   if (v.length > 30 || /[\u0000-\u001f\u007f<>"`\\]/.test(v)) throw new HttpError(422, `“${v}” doesn't look like a card no.`);
   return v;
 }
 
-/** Which open order (if any) is using this card right now. */
+/** Which open order (if any) has this card right now, however the card was written (A-0012 = A12). */
 export async function cardInUse(card: string, exceptOrderId = 0) {
-  return db.get<{ id: number; order_no: string; status: string }>(
-    `SELECT id, order_no, status FROM orders WHERE tag_no = ? AND status IN ('RECEIVED','WASHING','READY') AND id != ?`, [card, exceptOrderId]);
+  return db.get<{ id: number; order_no: string; status: string; tag_no: string }>(
+    `SELECT id, order_no, status, tag_no FROM orders WHERE tag_key = ? AND status IN ('RECEIVED','WASHING','READY') AND id != ?`, [codeKey(card), exceptOrderId]);
+}
+
+/** A database uniqueness error (two counters saving at the same moment). */
+export const isUniqueError = (e: unknown) => /unique|duplicate key/i.test(String((e as Error)?.message));
+
+/* ---------------------------------------------------------- order numbers */
+
+export type OrderNoFormat = Settings['order_no_format'];
+export const ORDER_DATE_PARTS = ['{YYYY}', '{YY}', '{MM}', '{FY}'];
+
+/** Indian financial year of a day: 2026-11-25 → "26-27" (April to March). */
+function financialYear(day: string) {
+  const y = Number(day.slice(0, 4)), m = Number(day.slice(5, 7));
+  const a = m >= 4 ? y : y - 1;
+  return `${String(a % 100).padStart(2, '0')}-${String((a + 1) % 100).padStart(2, '0')}`;
+}
+function fillDate(t: string, day: string) {
+  return t.replace(/\{YYYY\}/g, day.slice(0, 4)).replace(/\{YY\}/g, day.slice(2, 4)).replace(/\{MM\}/g, day.slice(5, 7)).replace(/\{FY\}/g, financialYear(day));
+}
+/** "EJ-" + 1042 → "EJ-1042"; "INV/{FY}/" + 7 (4 digits) → "INV/26-27/0007". */
+export function formatOrderNo(f: OrderNoFormat, n: number, day = dayKey()) {
+  return `${fillDate(f.prefix, day)}${String(n).padStart(f.pad, '0')}${fillDate(f.suffix, day)}`;
+}
+/** Each style (and each year/month when numbers start again) has its own counter. The first style keeps the old one. */
+function orderCounter(f: OrderNoFormat, day: string) {
+  if (f.prefix === 'EJ-' && f.suffix === '' && f.reset === 'NEVER') return 'order_no';
+  const period = f.reset === 'YEARLY' ? day.slice(0, 4) : f.reset === 'MONTHLY' ? day.slice(0, 7) : f.reset === 'FY' ? financialYear(day) : '';
+  return `order_no:${f.prefix}|${f.suffix}|${period}`;
+}
+
+/**
+ * The next order no. An order no. is like an invoice no.: it is never given twice. If the admin's style
+ * would give a no. that was used before (even written a little differently), that number is skipped.
+ */
+async function nextOrderNo(f: OrderNoFormat) {
+  const day = dayKey();
+  const name = orderCounter(f, day);
+  for (let i = 0; i < 10000; i++) {
+    let n = await nextCounter(name, f.start);
+    if (n < f.start) { await db.run('UPDATE counters SET value = ? WHERE name = ?', [f.start, name]); n = f.start; }
+    const no = formatOrderNo(f, n, day);
+    if (!(await db.get('SELECT id FROM orders WHERE order_key = ?', [codeKey(no)]))) return no;
+  }
+  throw new HttpError(500, 'No free order no. was found. Ask the admin to change the order no. style.');
+}
+
+/** What the next order no. will be, without using it up (for the admin's screen). */
+export async function peekOrderNo(f: OrderNoFormat) {
+  const day = dayKey();
+  const row = await db.get<{ value: number }>('SELECT value FROM counters WHERE name = ?', [orderCounter(f, day)]);
+  let n = row ? Math.max(Number(row.value) + 1, f.start) : f.start;
+  for (let i = 0; i < 1000 && (await db.get('SELECT id FROM orders WHERE order_key = ?', [codeKey(formatOrderNo(f, n, day))])); i++) n++;
+  return { no: formatOrderNo(f, n, day), n };
+}
+
+/** Order nos. that a typed code could be: the code itself, or just the number part in today's style (or the old EJ- style). */
+export function orderKeys(f: OrderNoFormat, raw: string) {
+  const k = codeKey(raw);
+  const keys = new Set([k]);
+  if (/^\d{1,9}$/.test(k)) { keys.add(codeKey(formatOrderNo(f, Number(k)))); keys.add(`EJ${k}`); }
+  return [...keys].filter(Boolean);
+}
+
+/**
+ * Could a card of this series be read as an order no.? (A card "EJ12" next to order "EJ-12" would confuse
+ * staff and students.) With `exact`, the series' prefix is one typed card no.
+ */
+export function cardLooksLikeOrderNo(x: CardSeries, f: OrderNoFormat, exact = false) {
+  const day = dayKey();
+  const op = looseKey(fillDate(f.prefix, day)), os = looseKey(fillDate(f.suffix, day));
+  if (exact) {
+    const k = looseKey(x.prefix);
+    return (op.length + os.length > 0) && k.length > op.length + os.length && k.startsWith(op) && k.endsWith(os) && /^\d+$/.test(k.slice(op.length, k.length - os.length));
+  }
+  return textFits(looseKey(x.prefix), op, false) && textFits(looseKey(x.suffix), os, true);
 }
 
 /* -------------------------------------------------------- rotating slip QR */
@@ -431,8 +530,6 @@ export async function quote(raw: OrderInput, excludeOrderId = 0, snapshot?: Pric
 
 /* ------------------------------------------------------------------ orders */
 
-const orderNo = (n: number) => `EJ-${n}`;
-
 export async function createOrder(actorId: number, input: OrderInput, requestId?: string) {
   return db.tx(async () => {
     // Serialise orders per student so the active/monthly limits hold under concurrent requests.
@@ -442,18 +539,21 @@ export async function createOrder(actorId: number, input: OrderInput, requestId?
       if (existing) return { ...existing, duplicate: true };
     }
     const q = await quote(input);
-    const no = orderNo(await nextCounter('order_no', 1001));
+    const no = await nextOrderNo((await getSettings()).order_no_format);
     const at = nowIso();
     const token = crypto.randomBytes(16).toString('base64url');
     const note = String(orderInput.parse(input).note || '') || null;
     const id = await insertId(`INSERT INTO orders (order_no, student_id, hostel_name, room_no, mobile, weight_kg, clothes_count, service, note,
         within_kg, extra_kg, amount, payment_status, qr_token, request_id, received_by, received_at, day_key, month_key, expected_at, updated_at,
-        service_id, service_name, unit, rate, charge_note, plan_hosteler, tag_no)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, [
+        service_id, service_name, unit, rate, charge_note, plan_hosteler, tag_no, order_key, tag_key)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, [
       no, q.student.id, q.student.hostel_name, q.student.room_no, q.student.mobile, q.weight_kg, q.clothes_count, q.express ? 'EXPRESS' : 'REGULAR', note,
       q.within_kg, q.extra_kg, q.amount, q.amount > 0 ? 'DUE' : 'NONE', token, requestId ?? null, actorId, at, dayKey(), monthKey(), q.expected_at, at,
-      q.service.id, q.service.name, q.service.unit, q.service.rate, q.charge_note, q.plan.hosteler ? 1 : 0, q.tag_no,
-    ]);
+      q.service.id, q.service.name, q.service.unit, q.service.rate, q.charge_note, q.plan.hosteler ? 1 : 0, q.tag_no, codeKey(no), q.tag_no ? codeKey(q.tag_no) : null,
+    ]).catch((e: unknown) => {
+      if (q.tag_no && isUniqueError(e)) throw new HttpError(409, `Card ${q.tag_no} was just given to another basket. Use another card.`, { code: 'CARD_IN_USE' });
+      throw e;
+    });
     const what = `${q.service.name}, ${q.clothes_count} clothes${q.weight_kg ? `, ${q.weight_kg} kg` : ''}${q.tag_no ? `, card ${q.tag_no}` : ''}`;
     await addEvent(id, 'RECEIVED', what, actorId);
     await notify(q.student.id, `Order ${no} received`, `${what}. Your digital slip is ready — keep it till pickup.${q.amount > 0 ? ` Amount due ₹${q.amount}.` : ''}`, id);

@@ -1,6 +1,6 @@
 import crypto from 'node:crypto';
 import request from 'supertest';
-import { beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import ExcelJS from 'exceljs';
 import { createApp } from '../server/app.js';
 import { outbox } from '../server/mail.js';
@@ -840,6 +840,68 @@ describe('basket card no.', () => {
     expect(hash.body.tag_no).toBe('#250');
     expect((await post(staff, '/api/ops/scan', { code: '#250' })).body.id).toBe(hash.body.id);
     await put(admin, '/api/admin/settings', { card_series: [], card_required: false });
+  });
+
+  it('a card on a basket that is not collected is never given again, however it is written', async () => {
+    await put(admin, '/api/admin/settings', { card_series: [], card_required: false });
+    const s = await newStudent();
+    const o = await order(s.id, 2, 3, { tagNo: 'K77' });
+    expect(o.status, o.body.error).toBe(201);
+    // The admin now writes cards as K-077: still the same physical card.
+    expect((await put(admin, '/api/admin/settings', { card_series: [{ prefix: 'K-', from: 1, to: 999, pad: 3 }] })).status).toBe(200);
+    const t = await newStudent();
+    const again = await order(t.id, 2, 3, { tagNo: 'k-077' });
+    expect(again.status).toBe(409);
+    expect(again.body.error).toContain(o.body.order_no);
+    expect((await post(staff, '/api/ops/scan', { code: 'K-077' })).body.id).toBe(o.body.id);
+    const other = await order(t.id, 2, 3, { tagNo: 'K-078' });
+    expect(other.status, other.body.error).toBe(201);
+    expect((await staff.patch(`/api/ops/orders/${other.body.id}/card`).set('x-ej', '1').send({ tagNo: 'K 77' })).status).toBe(409);
+    await put(admin, '/api/admin/settings', { card_series: [] });
+  });
+});
+
+describe('order no. style', () => {
+  const fy = () => {
+    const d = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
+    const a = d.getMonth() >= 3 ? d.getFullYear() : d.getFullYear() - 1;
+    return `${String(a % 100).padStart(2, '0')}-${String((a + 1) % 100).padStart(2, '0')}`;
+  };
+  afterAll(async () => { await put(admin, '/api/admin/settings', { order_no_format: { prefix: 'EJ-', suffix: '', pad: 0, start: 1001, reset: 'NEVER' }, card_series: [] }); });
+
+  it('the admin sets their own style, with date parts and numbering that starts again', async () => {
+    expect((await put(admin, '/api/admin/settings', { order_no_format: { prefix: 'X-', reset: 'YEARLY' } })).status).toBe(400);   // would repeat
+    expect((await put(admin, '/api/admin/settings', { order_no_format: { prefix: 'INV/{QQ}/' } })).status).toBe(400);
+    const ok = await put(admin, '/api/admin/settings', { order_no_format: { prefix: 'inv/{FY}/', suffix: '', pad: 4, start: 1, reset: 'FY' } });
+    expect(ok.status, ok.body.error).toBe(200);
+    expect((await admin.get('/api/admin/order-no')).body.next).toBe(`INV/${fy()}/0001`);
+    const s = await newStudent();
+    const a = await order(s.id, 2, 3);
+    const b = await order(s.id, 2, 3);
+    expect(a.body.order_no).toBe(`INV/${fy()}/0001`);
+    expect(b.body.order_no).toBe(`INV/${fy()}/0002`);
+    expect((await post(staff, '/api/ops/scan', { code: `inv ${fy().replace('-', ' ')} 0002` })).body.id).toBe(b.body.id);
+    expect((await post(staff, '/api/ops/scan', { code: '2' })).body.id).toBe(b.body.id);     // just the number, today's style
+    expect((await staff.get(`/api/ops/orders?q=${encodeURIComponent(a.body.order_no)}`)).body.rows[0].id).toBe(a.body.id);
+    // A card series that looks like these order numbers is refused.
+    expect((await put(admin, '/api/admin/settings', { card_series: [{ prefix: 'INV', from: 1, to: 50 }] })).status).toBe(400);
+  });
+
+  it('an order no. is never given twice, even when the style is changed back', async () => {
+    const { db } = await import('../server/db.js');
+    const used = (await db.all<{ order_no: string }>("SELECT order_no FROM orders WHERE order_no LIKE 'EJ-%' ORDER BY id LIMIT 1"))[0].order_no;
+    // "EJ" + the same numbers would read like the old EJ-… numbers: those are skipped.
+    await put(admin, '/api/admin/settings', { order_no_format: { prefix: 'EJ', suffix: '', pad: 0, start: Number(used.slice(3)), reset: 'NEVER' } });
+    const s = await newStudent();
+    const o = await order(s.id, 2, 3);
+    expect(o.status, o.body.error).toBe(201);
+    expect(o.body.order_no).not.toBe(used.replace('-', ''));
+    const keys = (await db.all<{ k: string }>('SELECT order_key AS k FROM orders')).map(r => r.k);
+    expect(new Set(keys).size).toBe(keys.length);
+    // Back to the first style: numbering carries on after the last EJ- order, never from 1001 again.
+    await put(admin, '/api/admin/settings', { order_no_format: { prefix: 'EJ-', suffix: '', pad: 0, start: 1001, reset: 'NEVER' } });
+    const next = await order(s.id, 2, 3);
+    expect(Number(next.body.order_no.slice(3))).toBeGreaterThan(Number(used.slice(3)));
   });
 });
 

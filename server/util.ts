@@ -106,4 +106,12 @@ export const zDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Use a date like 20
 }, 'That date does not exist (check day and month)');
 
 /** A LIKE pattern for "contains q" that treats %, _ and \ in user input literally (use with ESCAPE '\'). */
+/** Only the letters and digits, upper case: "Blue / 0012-h" → "BLUE0012H". */
+export const looseKey = (v: string) => v.toUpperCase().replace(/[^\p{L}\p{N}]/gu, '');
+/**
+ * How a card no. or order no. is recognised, however it is typed: no signs or spaces, and no leading
+ * zeros on a number (A-0012 = a12). Two codes with the same key are the same code.
+ */
+export const codeKey = (v: string) => looseKey(v).replace(/(^|\D)0+(?=\d)/g, '$1');
+
 export const likeContains = (q: string) => `%${q.replace(/[\\%_]/g, m => `\\${m}`)}%`;

@@ -8,7 +8,7 @@ import multer from 'multer';
 import { z } from 'zod';
 import { TABLES, db, insertId, logActivity, type Row } from '../db.js';
 import { AuthedRequest, requireRole } from '../auth.js';
-import { getSettings, listServices, saveSettings, serviceSchema } from '../rules.js';
+import { getSettings, listServices, peekOrderNo, saveSettings, serviceSchema } from '../rules.js';
 import { photoUpload, savePhoto } from '../files.js';
 import { readUpload, writeXlsx, XLSX_TYPE } from '../sheets.js';
 import { mailConfigured } from '../mail.js';
@@ -109,6 +109,13 @@ router.get('/admin/overview', handle(async (_req, res) => {
 /* ---------------------------------------------------------------- settings */
 
 router.get('/admin/settings', handle(async (_req, res) => res.json(await getSettings())));
+/** The last order no. given and the next one, in the saved style (for the Order numbers tab). */
+router.get('/admin/order-no', handle(async (_req, res) => {
+  const last = await db.get<{ order_no: string; received_at: string }>('SELECT order_no, received_at FROM orders ORDER BY id DESC LIMIT 1');
+  const count = await db.get<{ c: number }>('SELECT COUNT(*) AS c FROM orders');
+  const next = await peekOrderNo((await getSettings()).order_no_format);
+  res.json({ last: last ?? null, next: next.no, next_n: next.n, total: Number(count?.c ?? 0) });
+}));
 /** Is email sending set up on this server (Render: BREVO_API_KEY and MAIL_FROM)? */
 router.get('/admin/mail-status', handle(async (_req, res) => {
   res.json({ configured: mailConfigured(), from: mailConfigured() ? process.env.MAIL_FROM : null, local: !mailConfigured() && process.env.NODE_ENV !== 'production' });
