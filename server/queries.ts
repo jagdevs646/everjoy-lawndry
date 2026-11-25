@@ -1,6 +1,6 @@
 import { db } from './db.js';
 import crypto from 'node:crypto';
-import { QR_STEP_SECONDS, getSettings, matchSeries, orderKeys, qrSignature } from './rules.js';
+import { QR_STEP_SECONDS, formatCard, getSettings, matchSeries, orderKeys, qrSignature } from './rules.js';
 import { codeKey, dayKey, HttpError, likeContains, nowIso } from './util.js';
 
 /* Columns safe to show staff/admin. qr_token and request_id are never listed.
@@ -86,7 +86,11 @@ export async function findOrderByCode(code: string) {
   let orders = await byKeys([key]);
   if (!orders.length && /^\d+$/.test(key)) orders = await byKeys(orderKeys(s.order_no_format, raw));
   // A basket card on an order that hasn't been collected yet (one card is on one open basket at most).
-  const c = await db.get<Hit>(`SELECT id, order_no, tag_no FROM orders WHERE tag_key = ? AND status IN ('RECEIVED','WASHING','READY')`, [key]);
+  // Only the number typed: the card with that number in any series (A256, BLUE-256…).
+  const cardKeys = [...new Set([key, ...(/^\d{1,9}$/.test(key) ? s.card_series.filter(x => +key >= x.from && +key <= x.to).map(x => codeKey(formatCard(x, +key))) : [])])];
+  const cardHits = await db.all<Hit>(`SELECT id, order_no, tag_no FROM orders WHERE tag_key IN (${cardKeys.map(() => '?').join(',')}) AND status IN ('RECEIVED','WASHING','READY')`, cardKeys);
+  if (cardHits.length > 1) throw new HttpError(409, `More than one basket has a card with this no.: ${cardHits.map(h => `${h.tag_no} on ${h.order_no}`).join(', ')}. Type the full card no.`);
+  const c = cardHits[0];
   const o = orders[0];
   if (orders.length > 1) throw new HttpError(409, `More than one order matches “${raw}”: ${orders.map(x => x.order_no).join(', ')}. Type the full order no.`);
   if (c && o && c.id !== o.id) throw new HttpError(409, `Card ${c.tag_no} is on ${c.order_no}, and there is also an order ${o.order_no}. Type the full order no. for the order, or check the card.`);

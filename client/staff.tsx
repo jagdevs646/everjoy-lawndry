@@ -2,7 +2,7 @@ import { FormEvent, KeyboardEvent, useEffect, useRef, useState } from 'react';
 import { Announcement, api, ApiError, Order, Service, Student, User } from './api';
 import { ChangePassword } from './auth';
 import { go, kg, plural, requestId, rupees, toast, useAction, useFormAction, useLoad, useRoute, useScrollTop, when } from './lib';
-import { ComplaintsBoard, CounterStudent, HandOver, OpsSettings, OrderSheet, serviceLine, StudentFacts, StudentLine, StudentSheet } from './ops';
+import { CardInput, ComplaintsBoard, CounterStudent, HandOver, OpsSettings, OrderSheet, serviceLine, StudentFacts, StudentLine, StudentSheet } from './ops';
 import { Avatar, Brand, Button, Empty, ErrorNote, Field, Icon, IconName, Loading, PayPill, Scanner, Segmented, Sheet, StatusPill, Stepper } from './ui';
 
 type Summary = {
@@ -209,8 +209,6 @@ function OrderForm({ student, settings, services, onChangeStudent, onStudent, on
 
   const body = () => ({ studentId: student.id, serviceId: service?.id, weightKg: needsWeight ? w : (w || 0), clothesCount: c, express, acceptExtra, tagNo: tag });
   const cardNeeded = !!settings?.card_required;
-  const first = settings?.card_series?.[0];
-  const cardExample = first ? `${first.prefix}${String(first.from).padStart(first.pad ?? 0, '0')}${first.suffix ?? ''}` : 'A1002';
   // Live rule check: the same server function that saves the order.
   useEffect(() => {
     setQuote(null); setQuoteError(''); setOver(null);
@@ -292,11 +290,10 @@ function OrderForm({ student, settings, services, onChangeStudent, onStudent, on
               <small>{service?.unit === 'PIECE' ? `${price(service)}, count every piece` : 'Count every piece'}</small>
             </div>
           </div>
-          <label className={`card-box${cardNeeded && !tag ? ' need' : ''}`}>
+          <div className={`card-box${cardNeeded && !tag ? ' need' : ''}`}>
             <span>Basket card no.{cardNeeded ? '' : ' (optional)'}</span>
-            <input value={tag} onChange={e => setTag(e.target.value.toUpperCase().replace(/\s/g, ''))} placeholder={cardExample} autoCapitalize="characters" autoComplete="off" spellCheck={false} maxLength={40} aria-label="Basket card no." />
-            <small>The card hung on this basket. Used to find it at pickup.</small>
-          </label>
+            <CardInput value={tag} onChange={setTag} />
+          </div>
           {settings?.express_enabled && (
             <Segmented label="Speed" value={express ? 'EXPRESS' : 'REGULAR'} onChange={v => setExpress(v === 'EXPRESS')} options={[{ value: 'REGULAR', label: 'Regular' }, { value: 'EXPRESS', label: `Express, ${rupees(settings.express_fee)}` }]} />
           )}

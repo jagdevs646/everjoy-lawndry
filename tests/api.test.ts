@@ -827,7 +827,7 @@ describe('basket card no.', () => {
     expect((await put(admin, '/api/admin/settings', { card_series: [{ prefix: 'EJ-', from: 1, to: 9 }] })).status).toBe(400);
     const ok = await put(admin, '/api/admin/settings', { card_series: [{ prefix: 'blue-', suffix: '/b', from: 1, to: 500, pad: 3 }, { prefix: '#', from: 100, to: 999 }], card_required: true });
     expect(ok.status, ok.body.error).toBe(200);
-    expect(ok.body.card_series[0]).toEqual({ prefix: 'BLUE-', suffix: '/B', from: 1, to: 500, pad: 3 });
+    expect(ok.body.card_series[0]).toEqual({ prefix: 'BLUE-', suffix: '/B', from: 1, to: 500, pad: 3, blocked: [] });
     const s = await newStudent();
     const o = await order(s.id, 2, 3, { tagNo: 'blue 7 b' });
     expect(o.status, o.body.error).toBe(201);
@@ -857,6 +857,32 @@ describe('basket card no.', () => {
     const other = await order(t.id, 2, 3, { tagNo: 'K-078' });
     expect(other.status, other.body.error).toBe(201);
     expect((await staff.patch(`/api/ops/orders/${other.body.id}/card`).set('x-ej', '1').send({ tagNo: 'K 77' })).status).toBe(409);
+    await put(admin, '/api/admin/settings', { card_series: [] });
+  });
+
+  it('cards marked lost or damaged, or outside the range, are refused; the counter sees it live', async () => {
+    const bad = await put(admin, '/api/admin/settings', { card_series: [{ prefix: 'Q', from: 1, to: 300, blocked: [{ from: 290, to: 310, reason: 'LOST' }] }] });
+    expect(bad.status).toBe(400);   // not-usable cards must be inside the series
+    const ok = await put(admin, '/api/admin/settings', { card_series: [{ prefix: 'Q', from: 1, to: 300, blocked: [{ from: 2, to: 2, reason: 'LOST', note: 'lost 20 Nov' }, { from: 5, to: 7, reason: 'DAMAGED' }] }] });
+    expect(ok.status, ok.body.error).toBe(200);
+    const s = await newStudent();
+    const lost = await order(s.id, 2, 3, { tagNo: 'Q2' });
+    expect(lost.status).toBe(422);
+    expect(lost.body.error).toContain('lost');
+    expect((await order(s.id, 2, 3, { tagNo: 'Q301' })).body.error).toContain('outside the series');
+    // Live check while typing: the next free card skips the lost one.
+    const free = await staff.get('/api/ops/cards/check?card=Q1&series=0');
+    expect(free.body).toMatchObject({ card: 'Q1', ok: true, next_free: 'Q1' });
+    const o = await order(s.id, 2, 3, { tagNo: 'Q1' });
+    expect(o.status, o.body.error).toBe(201);
+    const taken = await staff.get('/api/ops/cards/check?card=q1&series=0');
+    expect(taken.body.ok).toBe(false);
+    expect(taken.body.problem).toContain(o.body.order_no);
+    expect(taken.body.next_free).toBe('Q3');
+    expect((await staff.get('/api/ops/cards/check?card=Q6&series=0')).body.problem).toContain('damaged');
+    expect((await staff.get('/api/ops/cards/series')).body.series[0]).toMatchObject({ prefix: 'Q', from: 1, to: 300 });
+    // At pickup the number alone finds the basket.
+    expect((await post(staff, '/api/ops/scan', { code: 'Q1' })).body.id).toBe(o.body.id);
     await put(admin, '/api/admin/settings', { card_series: [] });
   });
 });

@@ -1162,7 +1162,7 @@ function MailStatus() {
   return <p className="mail-off"><Icon name="alert" size={16} />Email is not set up on the server yet, so email codes are off. See SECURITY-TODO.md → “Email codes (Brevo)”.</p>;
 }
 
-type Series = { prefix: string; suffix: string; from: number; to: number; pad: number };
+type Series = { prefix: string; suffix: string; from: number; to: number; pad: number; blocked?: CardBlock[] };
 
 /** Only letters and digits, like the server: staff can type a card no. without its signs and spaces. */
 const looseCard = (v: string) => v.toUpperCase().replace(/[^\p{L}\p{N}]/gu, '');
@@ -1190,6 +1190,66 @@ const looksLikeOrders = (x: Series, f: OrderNoFormat) => {
   return textFits(looseCard(x.prefix), looseCard(fillDate(f.prefix.toUpperCase(), d)), false) && textFits(looseCard(x.suffix), looseCard(fillDate(f.suffix.toUpperCase(), d)), true);
 };
 
+type CardBlock = { from: number; to: number; reason: 'LOST' | 'DAMAGED' | 'REMOVED' | 'OTHER'; note: string };
+const BLOCK_REASONS: { value: CardBlock['reason']; label: string }[] = [
+  { value: 'LOST', label: 'Lost' }, { value: 'DAMAGED', label: 'Damaged' }, { value: 'REMOVED', label: 'Taken out of use' }, { value: 'OTHER', label: 'Other' },
+];
+const blockedCount = (x: Series) => (x.blocked ?? []).reduce((n, b) => n + b.to - b.from + 1, 0);
+
+/** "12, 40-45" → [{12,12}, {40,45}], or the first problem. */
+function parseNumbers(text: string, x: Series): { ranges: { from: number; to: number }[]; problem: string | null } {
+  const ranges: { from: number; to: number }[] = [];
+  for (const part of text.split(/[,\s]+/).filter(Boolean)) {
+    const m = /^(\d{1,6})(?:[-–](\d{1,6}))?$/.exec(part);
+    if (!m) return { ranges, problem: `“${part}” is not a number or a range like 40-45.` };
+    const a = Number(m[1]), b = Number(m[2] ?? m[1]);
+    if (a > b) return { ranges, problem: `In ${part} the first number is bigger than the second.` };
+    if (a < x.from || b > x.to) return { ranges, problem: `${part} is outside this series (${x.from} to ${x.to}).` };
+    ranges.push({ from: a, to: b });
+  }
+  return { ranges, problem: ranges.length ? null : 'Type card numbers, e.g. 12, 40-45.' };
+}
+
+/** Cards of one series that must not be given at the counter: lost, damaged, taken out of use. */
+function BlockedCards({ x, onChange }: { x: Series; onChange: (blocked: CardBlock[]) => void }) {
+  const [text, setText] = useState('');
+  const [reason, setReason] = useState<CardBlock['reason']>('LOST');
+  const [note, setNote] = useState('');
+  const blocked = x.blocked ?? [];
+  const parsed = parseNumbers(text, x);
+  const label = (b: CardBlock) => b.from === b.to ? formatCard(x, b.from) : `${formatCard(x, b.from)} – ${formatCard(x, b.to)}`;
+  const add = () => {
+    if (parsed.problem) return;
+    onChange([...blocked, ...parsed.ranges.map(r => ({ ...r, reason, note: note.trim().slice(0, 80) }))]);
+    setText(''); setNote('');
+  };
+  return (
+    <div className="blocked-panel">
+      <p className="muted small">Staff can’t give these cards at the counter. Type the numbers only, e.g. <b>12, 40-45</b>.</p>
+      {blocked.length > 0 && (
+        <ul className="blocked-list">
+          {blocked.map((b, i) => (
+            <li key={i}>
+              <b className="card-no">{label(b)}</b>
+              <span>{BLOCK_REASONS.find(r => r.value === b.reason)?.label}{b.note ? `: ${b.note}` : ''}</span>
+              <Button size="sm" tone="plain" icon="x" type="button" aria-label={`Allow ${label(b)} again`} onClick={() => onChange(blocked.filter((_, j) => j !== i))} />
+            </li>
+          ))}
+        </ul>
+      )}
+      <div className="blocked-add">
+        <Field label="Card numbers"><input value={text} onChange={e => setText(e.target.value)} placeholder="12, 40-45" inputMode="numeric" /></Field>
+        <Field label="Why">
+          <select value={reason} onChange={e => setReason(e.target.value as CardBlock['reason'])}>{BLOCK_REASONS.map(r => <option key={r.value} value={r.value}>{r.label}</option>)}</select>
+        </Field>
+        <Field label="Note (optional)"><input value={note} onChange={e => setNote(e.target.value)} placeholder="e.g. torn, lost on 20 Nov" maxLength={80} /></Field>
+        <Button type="button" icon="plus" disabled={!!parsed.problem} onClick={add}>Add</Button>
+      </div>
+      {text && parsed.problem && <p className="bad small">{parsed.problem}</p>}
+    </div>
+  );
+}
+
 type SeriesForm = { prefix: string; suffix: string; from: string; to: string; zeros: boolean };
 const BLANK_SERIES: SeriesForm = { prefix: '', suffix: '', from: '1', to: '', zeros: false };
 const toForm = (x: Series): SeriesForm => ({ prefix: x.prefix, suffix: x.suffix, from: String(x.from).padStart(x.pad, '0'), to: String(x.to).padStart(x.pad, '0'), zeros: x.pad > 0 });
@@ -1198,6 +1258,7 @@ const toForm = (x: Series): SeriesForm => ({ prefix: x.prefix, suffix: x.suffix,
 function CardSeries({ series, orderFormat, onChange, required, onRequired }: { series: Series[]; orderFormat: OrderNoFormat; onChange: (s: Series[]) => void; required: boolean; onRequired: (v: boolean) => void }) {
   const [f, setF] = useState<SeriesForm>(BLANK_SERIES);
   const [editing, setEditing] = useState<number | null>(null);
+  const [blocking, setBlocking] = useState<number | null>(null);
   const from = Number(f.from), to = Number(f.to);
   const draft: Series = {
     prefix: f.prefix.toUpperCase().replace(/\s+/g, ' ').trimStart(),
@@ -1218,19 +1279,20 @@ function CardSeries({ series, orderFormat, onChange, required, onRequired }: { s
   const save = () => {
     if (problem) return;
     const next = [...series];
-    if (editing !== null) next[editing] = draft; else next.push(draft);
+    // An edited series keeps its not-usable cards that are still inside it.
+    if (editing !== null) next[editing] = { ...draft, blocked: (series[editing].blocked ?? []).filter(b => b.from >= from && b.to <= to) }; else next.push({ ...draft, blocked: [] });
     onChange(next);
     setF(BLANK_SERIES);
     setEditing(null);
   };
   const edit = (i: number) => { setF(toForm(series[i])); setEditing(i); };
-  const remove = (i: number) => { onChange(series.filter((_, j) => j !== i)); if (editing === i) { setEditing(null); setF(BLANK_SERIES); } };
+  const remove = (i: number) => { onChange(series.filter((_, j) => j !== i)); setBlocking(null); if (editing === i) { setEditing(null); setF(BLANK_SERIES); } };
 
   return (
     <div className="settings-cards cards-tab">
       <section className="ad-card settings-group">
         <h2>Basket cards</h2>
-        <p className="muted small">The numbered card hung on each laundry basket. Staff type the card no. at drop-off and find the basket by it at pickup. A card stays on one basket until it is collected, then it can be used again.</p>
+        <p className="muted small">The numbered card hung on each laundry basket. At the counter staff pick the series and type only the number: 256 becomes A256. A card stays on one basket until it is collected, then it can be used again. Numbers outside a series, cards marked not usable and cards on a basket waiting for pickup are refused.</p>
         <Switch checked={required} onChange={onRequired} label="Card no. needed for every order" hint="Off: staff can leave it empty." />
         <div className="series-head"><h3>Your card series</h3>{series.length > 0 && <span className="muted small">{series.length} of 20</span>}</div>
         {series.length ? (
@@ -1238,11 +1300,13 @@ function CardSeries({ series, orderFormat, onChange, required, onRequired }: { s
             {series.map((x, i) => (
               <li key={i} className={editing === i ? 'editing' : ''}>
                 <span className="series-range"><b className="card-no">{formatCard(x, x.from)}</b><span className="muted">to</span><b className="card-no">{formatCard(x, x.to)}</b></span>
-                <small className="muted">{cardCount(x)} cards</small>
+                <small className="muted">{cardCount(x)} cards{blockedCount(x) ? <>, <span className="bad">{blockedCount(x)} not usable</span></> : null}</small>
                 <span className="series-actions">
+                  <Button size="sm" tone="plain" type="button" aria-expanded={blocking === i} onClick={() => setBlocking(blocking === i ? null : i)}>Not usable</Button>
                   <Button size="sm" tone="plain" type="button" onClick={() => edit(i)}>Edit</Button>
                   <Button size="sm" tone="plain" icon="x" type="button" aria-label={`Remove series ${formatCard(x, x.from)}`} onClick={() => remove(i)} />
                 </span>
+                {blocking === i && <BlockedCards x={x} onChange={blocked => onChange(series.map((y, j) => j === i ? { ...y, blocked } : y))} />}
               </li>
             ))}
           </ul>

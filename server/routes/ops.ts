@@ -4,7 +4,7 @@ import bcrypt from 'bcryptjs';
 import { z } from 'zod';
 import { db, insertId, logActivity, notify } from '../db.js';
 import { AuthedRequest, requireRole } from '../auth.js';
-import { addEvent, cancelOrder, cardInUse, checkCard, isUniqueError, correctOrder, createOrder, deliverOrder, getOrderRow, getSettings, listServices, monthUsage, orderInput, planStatus, quote, recordPayment, setStatus } from '../rules.js';
+import { addEvent, cancelOrder, cardInUse, checkCard, isUniqueError, nextFreeCard, correctOrder, createOrder, deliverOrder, getOrderRow, getSettings, listServices, monthUsage, orderInput, planStatus, quote, recordPayment, setStatus } from '../rules.js';
 import { photoUpload, savePhoto } from '../files.js';
 import { checkStudentEmail } from '../otp.js';
 import { announcementsFor, complaintDetail, findOrderByCode, listComplaints, listOrders, listStudents, orderDetail, studentProfile } from '../queries.js';
@@ -338,6 +338,30 @@ router.patch('/ops/orders/:id', handle(async (req, res) => {
     await correctOrder(actor(req).id, id, b.weightKg, b.clothesCount, b.reason);
   });
   res.json(await orderDetail(id));
+}));
+
+/** The card series for the card box (counter and order sheet). Blocked cards are checked by the server. */
+router.get('/ops/cards/series', handle(async (_req, res) => {
+  const s = await getSettings();
+  res.json({ required: s.card_required, series: s.card_series.map(({ prefix, suffix, from, to, pad }) => ({ prefix, suffix, from, to, pad })) });
+}));
+
+/** Live check while staff type a card no.: written the series' way, free or on which basket, and the next free card. */
+router.get('/ops/cards/check', handle(async (req, res) => {
+  const q = parse(z.object({ card: z.string().trim().max(60).default(''), series: z.coerce.number().int().min(0).max(19).optional(), except: z.coerce.number().int().min(0).max(MAX_ID).default(0) }), req.query);
+  const s = await getSettings();
+  const x = q.series !== undefined ? s.card_series[q.series] : undefined;
+  const nextFree = x ? await nextFreeCard(x) : null;
+  if (!q.card) { res.json({ card: null, ok: false, next_free: nextFree }); return; }
+  try {
+    const card = checkCard(s, q.card);
+    const busy = card ? await cardInUse(card, q.except) : undefined;
+    if (busy) { res.json({ card, ok: false, problem: `${card} is on ${busy.order_no} (${busy.status.toLowerCase()}, not collected yet). Use another card.`, next_free: nextFree }); return; }
+    res.json({ card, ok: true, next_free: nextFree });
+  } catch (e) {
+    if (e instanceof HttpError) { res.json({ card: null, ok: false, problem: e.message, next_free: nextFree }); return; }
+    throw e;
+  }
 }));
 
 /** Change the basket card on an order that hasn't been collected (wrong card typed, card lost). */

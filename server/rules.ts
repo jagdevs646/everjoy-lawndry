@@ -33,13 +33,23 @@ export const settingsSchema = z.object({
     from: z.coerce.number().int().min(0).max(999999),
     to: z.coerce.number().int().min(0).max(999999),
     pad: z.coerce.number().int().min(0).max(6).default(0),           // digits with leading zeros: 4 → A0001
+    // Cards of this series that must not be given: lost, damaged, taken out of use.
+    blocked: z.array(z.object({
+      from: z.coerce.number().int().min(0).max(999999),
+      to: z.coerce.number().int().min(0).max(999999),
+      reason: z.enum(['LOST', 'DAMAGED', 'REMOVED', 'OTHER']).default('OTHER'),
+      note: z.string().trim().max(80).default(''),
+    })).max(300).default([]),
   }).transform(x => ({
-    prefix: tidyCardText(x.prefix).trimStart(), suffix: tidyCardText(x.suffix).trimEnd(), from: x.from, to: x.to, pad: x.pad,
+    prefix: tidyCardText(x.prefix).trimStart(), suffix: tidyCardText(x.suffix).trimEnd(), from: x.from, to: x.to, pad: x.pad, blocked: x.blocked,
   })).superRefine((x, ctx) => {
     const bad = (message: string) => ctx.addIssue({ code: 'custom', message, params: { whole: true } });
     if (x.prefix.length > 12 || x.suffix.length > 12) bad('Card series: up to 12 characters before and after the number.');
     if (/[\u0000-\u001f\u007f<>"`\\]/.test(x.prefix + x.suffix)) bad('Card series: these signs can’t be used: < > " ` \\');
     if (x.from > x.to) bad(`Card series ${x.prefix}…${x.suffix}: “from” must not be bigger than “to”.`);
+    for (const b of x.blocked) {
+      if (b.from > b.to || b.from < x.from || b.to > x.to) bad(`Cards not to use (${formatCard(x, b.from)}${b.to !== b.from ? ` – ${formatCard(x, b.to)}` : ''}) must be inside the series ${seriesLabel(x)}.`);
+    }
   })).max(20).superRefine((list, ctx) => {
     for (let i = 0; i < list.length; i++) for (let j = i + 1; j < list.length; j++) {
       const same = seriesClash(list[i], list[j]);
@@ -127,7 +137,7 @@ export async function getSettings(): Promise<Settings> {
   const merged = { ...defaultSettings, ...stored };
   // Series saved before prefix/suffix/leading zeros existed.
   merged.order_no_format = { ...defaultSettings.order_no_format, ...(merged.order_no_format ?? {}) };
-  merged.card_series = (merged.card_series ?? []).map((x: Partial<CardSeries>) => ({ prefix: x.prefix ?? '', suffix: x.suffix ?? '', from: Number(x.from), to: Number(x.to), pad: x.pad ?? 0 }));
+  merged.card_series = (merged.card_series ?? []).map((x: Partial<CardSeries>) => ({ prefix: x.prefix ?? '', suffix: x.suffix ?? '', from: Number(x.from), to: Number(x.to), pad: x.pad ?? 0, blocked: x.blocked ?? [] }));
   return Object.fromEntries(Object.keys(defaultSettings).map(k => [k, (merged as Record<string, unknown>)[k]])) as Settings;
 }
 
@@ -204,7 +214,9 @@ export async function monthUsage(studentId: number, excludeOrderId = 0) {
 
 /* ------------------------------------------------------------ basket cards */
 
-export type CardSeries = { prefix: string; suffix: string; from: number; to: number; pad: number };
+export type CardBlock = { from: number; to: number; reason: 'LOST' | 'DAMAGED' | 'REMOVED' | 'OTHER'; note: string };
+export type CardSeries = { prefix: string; suffix: string; from: number; to: number; pad: number; blocked?: CardBlock[] };
+const BLOCK_REASON: Record<CardBlock['reason'], string> = { LOST: 'lost', DAMAGED: 'damaged', REMOVED: 'taken out of use', OTHER: 'not to be used' };
 
 /** Upper case, one space between words. */
 function tidyCardText(v: string) { return v.toUpperCase().replace(/\s+/g, ' '); }
@@ -247,10 +259,32 @@ function seriesClash(a: CardSeries, b: CardSeries) {
 
 /** The card written the way its series writes it ("a-12" → "A-0012"), or null if no series has it. */
 export function matchSeries(series: CardSeries[], raw: string) {
+  const hit = findSeriesCard(series, raw);
+  return hit ? hit.card : null;
+}
+
+/** The series and number a typed card belongs to, or null. */
+export function findSeriesCard(series: CardSeries[], raw: string) {
   const loose = looseCard(raw);
   for (const x of series) {
     const n = seriesNumber(x, loose);
-    if (n !== null) return formatCard(x, n);
+    if (n !== null) return { x, n, card: formatCard(x, n) };
+  }
+  return null;
+}
+
+/** Why a card of this series can't be given (lost, damaged…), or null. */
+export function cardBlock(x: CardSeries, n: number) {
+  const b = (x.blocked ?? []).find(r => n >= r.from && n <= r.to);
+  return b ? `${BLOCK_REASON[b.reason]}${b.note ? ` (${b.note})` : ''}` : null;
+}
+
+/** "A5000" for the series A1–A3000: right letters, number outside the range. */
+function outOfRange(series: CardSeries[], raw: string) {
+  const loose = looseCard(raw);
+  for (const x of series) {
+    const lp = looseCard(x.prefix), ls = looseCard(x.suffix);
+    if (loose.length > lp.length + ls.length && loose.startsWith(lp) && loose.endsWith(ls) && /^\d{1,9}$/.test(loose.slice(lp.length, loose.length - ls.length))) return x;
   }
   return null;
 }
@@ -279,9 +313,15 @@ export function checkCard(s: Settings, raw: string | undefined | null) {
     return null;
   }
   if (s.card_series.length) {
-    const v = matchSeries(s.card_series, typed);
-    if (!v) throw new HttpError(422, `Card ${tidyCardText(typed)} is not in the card series set by the admin (${s.card_series.map(seriesLabel).join(', ')}).`);
-    return v;
+    const hit = findSeriesCard(s.card_series, typed);
+    if (!hit) {
+      const near = outOfRange(s.card_series, typed);
+      if (near) throw new HttpError(422, `Card ${tidyCardText(typed)} is outside the series ${seriesLabel(near)}. Check the no. on the card.`);
+      throw new HttpError(422, `Card ${tidyCardText(typed)} is not in the card series set by the admin (${s.card_series.map(seriesLabel).join(', ')}).`);
+    }
+    const blocked = cardBlock(hit.x, hit.n);
+    if (blocked) throw new HttpError(422, `Card ${hit.card} can't be given: it is marked ${blocked}. Use another card.`);
+    return hit.card;
   }
   const v = normaliseCard(typed);
   if (cardLooksLikeOrderNo({ prefix: v, suffix: '', from: 0, to: 0, pad: 0 }, s.order_no_format, true)) throw new HttpError(422, `${v} looks like an order no. Type the no. written on the basket card.`);
@@ -293,6 +333,16 @@ export function checkCard(s: Settings, raw: string | undefined | null) {
 export async function cardInUse(card: string, exceptOrderId = 0) {
   return db.get<{ id: number; order_no: string; status: string; tag_no: string }>(
     `SELECT id, order_no, status, tag_no FROM orders WHERE tag_key = ? AND status IN ('RECEIVED','WASHING','READY') AND id != ?`, [codeKey(card), exceptOrderId]);
+}
+
+/** The first card of a series that is free: not on a basket waiting to be collected, and not marked lost/damaged. */
+export async function nextFreeCard(x: CardSeries) {
+  const used = new Set((await db.all<{ k: string }>(`SELECT tag_key AS k FROM orders WHERE tag_key IS NOT NULL AND status IN ('RECEIVED','WASHING','READY')`)).map(r => r.k));
+  for (let n = x.from; n <= x.to; n++) {
+    const card = formatCard(x, n);
+    if (!used.has(codeKey(card)) && !cardBlock(x, n)) return card;
+  }
+  return null;
 }
 
 /** A database uniqueness error (two counters saving at the same moment). */

@@ -1,5 +1,5 @@
 /* Building blocks shared by the staff counter and the admin office. */
-import { FormEvent, useState } from 'react';
+import { FormEvent, useEffect, useState } from 'react';
 import { api, Complaint, Hostel, Order, Plan, Service, Student, Usage } from './api';
 import { eventLabel } from './student';
 import { ago, kg, planPeriod, plural, rupees, semesterOptions, shrinkPhoto, toast, useAction, useFormAction, useLoad, when } from './lib';
@@ -153,9 +153,10 @@ function ChangeCard({ o, onDone, onCancel }: { o: Order; onDone: (o: Order) => v
   };
   return (
     <form className="stack" onSubmit={save}>
-      <Field label="Basket card no." hint="The no. on the card tied to this basket">
-        <input value={tag} onChange={e => setTag(e.target.value.toUpperCase())} autoCapitalize="characters" spellCheck={false} maxLength={40} autoFocus />
-      </Field>
+      <div className="card-box">
+        <span>Basket card no.</span>
+        <CardInput value={tag} onChange={setTag} exceptOrderId={o.id} autoFocus />
+      </div>
       {error && <ErrorNote error={error} />}
       <Button tone="primary" block busy={busy}>Save card</Button>
       <Button tone="plain" block type="button" onClick={onCancel}>Back</Button>
@@ -513,6 +514,104 @@ function StudentPhoto({ s, onChanged }: { s: CounterStudent; onChanged: (s: Coun
           <input type="file" accept="image/*" capture="user" hidden onChange={e => { void pick(e.target.files?.[0]); e.target.value = ''; }} />
         </label>
         {s.photo && <Button size="sm" tone="plain" type="button" onClick={remove}>Remove</Button>}
+      </div>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------ basket card box */
+
+type CardSeriesLite = { prefix: string; suffix: string; from: number; to: number; pad: number };
+type CardCheck = { card: string | null; ok: boolean; problem?: string; next_free: string | null };
+const cardText = (x: CardSeriesLite, n: number) => `${x.prefix}${String(n).padStart(x.pad, '0')}${x.suffix}`;
+const looseText = (v: string) => v.toUpperCase().replace(/[^\p{L}\p{N}]/gu, '');
+
+/** A full card no. typed or scanned ("a-256", "BLUE 7"): which series and number it is. */
+function splitCard(series: CardSeriesLite[], raw: string) {
+  const loose = looseText(raw);
+  for (let i = 0; i < series.length; i++) {
+    const lp = looseText(series[i].prefix), ls = looseText(series[i].suffix);
+    const mid = loose.slice(lp.length, loose.length - ls.length);
+    if (loose.length > lp.length + ls.length && loose.startsWith(lp) && loose.endsWith(ls) && /^\d{1,9}$/.test(mid)) return { i, n: String(Number(mid)) };
+  }
+  return null;
+}
+
+/**
+ * Basket card no. With card series set, staff pick the series and type only the number: the letters and
+ * signs are added for them (256 → A256). The server checks live that the card is in the series, not
+ * marked lost or damaged, and not on another basket that hasn't been collected; and offers the next free card.
+ */
+export function CardInput({ value, onChange, exceptOrderId = 0, autoFocus, onState }: {
+  value: string; onChange: (card: string) => void; exceptOrderId?: number; autoFocus?: boolean; onState?: (ok: boolean) => void;
+}) {
+  const conf = useLoad(() => api<{ required: boolean; series: CardSeriesLite[] }>('/ops/cards/series'), []);
+  const series = conf.data?.series ?? [];
+  const [idx, setIdx] = useState(0);
+  const [text, setText] = useState(() => value);
+  const [check, setCheck] = useState<CardCheck | null>(null);
+  const x = series[Math.min(idx, series.length - 1)];
+  // A card already on the order (change card): show it as series + number.
+  useEffect(() => {
+    if (!series.length || !value) return;
+    const hit = splitCard(series, value);
+    if (hit) { setIdx(hit.i); setText(hit.n); }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [conf.data]);
+  const card = x && /^\d+$/.test(text) ? cardText(x, Number(text)) : text.trim().toUpperCase();
+  useEffect(() => { if (card !== value) onChange(card); }, [card]);   // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    if (!conf.data) return;
+    const t = setTimeout(() => {
+      const qs = new URLSearchParams({ card, except: String(exceptOrderId), ...(x ? { series: String(series.indexOf(x)) } : {}) });
+      api<CardCheck>(`/ops/cards/check?${qs}`).then(r => { setCheck(r); onState?.(r.ok); }).catch(() => setCheck(null));
+    }, 250);
+    return () => clearTimeout(t);
+  }, [card, idx, conf.data]);   // eslint-disable-line react-hooks/exhaustive-deps
+
+  const type = (v: string) => {
+    if (!x) { setText(v.toUpperCase().replace(/\s/g, '')); return; }
+    if (/[^\d\s]/.test(v)) {
+      const hit = splitCard(series, v);   // a full card no. typed or scanned
+      if (hit) { setIdx(hit.i); setText(hit.n); return; }
+    }
+    setText(v.replace(/\D/g, '').slice(0, 9));
+  };
+  const useNext = () => { if (!check?.next_free || !x) return; const hit = splitCard([x], check.next_free); if (hit) setText(hit.n); };
+  const tone = !card ? '' : check?.ok ? ' good' : check?.problem ? ' bad' : '';
+
+  return (
+    <div className={`card-entry-wrap${tone}`}>
+      {series.length > 1 && (
+        <div className="card-series-pick" role="radiogroup" aria-label="Card series">
+          {series.map((s, i) => (
+            <button key={i} type="button" role="radio" aria-checked={i === idx} className={i === idx ? 'on' : ''} onClick={() => setIdx(i)}>
+              {cardText(s, s.from)} – {cardText(s, s.to)}
+            </button>
+          ))}
+        </div>
+      )}
+      {x ? (
+        <div className="card-entry">
+          {x.prefix && <span className="card-affix">{x.prefix}</span>}
+          <input value={text} onChange={e => type(e.target.value)} inputMode="numeric" placeholder={String(x.from).padStart(x.pad, '0')} autoComplete="off" spellCheck={false}
+            aria-label={`Basket card no., ${cardText(x, x.from)} to ${cardText(x, x.to)}`} autoFocus={autoFocus} />
+          {x.suffix && <span className="card-affix">{x.suffix}</span>}
+        </div>
+      ) : (
+        <div className="card-entry">
+          <input value={text} onChange={e => type(e.target.value)} placeholder="A1002" autoCapitalize="characters" autoComplete="off" spellCheck={false} maxLength={40} aria-label="Basket card no." autoFocus={autoFocus} />
+        </div>
+      )}
+      <div className="card-status" aria-live="polite">
+        {!card ? <span className="muted">{x ? `Type the number on the card (${cardText(x, x.from)} – ${cardText(x, x.to)}).` : 'Type the no. on the card hung on this basket.'}</span>
+          : check?.ok ? <span className="ok"><Icon name="check" size={16} />Card <b>{check.card}</b> is free.</span>
+          : check?.problem ? <span className="bad"><Icon name="alert" size={16} />{check.problem}</span>
+          : <span className="muted">Checking {card}…</span>}
+        {x && check?.next_free && check.next_free !== check.card && (
+          <button type="button" className="next-free" onClick={useNext}>Next free card: <b>{check.next_free}</b></button>
+        )}
+        {x && check && !check.next_free && <span className="bad">Every card in this series is in use or marked not usable.</span>}
       </div>
     </div>
   );
