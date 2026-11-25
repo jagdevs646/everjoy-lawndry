@@ -147,7 +147,7 @@ export async function listStudents(f: { q?: string; status?: string; hostelId?: 
     p.push(like, like, like, q);
   }
   const sql = where.length ? `WHERE ${where.join(' AND ')}` : '';
-  const limit = Math.min(Math.max(Math.trunc(Number(f.limit)) || 50, 1), 500);
+  const limit = Math.min(Math.max(Math.trunc(Number(f.limit)) || 50, 1), 1000);
   const offset = Math.max(Math.trunc(Number(f.offset)) || 0, 0);
   // The two month subqueries come before the WHERE, so the month is bound twice ahead of the filter params.
   const rows = await db.all(`SELECT ${STUDENT_COLS},

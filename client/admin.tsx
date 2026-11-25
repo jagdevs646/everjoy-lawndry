@@ -3,6 +3,7 @@ import { Announcement, api, ApiError, blobUrl, download, Hostel, Order, Service,
 import { ChangePassword } from './auth';
 import { ago, kg, planPeriod, plural, rupees, shiftDay, toast, todayKey, useAction, useFormAction, useLoad, useRoute, useScrollTop, when } from './lib';
 import { ComplaintsBoard, OrderSheet, SemesterChips, StudentSheet } from './ops';
+import { GridFrame, useGrid } from './grid';
 import { Avatar, Brand, Button, Empty, ErrorNote, Field, Icon, IconButton, IconName, invalidatePaymentInfo, Loading, PayPill, Segmented, Sheet, StatusPill, Switch } from './ui';
 
 type Overview = {
@@ -315,12 +316,13 @@ const monthStart = () => `${todayKey().slice(0, 7)}-01`;
 function Register({ open }: { open: Openers }) {
   const preset = (() => { try { const p = sessionStorage.getItem('ej-register-preset'); sessionStorage.removeItem('ej-register-preset'); return p; } catch { return null; } })();
   const [f, setF] = useState({ q: '', from: preset ? '' : monthStart(), to: '', status: preset && preset !== 'DUE' ? preset : '', hostel: '', payment: preset === 'DUE' ? 'DUE' : '' });
-  const [limit, setLimit] = useState(100);
   const hostels = useLoad(() => api<{ hostels: Hostel[] }>('/public/info'), []);
-  const qs = new URLSearchParams(Object.entries({ ...f, limit: String(limit) }).filter(([, v]) => v)).toString();
+  const filters = new URLSearchParams(Object.entries(f).filter(([, v]) => v)).toString();
+  const grid = useGrid('register', [filters]);
+  const qs = `${filters}${filters ? '&' : ''}limit=${grid.size}&offset=${grid.offset}`;
   const list = useLoad(() => api<{ rows: Order[]; total: number }>(`/ops/orders?${qs}`), [qs], { every: 60_000 });
   const { busy, run } = useAction();
-  const set = (k: keyof typeof f) => (e: { target: { value: string } }) => { setF({ ...f, [k]: e.target.value }); setLimit(100); };
+  const set = (k: keyof typeof f) => (e: { target: { value: string } }) => setF({ ...f, [k]: e.target.value });
   const exportXlsx = () => run(async () => {
     const from = f.from || '2000-01-01';
     const to = f.to || todayKey();
@@ -348,7 +350,7 @@ function Register({ open }: { open: Openers }) {
       {!list.data ? (list.error ? <ErrorNote error={list.error} retry={list.reload} /> : <Loading />) : !list.data.rows.length ? <Empty icon="list" title="No orders match">Try a wider date range or clear the filters.</Empty> : (
         <>
           <p className="muted small">{list.data.total} {list.data.total === 1 ? 'order' : 'orders'}{f.from ? ` from ${when(`${f.from}T12:00:00`, 'date')}` : ''}{f.to ? ` to ${when(`${f.to}T12:00:00`, 'date')}` : ''}</p>
-          <div className="ledger-wrap">
+          <GridFrame grid={grid} total={list.data.total} shown={list.data.rows.length}>
             <table className="ledger">
               <thead><tr><th>Order</th><th>Card</th><th>Date in</th><th>Student</th><th>Room</th><th>Service</th><th className="num">Clothes</th><th className="num">Kg</th><th>Status</th><th>Payment</th><th>Handed over</th><th>Student confirmed</th></tr></thead>
               <tbody>
@@ -370,8 +372,7 @@ function Register({ open }: { open: Openers }) {
                 ))}
               </tbody>
             </table>
-          </div>
-          {list.data.rows.length < list.data.total && <Button onClick={() => setLimit(limit + 200)}>Show more</Button>}
+          </GridFrame>
         </>
       )}
     </div>
@@ -386,7 +387,9 @@ function Students({ open }: { open: Openers }) {
   const [sel, setSel] = useState<Set<number>>(new Set());
   const [temp, setTemp] = useState<{ name: string; pass: string } | null>(null);
   const hostels = useLoad(() => api<{ hostels: Hostel[] }>('/public/info'), []);
-  const qs = new URLSearchParams(Object.entries({ ...f, limit: '300' }).filter(([, v]) => v)).toString();
+  const filters = new URLSearchParams(Object.entries(f).filter(([, v]) => v)).toString();
+  const grid = useGrid('students', [filters]);
+  const qs = `${filters}${filters ? '&' : ''}limit=${grid.size}&offset=${grid.offset}`;
   const list = useLoad(() => api<{ rows: Student[]; total: number }>(`/ops/students?${qs}`), [qs]);
   const { busy, run } = useAction();
   useEffect(() => setSel(new Set()), [qs]);
@@ -435,7 +438,7 @@ function Students({ open }: { open: Openers }) {
             <p className="muted small">{plural(list.data.total, 'student')}{leftView ? ' removed from the hostel list' : ''}</p>
             {!leftView && <label className="select-all"><input type="checkbox" checked={allOn} onChange={e => setSel(e.target.checked ? new Set(rows.map(r => r.id)) : new Set())} />Select all shown</label>}
           </div>
-          <div className="ledger-wrap">
+          <GridFrame grid={grid} total={list.data.total} shown={rows.length}>
             <table className="ledger fit">
               <thead><tr>{!leftView && <th className="check-col" />}<th>Name</th><th>ID card no., mobile</th><th>Hostel, room</th><th>Account</th><th>Hostel plan</th><th className="num">This month</th><th className="num">In progress</th><th /></tr></thead>
               <tbody>
@@ -459,7 +462,7 @@ function Students({ open }: { open: Openers }) {
                 ))}
               </tbody>
             </table>
-          </div>
+          </GridFrame>
         </>
       )}
       {sel.size > 0 && (
@@ -479,6 +482,8 @@ type StaffRow = { id: number; name: string; login_id: string; mobile: string | n
 
 function Staff({ me }: { me: User }) {
   const list = useLoad(() => api<{ rows: StaffRow[] }>('/admin/staff'), []);
+  const grid = useGrid('staff');
+  const staffRows = list.data?.rows.slice(grid.offset, grid.offset + grid.size) ?? [];
   const [adding, setAdding] = useState(false);
   const [importing, setImporting] = useState(false);
   const [work, setWork] = useState<StaffRow | null>(null);
@@ -498,11 +503,11 @@ function Staff({ me }: { me: User }) {
       <div className="row-between"><p className="muted">People who can sign in to the counter or this office. Switch someone off when they leave; their history stays.</p><div className="btn-pair"><Button icon="download" onClick={() => setImporting(true)}>Add from Excel</Button><Button tone="primary" icon="plus" onClick={() => setAdding(true)}>Add staff</Button></div></div>
       {temp && <div className="temp-pass" role="status"><span>Temporary password for {temp.name}</span><b>{temp.pass}</b><small>They will choose a new one after signing in.</small></div>}
       {!list.data ? <Loading /> : (
-        <div className="ledger-wrap">
+        <GridFrame grid={grid} total={list.data.rows.length} shown={staffRows.length}>
           <table className="ledger fit">
             <thead><tr><th>Name</th><th>Username</th><th>Role</th><th className="num">Taken this month</th><th className="num">Handed over</th><th className="num">Collected</th><th>Last active</th><th>Account</th><th /></tr></thead>
             <tbody>
-              {list.data.rows.map(s => (
+              {staffRows.map(s => (
                 <tr key={s.id} className={s.active ? '' : 'off'}>
                   <td><b>{s.name}</b>{s.id === me.id && <small>You</small>}</td>
                   <td className="ord">{s.login_id}</td>
@@ -521,7 +526,7 @@ function Staff({ me }: { me: User }) {
               ))}
             </tbody>
           </table>
-        </div>
+        </GridFrame>
       )}
       {adding && <AddStaff close={() => setAdding(false)} onDone={() => { setAdding(false); void list.reload(); }} />}
       {importing && <ImportSheet type="staff" close={() => setImporting(false)} onDone={() => void list.reload()} />}
@@ -899,23 +904,12 @@ type ActivityRow = { id: number; action: string; entity: string | null; entity_i
 
 /** Every recorded action, newest first, 100 per page. The first page refreshes itself, so new entries appear on top. */
 function Activity() {
-  const PAGE = 100;
   const [q, setQ] = useState('');
-  const [page, setPage] = useState(0);
-  useEffect(() => setPage(0), [q]);
-  const list = useLoad(() => api<{ rows: ActivityRow[]; total: number }>(`/admin/activity?limit=${PAGE}&offset=${page * PAGE}${q ? `&q=${encodeURIComponent(q)}` : ''}`), [q, page], { every: page === 0 ? 15_000 : undefined });
+  const grid = useGrid('activity', [q]);
+  const page = grid.page;
+  const list = useLoad(() => api<{ rows: ActivityRow[]; total: number }>(`/admin/activity?limit=${grid.size}&offset=${grid.offset}${q ? `&q=${encodeURIComponent(q)}` : ''}`), [q, grid.page, grid.size], { every: page === 0 ? 15_000 : undefined });
   const total = list.data?.total ?? 0;
-  const pages = Math.max(1, Math.ceil(total / PAGE));
-  const first = page * PAGE + 1;
-  const last = Math.min(total, (page + 1) * PAGE);
-  const pager = (
-    <div className="pager">
-      <span className="muted small">{total ? `${first}–${last} of ${total.toLocaleString('en-IN')}` : 'No entries'}</span>
-      <Button size="sm" icon="back" disabled={page === 0} onClick={() => setPage(page - 1)}>Newer</Button>
-      <span className="small">Page {page + 1} of {pages}</span>
-      <Button size="sm" disabled={page + 1 >= pages} onClick={() => setPage(page + 1)}>Older <Icon name="next" size={16} /></Button>
-    </div>
-  );
+  const first = grid.offset + 1;
   return (
     <div className="stack">
       <div className="filters">
@@ -923,9 +917,8 @@ function Activity() {
         {page === 0 && <span className="live-dot" title="New entries appear automatically">Live</span>}
       </div>
       <p className="muted small">Every important action is recorded here, with who did it and when. Records cannot be edited.</p>
-      {pager}
       {!list.data ? (list.error ? <ErrorNote error={list.error} retry={list.reload} /> : <Loading />) : (
-        <div className="ledger-wrap">
+        <GridFrame grid={grid} total={total} shown={list.data.rows.length}>
           <table className="ledger fit activity-table">
             <thead><tr><th className="num">#</th><th>When</th><th>Who</th><th>What</th><th>Details</th></tr></thead>
             <tbody>
@@ -940,9 +933,8 @@ function Activity() {
               ))}
             </tbody>
           </table>
-        </div>
+        </GridFrame>
       )}
-      {list.data && list.data.rows.length > 20 && pager}
     </div>
   );
 }

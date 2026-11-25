@@ -369,3 +369,57 @@ html[data-theme='admin'] h1, html[data-theme='admin'] h2 { letter-spacing: -.01e
   .save-bar > span { flex-basis: 100%; }
   .save-bar .btn { flex: 1; }
 }
+
+/* ------------------------------------------------ spreadsheet-style tables */
+.grid-frame { display: grid; gap: 10px; min-width: 0; }
+.grid-tools { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 16px; }
+.grid-tools.bottom { justify-content: flex-start; }
+.grid-pager, .grid-view { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; }
+.grid-count { color: var(--ink-2); font-size: .9rem; margin-right: 4px; }
+.grid-size, .grid-select { display: inline-flex; align-items: center; gap: 6px; font-size: .85rem; font-weight: 600; color: var(--ink-2); }
+.grid-size input { width: 78px !important; min-height: 34px !important; padding: 4px 8px !important; font-size: .9rem !important; text-align: right; }
+.grid-select select { min-height: 34px !important; padding: 4px 8px !important; font-size: .9rem !important; width: auto !important; }
+.grid-wrap-toggle { font-size: .85rem; }
+
+/* Frozen header row inside a scrolling sheet */
+.ledger-wrap.grid { max-height: calc(100vh - 230px); overflow: auto; }
+.ledger-wrap.grid .ledger th {
+  position: sticky; top: 0; z-index: 2;
+  background: var(--accent); color: #fff; font-weight: 700; letter-spacing: .01em;
+  border-bottom: 0; border-right: 1px solid rgba(255, 255, 255, .14);
+}
+.ledger-wrap.grid .ledger th:first-child { border-right: 2px solid var(--margin); }
+.ledger-wrap.grid .ledger th.num { text-align: right; }
+.ledger-wrap.grid .ledger td { border-right: 1px solid var(--rule); }
+.ledger-wrap.grid .ledger td:last-child, .ledger-wrap.grid .ledger th:last-child { border-right: 0; }
+.ledger-wrap.grid .ledger tbody tr:nth-child(even) td { background: #FBFCFD; }
+.ledger-wrap.grid .ledger tbody tr[tabindex]:hover td { background: #FBF6F7; }
+.ledger-wrap.grid .ledger th input[type='checkbox'] { accent-color: #fff; }
+
+/* Column resize handle on the right edge of each header */
+.ledger-wrap.grid th { position: sticky; }
+.col-resize { position: absolute; top: 0; right: -4px; width: 9px; height: 100%; cursor: col-resize; z-index: 3; touch-action: none; }
+.col-resize::after { content: ''; position: absolute; top: 25%; bottom: 25%; left: 4px; width: 2px; border-radius: 1px; background: rgba(255, 255, 255, .35); }
+.col-resize:hover::after, .col-resizing .col-resize::after { background: #fff; }
+body.col-resizing { cursor: col-resize; user-select: none; }
+
+/* Row height */
+.ledger-wrap.grid.rows-compact .ledger td { padding-top: 4px; padding-bottom: 4px; font-size: .85rem; }
+.ledger-wrap.grid.rows-compact .ledger td small { display: inline; margin-left: 6px; }
+.ledger-wrap.grid.rows-tall .ledger td { padding-top: 16px; padding-bottom: 16px; }
+
+/* Wrap text on / off */
+.ledger-wrap.grid.wrap .ledger td, .ledger-wrap.grid.wrap .ledger td.detail { white-space: normal; overflow-wrap: anywhere; }
+.ledger-wrap.grid.nowrap .ledger td { white-space: nowrap; }
+.ledger-wrap.grid.nowrap.sized .ledger td { overflow: hidden; text-overflow: ellipsis; }
+.ledger-wrap.grid.nowrap .ledger td.detail { min-width: 0; }
+.ledger-wrap.grid.nowrap .ledger td.row-actions { white-space: nowrap; }
+
+@media (max-width: 760px) {
+  .ledger-wrap.grid { max-height: none; overflow: visible; }
+  .ad-main .ledger-wrap.grid .ledger { width: auto !important; table-layout: auto !important; }
+  .col-resize { display: none; }
+  .grid-view .grid-select, .grid-view .grid-wrap-toggle { display: none; }
+  .ledger-wrap.grid .ledger td { border-right: 0; }
+  .ledger-wrap.grid .ledger tbody tr:nth-child(even) td { background: none; }
+}

@@ -327,7 +327,7 @@ router.get('/admin/export', handle(async (req, res) => {
 /* ---------------------------------------------------------- activity, backup */
 
 router.get('/admin/activity', handle(async (req, res) => {
-  const q = parse(z.object({ q: z.string().optional(), limit: z.coerce.number().int().min(1).max(200).default(100), offset: z.coerce.number().int().min(0).default(0) }), req.query);
+  const q = parse(z.object({ q: z.string().optional(), limit: z.coerce.number().int().min(1).max(1000).default(100), offset: z.coerce.number().int().min(0).default(0) }), req.query);
   const like = likeContains(q.q ?? '');
   const where = q.q ? `WHERE LOWER(a.action) LIKE LOWER(?) ESCAPE '\\' OR LOWER(a.entity_id) LIKE LOWER(?) ESCAPE '\\' OR LOWER(a.detail) LIKE LOWER(?) ESCAPE '\\' OR LOWER(u.name) LIKE LOWER(?) ESCAPE '\\'` : '';
   // limit and offset are integers checked by zod above, so they are safe to put in the SQL.
