@@ -17,6 +17,32 @@ type Overview = {
   recent: { action: string; entity_id: string | null; detail: string; created_at: string; actor_name: string | null }[];
 };
 
+/**
+ * On phones the admin tables turn into one card per row (admin.css). Each cell gets its column title
+ * as data-label so the card can show "Hostel, room: Boys Hostel 2, B-108". Kept up to date as pages change.
+ */
+function useTableLabels(root: React.RefObject<HTMLElement | null>) {
+  useEffect(() => {
+    const el = root.current;
+    if (!el) return;
+    const label = () => {
+      for (const table of el.querySelectorAll<HTMLTableElement>('table.ledger')) {
+        const heads = [...table.querySelectorAll('thead th')].map(th => (th.textContent ?? '').trim());
+        for (const row of table.querySelectorAll('tbody tr')) {
+          [...row.children].forEach((td, i) => { const t = heads[i] ?? ''; if (td.getAttribute('data-label') !== t) td.setAttribute('data-label', t); });
+        }
+      }
+    };
+    label();
+    const mo = new MutationObserver(label);
+    mo.observe(el, { childList: true, subtree: true });
+    return () => mo.disconnect();
+  }, [root]);
+}
+
+/** Bottom tab bar on phones: the pages used most; "More" opens the full menu. */
+const PHONE_TABS = ['', 'register', 'students', 'complaints'];
+
 const NAV: { key: string; label: string; icon: IconName }[] = [
   { key: '', label: 'Overview', icon: 'chart' },
   { key: 'register', label: 'Register', icon: 'list' },
@@ -40,6 +66,8 @@ export function AdminApp({ user, onSignOut, onUser, onCounter }: { user: User; o
   const [pw, setPw] = useState(false);
   useEffect(() => setDrawer(false), [page]);
   useScrollTop(current.key);
+  const mainRef = useRef<HTMLElement>(null);
+  useTableLabels(mainRef);
   const changed = () => setBump(b => b + 1);
   const open = { order: setOrderId, student: setStudentId };
 
@@ -67,7 +95,7 @@ export function AdminApp({ user, onSignOut, onUser, onCounter }: { user: User; o
           </div>
           <Button icon="washer" onClick={onCounter} className="ad-counter-btn">Counter</Button>
         </header>
-        <main className="ad-main" key={bump}>
+        <main className="ad-main" key={bump} ref={mainRef}>
           {current.key === '' && <OverviewPage open={open} />}
           {current.key === 'register' && <Register open={open} />}
           {current.key === 'students' && <Students open={open} />}
@@ -80,6 +108,16 @@ export function AdminApp({ user, onSignOut, onUser, onCounter }: { user: User; o
           {current.key === 'activity' && <Activity />}
         </main>
       </div>
+      <nav className="ad-tabs" aria-label="Admin, main pages">
+        {NAV.filter(n => PHONE_TABS.includes(n.key)).map(n => (
+          <a key={n.key} href={`#/${n.key}`} className={current.key === n.key ? 'on' : ''} aria-current={current.key === n.key ? 'page' : undefined}>
+            <span className="tab-icon"><Icon name={n.icon} size={22} /></span>{n.key === 'complaints' ? 'Issues' : n.label}
+          </a>
+        ))}
+        <button type="button" className={!PHONE_TABS.includes(current.key) ? 'on' : ''} onClick={() => setDrawer(true)} aria-label="More pages">
+          <span className="tab-icon"><Icon name="menu" size={22} /></span>{!PHONE_TABS.includes(current.key) ? current.label.split(' ')[0] : 'More'}
+        </button>
+      </nav>
       {orderId && <OrderSheet id={orderId} isAdmin payFirst close={() => setOrderId(null)} onChanged={changed} />}
       {studentId && <StudentSheet id={studentId} isAdmin close={() => setStudentId(null)} onChanged={changed} onOpenOrder={id => { setStudentId(null); setOrderId(id); }} />}
       {pw && <Sheet title="Change password" onClose={() => setPw(false)} size="sm"><ChangePassword user={user} onDone={u => { onUser(u); setPw(false); }} /></Sheet>}
@@ -233,7 +271,7 @@ function DayBars({ days, by = 'day', unit = 'order' }: { days: Overview['days'];
         })}
         <line x1={pad.l} x2={W - pad.r} y1={H - pad.b} y2={H - pad.b} className="base" />
       </svg>
-      <p className="daybars-tip" aria-live="polite">{h ? <><b>{by === 'day' ? `${wk(h.day)} ${label(h.day)}` : bucketLabel(h.day, by)}</b>: {plural(h.orders, unit)}{unit === 'order' ? `, ${kg(h.kg)}` : ''}</> : <>Total {plural(days.reduce((a, d) => a + d.orders, 0), unit)}{unit === 'order' ? `, ${kg(days.reduce((a, d) => a + d.kg, 0))}` : ''}. Hover a bar for details.</>}</p>
+      <p className="daybars-tip" aria-live="polite">{h ? <><b>{by === 'day' ? `${wk(h.day)} ${label(h.day)}` : bucketLabel(h.day, by)}</b>: {plural(h.orders, unit)}{unit === 'order' ? `, ${kg(h.kg)}` : ''}</> : <>Total {plural(days.reduce((a, d) => a + d.orders, 0), unit)}{unit === 'order' ? `, ${kg(days.reduce((a, d) => a + d.kg, 0))}` : ''}. Tap or hover a bar for details.</>}</p>
     </div>
   );
 }
@@ -646,6 +684,8 @@ function Settings() {
   const { busy, error, setError, submit } = useFormAction();
   useEffect(() => { if (s.data) setDraft(d => d && JSON.stringify(d) !== JSON.stringify(s.data) && d.upi_qr_file !== s.data!.upi_qr_file ? { ...d, upi_qr_file: s.data!.upi_qr_file } : s.data!); }, [s.data]);
   useEffect(() => { try { sessionStorage.setItem('ej-settings-tab', tab); } catch { /* ignore */ } }, [tab]);
+  // Phones: the tab strip scrolls sideways; keep the chosen tab in view.
+  useEffect(() => { document.querySelector('.tabs button.on')?.scrollIntoView({ block: 'nearest', inline: 'nearest' }); }, [tab, !!draft]);
   if (!draft) return <Loading />;
   const num = (k: keyof Settings) => (e: { target: { value: string } }) => setDraft({ ...draft, [k]: e.target.value as unknown as number });
   const text = (k: keyof Settings) => (e: { target: { value: string } }) => setDraft({ ...draft, [k]: e.target.value });

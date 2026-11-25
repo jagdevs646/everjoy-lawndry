@@ -297,3 +297,75 @@ html[data-theme='admin'] h1, html[data-theme='admin'] h2 { letter-spacing: -.01e
 .blocked-add { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 8px; align-items: end; }
 .blocked-add > :nth-child(3) { grid-column: 1 / -1; }
 .blocked-add > button { grid-column: 2; justify-self: end; }
+
+/* ------------------------------------------------------------------ phones
+   The admin office on a phone: a bottom tab bar like the student and staff apps, tables shown as one
+   card per row (cells labelled with their column title), tabs and filters that fit the width. */
+.ad-tabs { display: none; }
+@media (max-width: 900px) {
+  .ad-shell { padding-bottom: calc(70px + env(safe-area-inset-bottom)); }
+  .ad-top .ad-menu { display: none !important; }
+  .ad-top { padding: 10px 14px 8px; box-shadow: 0 1px 0 var(--line); }
+  .ad-tabs {
+    position: fixed; left: 0; right: 0; bottom: 0; z-index: 30; display: grid; grid-template-columns: repeat(5, 1fr);
+    background: var(--surface); border-top: 1px solid var(--line); padding: 6px 4px max(6px, env(safe-area-inset-bottom));
+  }
+  .ad-tabs a, .ad-tabs button {
+    display: grid; justify-items: center; gap: 2px; padding: 4px 0; border: 0; background: none; color: var(--muted);
+    font: inherit; font-size: .72rem; font-weight: 700; text-decoration: none; min-width: 0;
+  }
+  .ad-tabs .tab-icon { width: 52px; height: 30px; border-radius: 15px; display: grid; place-items: center; }
+  .ad-tabs .on { color: var(--accent); }
+  .ad-tabs .on .tab-icon { background: var(--accent-soft); }
+  .save-bar { bottom: calc(76px + env(safe-area-inset-bottom)); }
+  .ad-bulk { bottom: calc(80px + env(safe-area-inset-bottom)); left: auto; transform: none; width: auto; margin-left: 0; }
+}
+
+@media (max-width: 760px) {
+  /* Tables: one card per row */
+  .ad-main .ledger-wrap { overflow: visible; border: 0; background: none; border-radius: 0; }
+  .ad-main .ledger, .ad-main .ledger.fit { min-width: 0 !important; display: block; font-size: .9rem; }
+  .ad-main .ledger thead { display: none; }
+  .ad-main .ledger tbody { display: grid; gap: 10px; }
+  .ad-main .ledger tr {
+    display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 8px 14px; padding: 12px 14px;
+    background: var(--surface); border: 1px solid var(--line); border-left: 3px solid var(--margin); border-radius: var(--radius);
+  }
+  .ad-main .ledger tr.sel { border-color: var(--accent); background: var(--accent-soft); }
+  .ad-main .ledger tbody tr[tabindex]:hover td { background: none; }
+  .ad-main .ledger td, .ad-main .ledger td:first-child {
+    display: block; padding: 0; border: 0; white-space: normal; min-width: 0; text-align: left; overflow-wrap: anywhere;
+  }
+  .ad-main .ledger td.num { text-align: left; padding-left: 0; }
+  .ad-main .ledger td::before { content: attr(data-label); display: block; margin-bottom: 1px; color: var(--muted); font-size: .72rem; font-weight: 600; }
+  .ad-main .ledger td[data-label='']::before { display: none; }
+  .ad-main .ledger td:empty { display: none; }
+  /* The first column (who / what) heads the card */
+  .ad-main .ledger td:first-child { grid-column: 1 / -1; font-size: 1rem; }
+  .ad-main .ledger td:first-child::before { display: none; }
+  .ad-main .ledger td.detail, .ad-main .ledger td.row-actions { grid-column: 1 / -1; max-width: none; min-width: 0; }
+  .ad-main .ledger td.row-actions { display: flex; flex-wrap: wrap; gap: 6px; padding-top: 4px; }
+  .ad-main .ledger td.row-actions::before { display: none; }
+  /* Students: the tick box sits in the corner of the card */
+  .ad-main .ledger tr:has(td.check-col) { position: relative; padding-left: 44px; }
+  .ad-main .ledger td.check-col { position: absolute; left: 12px; top: 14px; grid-column: auto; }
+  .ad-main .ledger td.check-col + td { grid-column: 1 / -1; font-size: 1rem; }
+  .ad-main .ledger td.check-col + td::before { display: none; }
+
+  /* Rules & pricing tabs and similar: swipe sideways instead of wrapping onto many lines */
+  .tabs { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; -webkit-overflow-scrolling: touch; }
+  .tabs::-webkit-scrollbar { display: none; }
+  .tabs button { white-space: nowrap; padding: 10px 12px; }
+  .filters input, .filters select { flex: 1 1 140px; }
+  .filters .btn { flex: 1 1 auto; }
+  .ad-card { padding: 14px; }
+  .kpis { grid-template-columns: 1fr 1fr; }
+  .kpi b { font-size: 1.35rem; }
+  .settings-cards, .cards-tab { grid-template-columns: 1fr; }
+  .series-fields, .order-fields { grid-template-columns: 1fr 1fr; }
+  .order-no-facts > div { grid-template-columns: 1fr; gap: 4px; }
+  .save-bar { padding: 10px 12px; }
+  .save-bar:not(.dirty):not(:has(.error-note)) { display: none; }
+  .save-bar > span { flex-basis: 100%; }
+  .save-bar .btn { flex: 1; }
+}
