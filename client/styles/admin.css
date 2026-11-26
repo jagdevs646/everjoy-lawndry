@@ -30,7 +30,14 @@ html[data-theme='admin'] {
 html[data-theme='admin'] h1, html[data-theme='admin'] h2 { letter-spacing: -.01em; }
 
 .ad-shell { min-height: 100vh; display: grid; grid-template-columns: 248px minmax(0, 1fr); }
-.ad-side { position: sticky; top: 0; height: 100vh; display: flex; flex-direction: column; background: var(--accent); color: #F7E8EB; padding: 20px 12px; }
+.ad-side { position: sticky; top: 0; height: 100vh; display: flex; flex-direction: column; background: var(--accent); color: #F7E8EB; padding: 20px 12px; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; scrollbar-color: rgba(255,255,255,.3) transparent; }
+/* Short laptop screens (or browser zoom): tighter menu so Sign out still fits; it scrolls if it doesn't. */
+@media (min-width: 901px) and (max-height: 860px) {
+  .ad-side { padding: 14px 10px; }
+  .ad-side-head { padding-bottom: 12px; }
+  .ad-side nav a, .ad-side-foot button, .ad-side-foot a { padding: 7px 12px; }
+  .ad-side-foot { padding-top: 8px; }
+}
 .ad-side .brand-word { color: #fff; }
 .ad-side .brand-sub { background: rgba(255,255,255,.14); color: #fff; }
 .ad-side-head { padding: 0 8px 22px; }
@@ -47,6 +54,7 @@ html[data-theme='admin'] h1, html[data-theme='admin'] h2 { letter-spacing: -.01e
 .ad-top h1 { font-size: 1.75rem; font-weight: 700; }
 .ad-top p { color: var(--muted); }
 .ad-menu { display: none !important; }
+.ad-top-actions { display: flex; gap: 8px; align-items: center; }
 .ad-main { padding: 18px 32px 48px; }   /* tables and reports use the whole window */
 .ad-narrow { max-width: 900px; }
 @media (max-width: 900px) {
@@ -58,6 +66,7 @@ html[data-theme='admin'] h1, html[data-theme='admin'] h2 { letter-spacing: -.01e
   .ad-top { padding: 12px 14px 4px; position: sticky; top: 0; z-index: 5; background: var(--bg); }
   .ad-top h1 { font-size: 1.35rem; }
   .ad-top p { display: none; }
+  .ad-signout-top { display: none !important; }   /* phones: Sign out is under More */
   .ad-main { padding: 12px 14px 40px; }
 }
 
@@ -94,6 +103,7 @@ html[data-theme='admin'] h1, html[data-theme='admin'] h2 { letter-spacing: -.01e
 .hostel-bars caption { text-align: left; font-weight: 700; padding-bottom: 6px; }
 .hostel-bars th { text-align: left; font-weight: 500; padding: 5px 10px 5px 0; white-space: nowrap; width: 1%; }
 .hostel-bars td { padding: 5px 0; }
+.hostel-bars td.num { white-space: nowrap; text-align: right; padding-left: 14px; }
 .hostel-bars td:nth-child(2) { width: 100%; padding-right: 10px; }
 .hbar { display: block; height: 10px; border-radius: 0 4px 4px 0; background: var(--accent); min-width: 2px; }
 .num { text-align: right; white-space: nowrap; padding-left: 10px; }

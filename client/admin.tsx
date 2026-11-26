@@ -95,7 +95,10 @@ export function AdminApp({ user, onSignOut, onUser, onCounter }: { user: User; o
             <h1>{current.label}</h1>
             <p>{new Date().toLocaleDateString('en-IN', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })}</p>
           </div>
-          <Button icon="washer" onClick={onCounter} className="ad-counter-btn">Counter</Button>
+          <div className="ad-top-actions">
+            <Button icon="washer" onClick={onCounter} className="ad-counter-btn">Counter</Button>
+            <Button icon="logout" tone="plain" onClick={onSignOut} className="ad-signout-top">Sign out</Button>
+          </div>
         </header>
         <main className="ad-main" key={bump} ref={mainRef}>
           {current.key === '' && <OverviewPage open={open} />}
@@ -190,7 +193,7 @@ function OverviewPage(_: { open: Openers }) {
               <tbody>
                 {o.hostels.map(h => {
                   const max = Math.max(...o.hostels.map(x => x.orders));
-                  return <tr key={h.name}><th scope="row">{h.name}</th><td><span className="hbar" style={{ width: `${(h.orders / max) * 100}%` }} /></td><td className="num">{h.orders}</td><td className="num muted">{kg(h.kg)}</td></tr>;
+                  return <tr key={h.name}><th scope="row">{h.name}</th><td><span className="hbar" style={{ width: `${(h.orders / max) * 100}%` }} /></td><td className="num">{h.orders} {h.orders === 1 ? 'order' : 'orders'}</td><td className="num muted">{kg(h.kg)}</td></tr>;
                 })}
               </tbody>
             </table>
