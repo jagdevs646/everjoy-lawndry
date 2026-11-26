@@ -4,7 +4,16 @@ One website that replaces the laundry register and the paper slip. Students regi
 
 See **[FEATURES.md](FEATURES.md)** for everything each role can do.
 
-**Live:** https://everjoy-lawndry.onrender.com (Render, free plan). Android app: `release/everjoy-lawndry-<version>-debug.apk`, built against that address.
+**Live:** https://everjoy-lawndry.onrender.com (Render, free plan).
+
+## Download the app
+
+| | |
+|---|---|
+| **Android** | [**Download the Android app (APK, 7 MB)**](https://everjoy-lawndry.onrender.com/download/everjoy-lawndry.apk). Open the file on the phone and allow "Install unknown apps" when asked. Android 7 or newer. |
+| **iPhone** | Not on the App Store yet. Open [everjoy-lawndry.onrender.com](https://everjoy-lawndry.onrender.com) in Safari, tap **Share → Add to Home Screen**. |
+
+Share this page with students and staff: **https://everjoy-lawndry.onrender.com/download** (step-by-step install help for both phones). The sign-in screen on the website links to it too.
 
 ## Try it on your computer
 
@@ -94,6 +103,14 @@ npm run app:apk
 ```
 
 The APK appears in `release/everjoy-lawndry-<version>-debug.apk`. The first build downloads Gradle and the Android libraries (cached in `D:\dev-tools\gradle-home`).
+
+**Publish a new version for download.** The Download page serves `downloads/everjoy-lawndry.apk` from the repo. Copy the new build over it, commit and push; Render serves it after the deploy:
+
+```powershell
+Copy-Item release\everjoy-lawndry-2.0.0-debug.apk downloads\everjoy-lawndry.apk; git add downloads; git commit -m "New Android app"; git push
+```
+
+The published APK is a debug build (signed with this PC's debug key, `%USERPROFILE%\.android\debug.keystore`). Keep using the same PC, or copy that key, so updates install over the old app. Switching to a release key later (see "Going live on Android") means everyone uninstalls once and installs the new APK.
 
 ### Try it on a phone with this laptop as the server
 

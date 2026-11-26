@@ -680,6 +680,14 @@ describe('security audit fixes', () => {
     expect(r.headers['content-security-policy']).toContain("script-src 'self'");
   });
 
+  it('anyone can download the Android app as an .apk file', async () => {
+    const r = await request(app).get('/download/everjoy-lawndry.apk').buffer(true).parse((res, cb) => { let n = 0; res.on('data', (c: Buffer) => { n += c.length; }); res.on('end', () => cb(null, n)); });
+    expect(r.status).toBe(200);
+    expect(r.headers['content-type']).toContain('application/vnd.android.package-archive');
+    expect(r.headers['content-disposition']).toContain('everjoy-lawndry.apk');
+    expect(r.body as unknown as number).toBeGreaterThan(1_000_000);
+  });
+
   it('the register export writes names as text, never as formulas', async () => {
     const s = await newStudent();
     await staff.patch(`/api/ops/students/${s.id}`).set('x-ej', '1').send({ name: '=HYPERLINK("http://x","y")', idCardNo: s.idCardNo, mobile: '9876500111', hostelId, roomNo: '1' });

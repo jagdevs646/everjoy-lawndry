@@ -54,11 +54,20 @@ export async function createApp({ demo = false } = {}) {
   api.use((_req, _res, next) => next(new HttpError(404, 'Not found.')));
   app.use('/api', api);
 
+  // The Android app for visitors (the Download page links here). The file is committed in downloads/.
+  const apk = path.resolve('downloads', 'everjoy-lawndry.apk');
+  app.get('/download/everjoy-lawndry.apk', (_req, res, next) => {
+    if (!fs.existsSync(apk)) return next(new HttpError(404, 'The Android app is not available yet.'));
+    res.setHeader('Cache-Control', 'no-cache');   // a new version shows up at once
+    res.type('application/vnd.android.package-archive').attachment('everjoy-lawndry.apk').sendFile(apk);
+  });
+
   // One server: the built website is served from dist/ alongside the API.
   const dist = path.resolve('dist');
   if (fs.existsSync(path.join(dist, 'index.html'))) {
     app.use('/assets', express.static(path.join(dist, 'assets'), { immutable: true, maxAge: '1y' }));
     app.use(express.static(dist, { index: false, maxAge: '1h' }));
+    app.get('/download', (_req, res) => { res.setHeader('Cache-Control', 'no-cache'); res.sendFile(path.join(dist, 'download.html')); });
     app.get(/^(?!\/api\/).*/, (_req, res) => { res.setHeader('Cache-Control', 'no-cache'); res.sendFile(path.join(dist, 'index.html')); });
   }
 
