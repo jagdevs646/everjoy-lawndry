@@ -1145,7 +1145,9 @@ function CodeList({ codes }: { codes: ClaimCode[] }) {
     </table></div>
     <div className="btn-pair">
       <Button onClick={() => run(() => navigator.clipboard.writeText(tsv), 'Copied')}>Copy</Button>
-      {codes.length === 1 && !!navigator.share && <Button onClick={() => run(() => navigator.share({ text: tsv }))}>Share</Button>}
+      {codes.length === 1 && (navigator.share
+        ? <Button onClick={() => run(() => navigator.share({ text: tsv }))}>Share</Button>
+        : <a href={`mailto:?subject=${encodeURIComponent('Your Everjoy claim code')}&body=${encodeURIComponent(tsv)}`}>Share by email</a>)}
       <Button onClick={() => run(() => saveDownload(new Blob([csv], { type: 'text/csv' }), 'claim-codes.csv'))}>Download</Button>
       <Button onClick={() => window.print()}>Print</Button>
     </div>

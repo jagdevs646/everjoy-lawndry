@@ -174,7 +174,7 @@ router.post('/auth/signup', handle(async (req, res) => {
       throw new HttpError(409, 'This ID card no. was added by the laundry office. Enter your mobile number and the claim code they gave you, or ask at the counter.', { code: 'CLAIM_CODE' });
     }
     const version = await claimAccount(imported.user_id, await bcrypt.hash(b.password, 10), b.idCardNo, false, undefined, imported.claim_hash!);
-    return signedIn(req, res, imported.user_id, version, { extra: { claimed: true } });
+    return signedIn(req, res, imported.user_id, version, { trust: true, extra: { claimed: true } });
   }
 
   if (!await db.get('SELECT 1 AS ok FROM hostels WHERE id = ? AND active = 1', [b.hostelId])) throw new HttpError(400, 'Choose your hostel.');
