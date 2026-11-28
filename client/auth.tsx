@@ -1,6 +1,6 @@
 import { FormEvent, useEffect, useState } from 'react';
 import { api, ApiError, Student, Hostel, OtpStart, SignedIn, User } from './api';
-import { go, toast, useFormAction, useLoad, useRoute } from './lib';
+import { go, shrinkPhoto, toast, useFormAction, useLoad, useRoute } from './lib';
 import { builtInServer, canChangeServer, isApp, probeServer, serverAddress, setServer } from './platform';
 import { Brand, Button, ErrorNote, Field, Icon, Sheet } from './ui';
 
@@ -196,7 +196,9 @@ export function CompleteProfile({ onDone, onSignOut }: { onDone: () => void; onS
     if (!p || !info.data) return;
     await submit(async () => {
       if (!p.photo && photo) {
-        const form = new FormData(); form.append('photo', photo);
+        const image = await shrinkPhoto(photo, 900);
+        const form = new FormData();
+        form.append('photo', image, image === photo ? photo.name : 'photo.jpg');
         await api('/me/photo', { form });
         await profile.reload();
       }

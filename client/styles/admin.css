@@ -437,3 +437,14 @@ body.col-resizing { cursor: col-resize; user-select: none; }
      would make the phone zoom the whole page out to fit it. */
   .ad-main .ledger-wrap.grid .ledger td, .ad-main .ledger-wrap.grid .ledger td.nowrap { white-space: normal; overflow-wrap: anywhere; text-overflow: clip; }
 }
+
+@media print {
+  body:has(.claim-codes) { overflow: visible; }
+  .app-root:has(.claim-codes) > :not(.sheet-backdrop:has(.claim-codes)) { display: none; }
+  .sheet-backdrop:has(.claim-codes), .sheet:has(.claim-codes), .sheet-body:has(.claim-codes), .claim-codes {
+    position: static; display: block; width: 100%; max-height: none; overflow: visible;
+    padding: 0; background: white; color: black; border: 0; box-shadow: none;
+  }
+  .sheet:has(.claim-codes) button, .sheet:has(.claim-codes) .btn-pair { display: none; }
+  .claim-codes tr { break-inside: avoid; }
+}
