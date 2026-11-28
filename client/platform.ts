@@ -87,6 +87,7 @@ export async function setServer(url: string) {
   server = normaliseServer(url);
   await Preferences.set({ key: 'ej-server', value: server });
   await setToken(null);
+  selectWorkspace('');
   clearOfflineCopies();
 }
 
@@ -108,9 +109,21 @@ export function clearExportsFolder() {
     Filesystem.rmdir({ path: EXPORTS_DIR, directory: Directory.Cache, recursive: true }).catch(() => {})).catch(() => {});
 }
 
+// A selection is local to this tab. The server independently checks every request.
+export function selectedWorkspace(): string {
+  try { return sessionStorage.getItem('ej-workspace') || ''; } catch { return ''; }
+}
+export function selectWorkspace(id: string) {
+  try {
+    if (id) sessionStorage.setItem('ej-workspace', id);
+    else sessionStorage.removeItem('ej-workspace');
+  } catch { /* private mode */ }
+}
 /** Headers that identify the caller: CSRF header always; in the app also the client marker and bearer token. */
 export function authHeaders(): Record<string, string> {
   const h: Record<string, string> = { 'x-ej': '1' };
+  const workspace = selectedWorkspace();
+  if (workspace) h['x-ej-workspace'] = workspace;
   if (isApp) {
     h['x-ej-client'] = 'app';
     if (token) h.Authorization = `Bearer ${token}`;

@@ -1,3 +1,4 @@
+import { currentWorkspace, workspaceId } from './workspace-context.js';
 import crypto from 'node:crypto';
 import { db, insertId, logActivity, notify } from './db.js';
 import { HttpError, nowIso } from './util.js';
@@ -38,7 +39,7 @@ export const REQUEST_MINUTES = 10;            // a confirmation request stays op
 export const CODE_STEP_SECONDS = 30;          // the code on the student's screen changes this often
 const MAX_TRIES = 5;                          // wrong codes before the request is cancelled
 
-const time = (iso: string) => new Date(iso).toLocaleString('en-IN', { timeZone: process.env.APP_TZ || 'Asia/Kolkata', day: 'numeric', month: 'short', year: 'numeric', hour: 'numeric', minute: '2-digit' });
+const time = (iso: string) => new Date(iso).toLocaleString('en-IN', { timeZone: currentWorkspace().timezone, day: 'numeric', month: 'short', year: 'numeric', hour: 'numeric', minute: '2-digit' });
 const kgText = (n: number) => `${Math.round(Number(n) * 10) / 10} kg`;
 
 type OrderForSign = {
@@ -88,7 +89,7 @@ export async function saveSignature(dataUrl: string) {
     throw new HttpError(400, 'The signature did not come through. Ask the student to sign again.');
   }
   const name = `sig-${crypto.randomBytes(16).toString('hex')}.png`;
-  await db.run('INSERT INTO files (name, mime, data, created_at) VALUES (?,?,?,?)', [name, 'image/png', bytes, nowIso()]);
+  await db.run(`INSERT INTO files (workspace_id, name, mime, data, created_at) VALUES (${workspaceId()}, ?,?,?,?)`, [name, 'image/png', bytes, nowIso()]);
   return { name, sha: crypto.createHash('sha256').update(bytes).digest('hex') };
 }
 
@@ -112,19 +113,19 @@ export async function recordSignoff(p: {
   if (p.proof.method === 'SIGNATURE') ({ name: signature, sha: sigSha } = await saveSignature(p.proof.signature));
   const reason = 'dispute' in p.proof ? p.proof.dispute : p.proof.method === 'OVERRIDE' ? p.proof.reason : null;
   const row = { order_id: p.o.id, kind: p.kind, method: p.proof.method, status, statement: p.statement, signature_sha: sigSha, student_id: p.o.student_id, staff_id: p.staffId, reason, created_at: p.at };
-  const id = await insertId(`INSERT INTO order_signoffs (order_id, kind, method, status, statement, signature, signature_sha, student_id, staff_id, reason,
-      clothes, returned_count, ip, user_agent, proof_hash, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, [
+  const id = await insertId(`INSERT INTO order_signoffs (workspace_id, order_id, kind, method, status, statement, signature, signature_sha, student_id, staff_id, reason,
+      clothes, returned_count, ip, user_agent, proof_hash, created_at) VALUES (${workspaceId()}, ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, [
     row.order_id, row.kind, row.method, row.status, row.statement, signature, sigSha, row.student_id, row.staff_id, row.reason,
     p.o.clothes_count, p.returned ?? null, (p.origin?.ip ?? '').slice(0, 64) || null, (p.origin?.userAgent ?? '').slice(0, 200) || null, fingerprint(row), p.at,
   ]);
   const ack = disputed ? 'DISPUTED' : p.proof.method;
-  if (p.kind === 'DROPOFF') await db.run('UPDATE orders SET dropoff_ack = ?, dropoff_ack_at = ?, updated_at = ? WHERE id = ?', [ack, p.at, p.at, p.o.id]);
-  else await db.run('UPDATE orders SET pickup_ack = ?, pickup_ack_at = ?, updated_at = ? WHERE id = ?', [ack, p.at, p.at, p.o.id]);
+  if (p.kind === 'DROPOFF') await db.run(`UPDATE orders SET dropoff_ack = ?, dropoff_ack_at = ?, updated_at = ? WHERE workspace_id = ${workspaceId()} AND (id = ?)`, [ack, p.at, p.at, p.o.id]);
+  else await db.run(`UPDATE orders SET pickup_ack = ?, pickup_ack_at = ?, updated_at = ? WHERE workspace_id = ${workspaceId()} AND (id = ?)`, [ack, p.at, p.at, p.o.id]);
   const how = p.proof.method === 'CODE' ? 'confirmed with the code on their phone' : p.proof.method === 'COUNTER' ? 'walk-in customer, confirmed at the counter'
     : p.proof.method === 'SIGNATURE' ? 'signed at the counter' : p.proof.method === 'PHONE' ? 'confirmed on their phone'
     : p.kind === 'DROPOFF' ? `drop-off counted as received by the admin without the student's code: ${reason}` : `handed over without the student's confirmation: ${reason}`;
   const what = p.kind === 'DROPOFF' ? 'drop-off' : 'collection';
-  await db.run('INSERT INTO order_events (order_id, type, note, by_user, at) VALUES (?,?,?,?,?)', [
+  await db.run(`INSERT INTO order_events (workspace_id, order_id, type, note, by_user, at) VALUES (${workspaceId()}, ?,?,?,?,?)`, [
     p.o.id, disputed ? `${p.kind}_DISPUTED` : `${p.kind}_SIGNED`, disputed ? `Student disputes the ${what}: ${reason}` : p.proof.method === 'OVERRIDE' ? `Admin: ${how}` : `Student ${how}`,
     disputed ? p.o.student_id : p.staffId, p.at,
   ]);
@@ -147,11 +148,11 @@ export async function verifySignoff(id: number) {
 
 /** A complaint opened for the student when they dispute (does not count against their open-complaint limit). */
 export async function disputeComplaint(o: OrderForSign, kind: SignKind, reason: string, at: string) {
-  const id = await insertId('INSERT INTO complaints (student_id, order_id, category, description, created_at, updated_at) VALUES (?,?,?,?,?,?)', [
+  const id = await insertId(`INSERT INTO complaints (workspace_id, student_id, order_id, category, description, created_at, updated_at) VALUES (${workspaceId()}, ?,?,?,?,?,?)`, [
     o.student_id, o.id, kind === 'DROPOFF' ? 'Wrong count' : 'Missing clothes',
     `${kind === 'DROPOFF' ? 'I did not confirm this drop-off' : 'I did not confirm this collection'}: ${reason}`, at, at,
   ]);
-  await db.run('INSERT INTO complaint_updates (complaint_id, by_user, status, message, at) VALUES (?,?,?,?,?)', [id, o.student_id, 'OPEN', null, at]);
+  await db.run(`INSERT INTO complaint_updates (workspace_id, complaint_id, by_user, status, message, at) VALUES (${workspaceId()}, ?,?,?,?,?)`, [id, o.student_id, 'OPEN', null, at]);
   return id;
 }
 
@@ -165,9 +166,9 @@ export async function signoffsFor(orderId: number, forStudent = false) {
 
 /** The student must confirm again after staff correct the count or weight they confirmed. */
 export async function resetDropoff(o: { id: number; order_no: string; student_id: number }, actorId: number, at: string) {
-  await db.run(`UPDATE order_signoffs SET superseded_at = ? WHERE order_id = ? AND kind = 'DROPOFF' AND superseded_at IS NULL`, [at, o.id]);
-  await db.run('UPDATE orders SET dropoff_ack = NULL, dropoff_ack_at = NULL WHERE id = ?', [o.id]);
-  await db.run('INSERT INTO order_events (order_id, type, note, by_user, at) VALUES (?,?,?,?,?)', [o.id, 'DROPOFF_RESET', 'Details changed: the student must confirm the drop-off again', actorId, at]);
+  await db.run(`UPDATE order_signoffs SET superseded_at = ? WHERE workspace_id = ${workspaceId()} AND (order_id = ? AND kind = 'DROPOFF' AND superseded_at IS NULL)`, [at, o.id]);
+  await db.run(`UPDATE orders SET dropoff_ack = NULL, dropoff_ack_at = NULL WHERE workspace_id = ${workspaceId()} AND (id = ?)`, [o.id]);
+  await db.run(`INSERT INTO order_events (workspace_id, order_id, type, note, by_user, at) VALUES (${workspaceId()}, ?,?,?,?,?)`, [o.id, 'DROPOFF_RESET', 'Details changed: the student must confirm the drop-off again', actorId, at]);
   await notify(o.student_id, `Confirm ${o.order_no} again`, 'The counter corrected your order. Open the app and confirm the new count, or say what is wrong.', o.id);
 }
 
@@ -195,9 +196,9 @@ export async function getRequest(orderId: number, kind: SignKind) {
 /** Ask the student to confirm: a pop-up with the code opens on their app. Replaces an earlier request. */
 export async function openRequest(o: OrderForSign, kind: SignKind, staffId: number, extra: { returned_count?: number; note?: string; pay_method?: string | null; pay_ref?: string } = {}) {
   const at = nowIso();
-  await db.run('DELETE FROM confirm_requests WHERE order_id = ? AND kind = ?', [o.id, kind]);
-  await db.run(`INSERT INTO confirm_requests (order_id, kind, staff_id, secret, returned_count, note, pay_method, pay_ref, status, tries, created_at, expires_at)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`, [o.id, kind, staffId, crypto.randomBytes(18).toString('base64url'), extra.returned_count ?? null, extra.note || null,
+  await db.run(`DELETE FROM confirm_requests WHERE workspace_id = ${workspaceId()} AND (order_id = ? AND kind = ?)`, [o.id, kind]);
+  await db.run(`INSERT INTO confirm_requests (workspace_id, order_id, kind, staff_id, secret, returned_count, note, pay_method, pay_ref, status, tries, created_at, expires_at)
+    VALUES (${workspaceId()}, ?,?,?,?,?,?,?,?,?,?,?,?)`, [o.id, kind, staffId, crypto.randomBytes(18).toString('base64url'), extra.returned_count ?? null, extra.note || null,
     extra.pay_method ?? null, extra.pay_ref || null, 'WAITING', 0, at, new Date(Date.now() + REQUEST_MINUTES * 60_000).toISOString()]);
   await notify(o.student_id, kind === 'DROPOFF' ? `Confirm your drop-off ${o.order_no}` : `Confirm you received ${o.order_no}`,
     'Open the app: tell the staff the code on your screen to confirm.', o.id);
@@ -218,9 +219,9 @@ export async function checkRequestCode(orderId: number, kind: SignKind, code: st
   if (ok) return r;
   const tries = Number(r.tries) + 1;
   if (tries >= MAX_TRIES) {
-    await db.run('DELETE FROM confirm_requests WHERE order_id = ? AND kind = ?', [orderId, kind]);
+    await db.run(`DELETE FROM confirm_requests WHERE workspace_id = ${workspaceId()} AND (order_id = ? AND kind = ?)`, [orderId, kind]);
     throw new HttpError(429, 'Too many wrong codes. Send the student a new code.');
   }
-  await db.run('UPDATE confirm_requests SET tries = ? WHERE order_id = ? AND kind = ?', [tries, orderId, kind]);
+  await db.run(`UPDATE confirm_requests SET tries = ? WHERE workspace_id = ${workspaceId()} AND (order_id = ? AND kind = ?)`, [tries, orderId, kind]);
   throw new HttpError(422, `That code is not right. Ask the student to read the code on their screen again (${MAX_TRIES - tries} tries left).`);
 }

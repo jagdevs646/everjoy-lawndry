@@ -14,7 +14,7 @@ const ORDER_COLS = `o.id, o.order_no, o.student_id, o.hostel_name, o.room_no, o.
   u.name AS student_name, st.id_card_no, rb.name AS received_by_name, dl.name AS delivered_by_name,
   CASE WHEN o.status IN ('RECEIVED','WASHING') AND o.expected_at < ? THEN 1 ELSE 0 END AS late`;
 const ORDER_FROM = `FROM orders o JOIN users u ON u.id = o.student_id JOIN students st ON st.user_id = o.student_id
-  JOIN users rb ON rb.id = o.received_by LEFT JOIN users dl ON dl.id = o.delivered_by`;
+  LEFT JOIN actor_names rb ON rb.id = o.received_by LEFT JOIN actor_names dl ON dl.id = o.delivered_by`;
 
 export type OrderFilters = {
   status?: string; q?: string; from?: string; to?: string; hostel?: string; payment?: string; studentId?: number;

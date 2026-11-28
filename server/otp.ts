@@ -1,3 +1,4 @@
+import { workspaceId } from './workspace-context.js';
 /*
  * Email sign-in codes for students.
  *
@@ -87,13 +88,13 @@ export async function startChallenge(purpose: Purpose, email: string, userId: nu
   const code = newCode();
   const at = nowIso();
   // Old challenges are useless after expiry; keep the table small.
-  await db.run('DELETE FROM login_challenges WHERE expires_at < ?', [new Date(Date.now() - 86400_000).toISOString()]);
-  await db.run(`INSERT INTO login_challenges (id, purpose, user_id, email, code_hash, payload, attempts, sends, last_sent_at, expires_at, created_at)
-    VALUES (?,?,?,?,?,?,0,1,?,?,?)`, [id, purpose, userId, email, hash(id, code), payload === undefined ? null : JSON.stringify(payload), at, new Date(Date.now() + CODE_TTL_MS).toISOString(), at]);
+  await db.run(`DELETE FROM login_challenges WHERE workspace_id = ${workspaceId()} AND (expires_at < ?)`, [new Date(Date.now() - 86400_000).toISOString()]);
+  await db.run(`INSERT INTO login_challenges (workspace_id, id, purpose, user_id, email, code_hash, payload, attempts, sends, last_sent_at, expires_at, created_at)
+    VALUES (${workspaceId()}, ?,?,?,?,?,?,0,1,?,?,?)`, [id, purpose, userId, email, hash(id, code), payload === undefined ? null : JSON.stringify(payload), at, new Date(Date.now() + CODE_TTL_MS).toISOString(), at]);
   try {
     await deliver(email, code, purpose);
   } catch {
-    await db.run('DELETE FROM login_challenges WHERE id = ?', [id]);
+    await db.run(`DELETE FROM login_challenges WHERE workspace_id = ${workspaceId()} AND (id = ?)`, [id]);
     throw new HttpError(503, 'Could not send the email code right now. Try again in a minute, or ask at the counter.', { code: 'OTP_UNAVAILABLE' });
   }
   await countSend(email, purpose);
@@ -109,7 +110,7 @@ export async function resendChallenge(id: string) {
   await checkSendAllowed(c.email, c.purpose);
   const code = newCode();
   // The 5 tries cover the whole challenge: a new code does not give new tries.
-  await db.run('UPDATE login_challenges SET code_hash = ?, sends = sends + 1, last_sent_at = ?, expires_at = ? WHERE id = ?',
+  await db.run(`UPDATE login_challenges SET code_hash = ?, sends = sends + 1, last_sent_at = ?, expires_at = ? WHERE workspace_id = ${workspaceId()} AND (id = ?)`,
     [hash(id, code), nowIso(), new Date(Date.now() + CODE_TTL_MS).toISOString(), id]);
   try { await deliver(c.email, code, c.purpose); } catch { throw new HttpError(503, 'Could not send the email code right now. Try again in a minute.', { code: 'OTP_UNAVAILABLE' }); }
   await countSend(c.email, c.purpose);
@@ -130,7 +131,7 @@ export async function useChallenge(id: string, code: string, needsMore: Purpose[
   const got = Buffer.from(hash(id, code.replace(/\D/g, '')), 'hex');
   if (!crypto.timingSafeEqual(want, got)) {
     // Counted with a single atomic update, so parallel guesses can't share one "try".
-    await db.run('UPDATE login_challenges SET attempts = attempts + 1 WHERE id = ?', [id]);
+    await db.run(`UPDATE login_challenges SET attempts = attempts + 1 WHERE workspace_id = ${workspaceId()} AND (id = ?)`, [id]);
     // And per inbox across challenges: 10 wrong codes lock this email out of new codes for an hour.
     const key = inboxKey(c.email);
     await db.run(`INSERT INTO otp_failures (email, failures, updated_at) VALUES (?, 1, ?)
@@ -140,7 +141,7 @@ export async function useChallenge(id: string, code: string, needsMore: Purpose[
     throw new HttpError(400, left > 0 ? `Wrong code. ${left} ${left === 1 ? 'try' : 'tries'} left.` : 'Wrong code. Start again.');
   }
   // Single use: only the request that actually deletes the row (with this code and tries left) goes on.
-  const r = await db.run('DELETE FROM login_challenges WHERE id = ? AND code_hash = ? AND attempts < ?', [id, c.code_hash, MAX_ATTEMPTS]);
+  const r = await db.run(`DELETE FROM login_challenges WHERE workspace_id = ${workspaceId()} AND (id = ? AND code_hash = ? AND attempts < ?)`, [id, c.code_hash, MAX_ATTEMPTS]);
   if (r.changes !== 1) throw new HttpError(410, 'This code was already used. Start again.');
   await db.run('DELETE FROM otp_failures WHERE email = ?', [inboxKey(c.email)]);
   return { ...c, payload: c.payload ? JSON.parse(c.payload) as Record<string, unknown> : null };

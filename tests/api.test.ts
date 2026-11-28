@@ -1329,3 +1329,40 @@ describe('office claim registration', () => {
     expect((await claim('OFFICE103', 'invalid')).status).toBe(429);
   });
 });
+
+describe('workspace isolation', () => {
+  it('separates campus identities, staff lists, direct lookups, prices, orders and scoped settings', async () => {
+    const campus = await post(admin, '/api/admin/workspaces', { name:'Test North University',code:'NORTH',hostels:['Test Hostel'],copy_from:1 });
+    expect(campus.status,campus.body.error).toBe(201);
+    const ws = String(campus.body.id);
+    const north = (await admin.get('/api/public/info').set('x-ej-workspace',ws)).body.hostels;
+    expect(north).toHaveLength(1);
+    expect(north[0].id).not.toBe(hostelId);
+    const seed = {idCardNo:'DUALCAMPUS',name:'Shared ID fixture',roomNo:'1',hostelId};
+    const a = await post(admin,'/api/admin/students',seed);
+    const b = await admin.post('/api/admin/students').set('x-ej','1').set('x-ej-workspace',ws).send({...seed,hostelId:north[0].id});
+    expect(a.status).toBe(201);
+    expect(b.status,b.body.error).toBe(201);
+    expect((await staff.get('/api/ops/students').set('x-ej-workspace',ws)).status).toBe(403);
+    const second = (await admin.get('/api/ops/students?q=DUALCAMPUS').set('x-ej-workspace',ws)).body.rows[0];
+    expect((await staff.get('/api/ops/students/'+second.id)).status).toBe(404);
+    const crossQuote = await post(staff,'/api/ops/quote',{studentId:second.id,weightKg:1,clothesCount:1});
+    expect(crossQuote.status).toBe(404);
+    const wrongHostel = await post(admin,'/api/admin/students',{...seed,idCardNo:'INVALIDHOSTEL',hostelId:north[0].id});
+    expect(wrongHostel.status).toBe(400);
+    const newOrder = await admin.post('/api/ops/orders').set('x-ej','1').set('x-ej-workspace',ws).send({studentId:second.id,weightKg:1,clothesCount:1});
+    expect(newOrder.status,newOrder.body.error).toBe(201);
+    expect(newOrder.body.order_no).toMatch(/^NORTH-/);
+    expect((await staff.get('/api/ops/orders/'+newOrder.body.id)).status).toBe(404);
+    expect((await staff.get('/api/ops/orders?q='+newOrder.body.order_no)).body.rows).toHaveLength(0);
+    expect((await admin.patch('/api/admin/workspaces/'+ws).set('x-ej','1').send({status:'PAUSED'})).status).toBe(200);
+    expect((await admin.post('/api/ops/orders').set('x-ej','1').set('x-ej-workspace',ws).send({studentId:second.id,weightKg:1,clothesCount:1})).status).toBe(409);
+    expect((await admin.get('/api/ops/orders/'+newOrder.body.id).set('x-ej-workspace',ws)).status).toBe(200);
+    const firstSettings = (await admin.get('/api/admin/settings')).body;
+    const s = await admin.put('/api/admin/settings').set('x-ej','1').set('x-ej-workspace',ws).send({max_kg_per_order:12});
+    expect(s.status,s.body.error).toBe(200);
+    expect((await admin.get('/api/admin/settings')).body.max_kg_per_order).toBe(firstSettings.max_kg_per_order);
+    const samePrefix = await admin.put('/api/admin/settings').set('x-ej','1').set('x-ej-workspace',ws).send({order_no_format:firstSettings.order_no_format});
+    expect(samePrefix.status).toBe(409);
+  });
+});

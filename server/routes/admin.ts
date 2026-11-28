@@ -1,3 +1,4 @@
+import { currentWorkspace, outsideWorkspace, workspaceId } from '../workspace-context.js';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -84,7 +85,7 @@ router.get('/admin/overview', handle(async (_req, res) => {
     setup: together({
       hostels: one('SELECT COUNT(*) AS c FROM hostels WHERE active = 1'),
       staff: one(`SELECT COUNT(*) AS c FROM users WHERE role = 'STAFF'`),
-      rules: one('SELECT COUNT(*) AS c FROM settings'),
+      rules: one('SELECT COUNT(*) AS c FROM workspace_settings'),
       defaultPassword: one(`SELECT COUNT(*) AS c FROM users WHERE role = 'ADMIN' AND must_change_password = 1`),
     }),
     recent: db.all(`SELECT a.action, a.entity_id, a.detail, a.created_at, u.name AS actor_name FROM activity a LEFT JOIN users u ON u.id = a.actor_id ORDER BY a.id DESC LIMIT 8`),
@@ -137,7 +138,7 @@ router.get('/admin/hostels', handle(async (_req, res) => {
 router.post('/admin/hostels', handle(async (req, res) => {
   const b = parse(z.object({ name: zText(1, 40) }), req.body);
   if (await db.get('SELECT 1 FROM hostels WHERE LOWER(name) = LOWER(?)', [b.name])) throw new HttpError(409, 'A hostel with this name already exists.');
-  const id = await insertId('INSERT INTO hostels (name) VALUES (?)', [b.name]);
+  const id = await insertId(`INSERT INTO hostels (workspace_id, name) VALUES (${workspaceId()}, ?)`, [b.name]);
   await logActivity(actor(req).id, 'HOSTEL_ADDED', 'hostel', id, b.name);
   res.status(201).json({ id });
 }));
@@ -145,7 +146,7 @@ router.patch('/admin/hostels/:id', handle(async (req, res) => {
   const id = parse(zId, req.params.id);
   const b = parse(z.object({ name: zText(1, 40).optional(), active: z.boolean().optional() }), req.body);
   if (b.name && await db.get('SELECT 1 FROM hostels WHERE LOWER(name) = LOWER(?) AND id != ?', [b.name, id])) throw new HttpError(409, 'A hostel with this name already exists.');
-  await db.run('UPDATE hostels SET name = COALESCE(?, name), active = COALESCE(?, active) WHERE id = ?', [b.name ?? null, b.active === undefined ? null : Number(b.active), id]);
+  await db.run(`UPDATE hostels SET name = COALESCE(?, name), active = COALESCE(?, active) WHERE workspace_id = ${workspaceId()} AND (id = ?)`, [b.name ?? null, b.active === undefined ? null : Number(b.active), id]);
   await logActivity(actor(req).id, 'HOSTEL_UPDATED', 'hostel', id, JSON.stringify(b));
   res.json({ ok: true });
 }));
@@ -170,9 +171,13 @@ router.post('/admin/staff', handle(async (req, res) => {
     role: z.enum(['STAFF', 'ADMIN']).default('STAFF'),
   }), req.body);
   if (await db.get('SELECT 1 FROM users WHERE login_id = ?', [b.loginId])) throw new HttpError(409, 'This username is taken (it may be a student ID card no.).');
-  const id = await insertId('INSERT INTO users (role, login_id, name, mobile, password_hash, must_change_password, created_at) VALUES (?,?,?,?,?,1,?)',
-    [b.role, b.loginId, b.name, b.mobile || null, bcrypt.hashSync(b.password, 10), nowIso()]);
-  await logActivity(actor(req).id, 'STAFF_CREATED', 'user', b.loginId, `${b.name} · ${b.role}`);
+  const id = await db.tx(async () => {
+    const id = await insertId(`INSERT INTO users (workspace_id, role, login_id, name, mobile, password_hash, must_change_password, created_at) VALUES (${workspaceId()}, ?,?,?,?,?,1,?)`,
+      [b.role, b.loginId, b.name, b.mobile || null, bcrypt.hashSync(b.password, 10), nowIso()]);
+    await logActivity(actor(req).id, 'STAFF_CREATED', 'user', b.loginId, `${b.name} · ${b.role}`);
+    if (b.role === 'STAFF') await db.run('INSERT INTO staff_workspaces(user_id,workspace_id) VALUES (?,?)', [id, workspaceId()]);
+    return id;
+  });
   res.status(201).json({ id });
 }));
 router.patch('/admin/staff/:id', handle(async (req, res) => {
@@ -188,7 +193,7 @@ router.patch('/admin/staff/:id', handle(async (req, res) => {
       if (await one(`SELECT COUNT(*) AS c FROM users WHERE role = 'ADMIN' AND active = 1`) <= 1) throw new HttpError(400, 'Keep at least one active admin.');
     }
     // Switching an account off also signs it out everywhere (token_version bump).
-    await db.run('UPDATE users SET active = COALESCE(?, active), name = COALESCE(?, name), mobile = COALESCE(?, mobile), token_version = token_version + ? WHERE id = ?',
+    await db.run(`UPDATE users SET active = COALESCE(?, active), name = COALESCE(?, name), mobile = COALESCE(?, mobile), token_version = token_version + ? WHERE id IN (SELECT id FROM users) AND (id = ?)`,
       [b.active === undefined ? null : Number(b.active), b.name ?? null, b.mobile === undefined ? null : b.mobile || null, b.active === false ? 1 : 0, id]);
     await logActivity(actor(req).id, b.active === false ? 'STAFF_DEACTIVATED' : b.active ? 'STAFF_REACTIVATED' : 'STAFF_UPDATED', 'user', u.login_id);
   });
@@ -199,7 +204,7 @@ router.post('/admin/staff/:id/reset-password', handle(async (req, res) => {
   const u = await db.get<{ login_id: string }>(`SELECT login_id FROM users WHERE id = ? AND role IN ('STAFF','ADMIN')`, [id]);
   if (!u) throw new HttpError(404, 'Staff account not found.');
   const pass = tempPassword();
-  await db.run('UPDATE users SET password_hash = ?, must_change_password = 1, password_expires_at = ?, token_version = token_version + 1 WHERE id = ?', [await bcrypt.hash(pass, 10), tempPasswordExpiry(), id]);
+  await db.run(`UPDATE users SET password_hash = ?, must_change_password = 1, password_expires_at = ?, token_version = token_version + 1 WHERE id IN (SELECT id FROM users) AND (id = ?)`, [await bcrypt.hash(pass, 10), tempPasswordExpiry(), id]);
   await logActivity(actor(req).id, 'PASSWORD_RESET', 'user', u.login_id);
   res.json({ tempPassword: pass });
 }));
@@ -219,13 +224,14 @@ router.post('/admin/announcements', handle(async (req, res) => {
     notify: z.boolean().default(true),
   }), req.body);
   const hostelId = b.hostelId ? Number(b.hostelId) : null;
+  if (hostelId && !await db.get('SELECT id FROM hostels WHERE id=?',[hostelId])) throw new HttpError(400, 'Choose a hostel in this workspace.');
   const id = await db.tx(async () => {
-    const id = await insertId('INSERT INTO announcements (title, body, hostel_id, expires_on, created_by, created_at) VALUES (?,?,?,?,?,?)',
+    const id = await insertId(`INSERT INTO announcements (workspace_id, title, body, hostel_id, expires_on, created_by, created_at) VALUES (${workspaceId()}, ?,?,?,?,?,?)`,
       [b.title, b.body, hostelId, b.expiresOn || null, actor(req).id, nowIso()]);
     if (b.notify) {
       // One INSERT…SELECT: fast even for thousands of students.
-      await db.run(`INSERT INTO notifications (user_id, title, body, created_at)
-        SELECT s.user_id, ?, ?, ? FROM students s JOIN users u ON u.id = s.user_id WHERE s.status = 'ACTIVE' AND u.active = 1 ${hostelId ? 'AND s.hostel_id = ?' : ''}`,
+      await db.run(`INSERT INTO notifications (workspace_id, user_id, title, body, created_at)
+        SELECT ${workspaceId()}, s.user_id, ?, ?, ? FROM students s JOIN users u ON u.id = s.user_id WHERE s.status = 'ACTIVE' AND u.active = 1 ${hostelId ? 'AND s.hostel_id = ?' : ''}`,
         [`📢 ${b.title}`, b.body, nowIso(), ...(hostelId ? [hostelId] : [])]);
     }
     await logActivity(actor(req).id, 'ANNOUNCEMENT_POSTED', 'announcement', id, b.title);
@@ -235,7 +241,7 @@ router.post('/admin/announcements', handle(async (req, res) => {
 }));
 router.delete('/admin/announcements/:id', handle(async (req, res) => {
   const id = parse(zId, req.params.id);
-  await db.run('UPDATE announcements SET active = 0 WHERE id = ?', [id]);
+  await db.run(`UPDATE announcements SET active = 0 WHERE workspace_id = ${workspaceId()} AND (id = ?)`, [id]);
   await logActivity(actor(req).id, 'ANNOUNCEMENT_REMOVED', 'announcement', id);
   res.status(204).end();
 }));
@@ -278,7 +284,7 @@ router.get('/admin/report', handle(async (req, res) => {
 
 const ackText = (ack: unknown, at: unknown) => {
   if (!ack) return '';
-  const when = at ? new Date(String(at)).toLocaleString('en-IN', { timeZone: process.env.APP_TZ || 'Asia/Kolkata', dateStyle: 'medium', timeStyle: 'short' }) : '';
+  const when = at ? new Date(String(at)).toLocaleString('en-IN', { timeZone: currentWorkspace().timezone, dateStyle: 'medium', timeStyle: 'short' }) : '';
   const how = ({ CODE: 'Student gave the code', COUNTER: 'Walk-in, at the counter', SIGNATURE: 'Signed at counter', PHONE: 'Confirmed on phone', OVERRIDE: 'Admin override, no code', DISPUTED: 'DISPUTED' } as Record<string, string>)[String(ack)] ?? String(ack);
   return when ? `${how}, ${when}` : how;
 };
@@ -288,7 +294,7 @@ router.get('/admin/export', handle(async (req, res) => {
   const r = parse(range, req.query);
   const { rows } = await listOrders({ from: r.from, to: r.to, status: r.status || undefined, hostel: r.hostel || undefined, payment: r.payment || undefined, limit: 5000 });
   if (!rows.length) throw new HttpError(404, 'No orders match these filters.');
-  const t = (v: unknown) => (v ? new Date(String(v)).toLocaleString('en-IN', { timeZone: process.env.APP_TZ || 'Asia/Kolkata', dateStyle: 'medium', timeStyle: 'short' }) : '');
+  const t = (v: unknown) => (v ? new Date(String(v)).toLocaleString('en-IN', { timeZone: currentWorkspace().timezone, dateStyle: 'medium', timeStyle: 'short' }) : '');
   const sheet = (rows as Record<string, unknown>[]).reverse().map(o => ({
     'Order No': o.order_no,
     'Card No': o.tag_no ?? '',
@@ -344,7 +350,8 @@ router.get('/admin/activity', handle(async (req, res) => {
 const jsonSafe = (row: Row) => Object.fromEntries(Object.entries(row).map(([k, v]) => [k, v instanceof Uint8Array ? Buffer.from(v).toString('base64') : v]));
 
 router.get('/admin/backup', handle(async (req, res) => {
-  if (db.isFile) {
+  const full = req.query.scope !== 'selected';
+  if (db.isFile && full) {
     // SQLite on disk: a consistent copy of the database file.
     const file = path.join(os.tmpdir(), `everjoy-backup-${Date.now()}.db`);
     await db.backupFile(file);
@@ -357,12 +364,17 @@ router.get('/admin/backup', handle(async (req, res) => {
     return;
   }
   // Postgres (or an in-memory database): every table as JSON, read from one snapshot so rows that refer to each other match.
-  const tables = await db.tx(async () => {
+  const snapshot = () => db.tx(async () => {
     if (db.dialect === 'postgres') await db.run('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY');
     const out: Record<string, Row[]> = {};
-    for (const table of TABLES) out[table] = (await db.all(`SELECT * FROM ${table} ORDER BY 1`)).map(jsonSafe);
+    for (const table of TABLES) {
+      if (!full && (table === 'settings' || table === 'counters')) continue;
+      const filter = !full && table === 'workspaces' ? ' WHERE id=?' : !full && table === 'staff_workspaces' ? ' WHERE workspace_id=?' : '';
+      out[table] = (await db.all(`SELECT * FROM ${table}${filter} ORDER BY 1`, filter ? [workspaceId()] : [])).map(jsonSafe);
+    }
     return out;
   });
+  const tables = await (full ? outsideWorkspace(snapshot) : snapshot());
   const backup = JSON.stringify({ app: 'everjoy-lawndry', version: 1, exported_at: nowIso(), tables });
   await logActivity(actor(req).id, 'BACKUP_DOWNLOADED', 'system', null);
   res.setHeader('Content-Type', 'application/json; charset=utf-8');
@@ -381,7 +393,7 @@ router.get('/admin/services', handle(async (_req, res) => res.json({ rows: await
 router.post('/admin/services', handle(async (req, res) => {
   const b = parse(serviceSchema, req.body);
   if (await db.get('SELECT 1 AS ok FROM services WHERE lower(name) = lower(?)', [b.name])) throw new HttpError(409, 'A service with this name already exists.');
-  const id = await insertId('INSERT INTO services (name, unit, rate, hosteler_rate, uses_allowance, active, sort, created_at) VALUES (?,?,?,?,?,?,?,?)',
+  const id = await insertId(`INSERT INTO services (workspace_id, name, unit, rate, hosteler_rate, uses_allowance, active, sort, created_at) VALUES (${workspaceId()}, ?,?,?,?,?,?,?,?)`,
     [b.name, b.unit, b.rate, b.hosteler_rate, b.uses_allowance ? 1 : 0, b.active ? 1 : 0, b.sort, nowIso()]);
   await logActivity(actor(req).id, 'SERVICE_ADDED', 'service', id, `${b.name}: ₹${b.rate}/${b.unit === 'KG' ? 'kg' : 'piece'}, hostelers ₹${b.hosteler_rate}`);
   res.status(201).json({ id });
@@ -393,7 +405,7 @@ router.patch('/admin/services/:id', handle(async (req, res) => {
   const b = parse(serviceSchema, { ...before, uses_allowance: !!before.uses_allowance, active: !!before.active, ...(req.body as object) });
   if (await db.get('SELECT 1 AS ok FROM services WHERE lower(name) = lower(?) AND id != ?', [b.name, id])) throw new HttpError(409, 'A service with this name already exists.');
   if (!b.active && before.active && Number((await db.get<{ c: number }>('SELECT COUNT(*) AS c FROM services WHERE active = 1'))!.c) <= 1) throw new HttpError(400, 'Keep at least one service offered.');
-  await db.run('UPDATE services SET name = ?, unit = ?, rate = ?, hosteler_rate = ?, uses_allowance = ?, active = ?, sort = ? WHERE id = ?',
+  await db.run(`UPDATE services SET name = ?, unit = ?, rate = ?, hosteler_rate = ?, uses_allowance = ?, active = ?, sort = ? WHERE workspace_id = ${workspaceId()} AND (id = ?)`,
     [b.name, b.unit, b.rate, b.hosteler_rate, b.uses_allowance ? 1 : 0, b.active ? 1 : 0, b.sort, id]);
   await logActivity(actor(req).id, 'SERVICE_UPDATED', 'service', id,
     `${before.name} → ${b.name}: ₹${before.rate}→₹${b.rate}, hostelers ₹${before.hosteler_rate}→₹${b.hosteler_rate}${b.active ? '' : ', hidden'}`);
@@ -421,13 +433,13 @@ router.post('/admin/upi-qr', photoUpload.single('qr'), handle(async (req, res) =
   const name = await savePhoto(req.file);
   const before = (await getSettings()).upi_qr_file;
   await saveSettings(actor(req).id, { upi_qr_file: name });
-  if (before) await db.run('DELETE FROM files WHERE name = ?', [before]);
+  if (before) await db.run(`DELETE FROM files WHERE workspace_id = ${workspaceId()} AND (name = ?)`, [before]);
   res.status(201).json({ ok: true });
 }));
 router.delete('/admin/upi-qr', handle(async (req, res) => {
   const before = (await getSettings()).upi_qr_file;
   await saveSettings(actor(req).id, { upi_qr_file: '' });
-  if (before) await db.run('DELETE FROM files WHERE name = ?', [before]);
+  if (before) await db.run(`DELETE FROM files WHERE workspace_id = ${workspaceId()} AND (name = ?)`, [before]);
   res.status(204).end();
 }));
 
@@ -446,11 +458,11 @@ function issueClaimCode() {
 type OfficeStudent = { idCardNo: string; name: string; mobile: string; roomNo: string; email: string; validFrom: string; validUntil: string };
 async function addOfficeStudent(r: OfficeStudent, hostelId: number, actorId: number) {
   const unusable = await bcrypt.hash(crypto.randomBytes(24).toString('hex'), 8);
-  const userId = await insertId(`INSERT INTO users (role, login_id, name, mobile, password_hash, created_at) VALUES ('STUDENT',?,?,?,?,?)`,
+  const userId = await insertId(`INSERT INTO users (workspace_id, role, login_id, name, mobile, password_hash, created_at) VALUES (${workspaceId()}, 'STUDENT',?,?,?,?,?)`,
     [r.idCardNo, r.name, r.mobile || null, unusable, nowIso()]);
   const { code, expires } = issueClaimCode();
-  await db.run(`INSERT INTO students (user_id, id_card_no, hostel_id, room_no, status, kind, valid_from, valid_until, claimable, claim_hash, claim_expires_at, email, reviewed_by, reviewed_at)
-    VALUES (?,?,?,?,'ACTIVE','HOSTELER',?,?,1,?,?,?,?,?)`,
+  await db.run(`INSERT INTO students (workspace_id, user_id, id_card_no, hostel_id, room_no, status, kind, valid_from, valid_until, claimable, claim_hash, claim_expires_at, email, reviewed_by, reviewed_at)
+    VALUES (${workspaceId()}, ?,?,?,?,'ACTIVE','HOSTELER',?,?,1,?,?,?,?,?)`,
     [userId, r.idCardNo, hostelId, r.roomNo, r.validFrom || null, r.validUntil || null, claimHash(code), expires, r.email || null, actorId, nowIso()]);
   return { idCardNo: r.idCardNo, name: r.name, code, expires };
 }
@@ -484,7 +496,7 @@ router.post('/admin/students/reissue', handle(async (req, res) => {
     for (const row of rows) {
       await db.lockRow('users', row.user_id);
       const { code, expires } = issueClaimCode();
-      const updated = await db.run('UPDATE students SET claim_hash = ?, claim_expires_at = ?, claim_ticket_hash = NULL, claim_ticket_until = NULL WHERE user_id = ? AND claimable = 1',
+      const updated = await db.run(`UPDATE students SET claim_hash = ?, claim_expires_at = ?, claim_ticket_hash = NULL, claim_ticket_until = NULL WHERE workspace_id = ${workspaceId()} AND (user_id = ? AND claimable = 1)`,
         [claimHash(code), expires, row.user_id]);
       if (updated.changes) result.push({ idCardNo: row.id_card_no, name: row.name, code, expires });
     }
@@ -514,7 +526,7 @@ router.post('/admin/students/validity', handle(async (req, res) => {
     if (!b.ids?.length) throw new HttpError(400, 'Choose at least one student.');
     where.push(`user_id IN (${b.ids.map(() => '?').join(',')})`); p.push(...b.ids);
   }
-  const r = await db.run(`UPDATE students SET valid_from = ?, valid_until = ? WHERE ${where.join(' AND ')}`, p);
+  const r = await db.run(`UPDATE students SET valid_from = ?, valid_until = ? WHERE workspace_id = ${workspaceId()} AND (${where.join(' AND ')})`, p);
   await logActivity(actor(req).id, 'PLAN_DATES_SET', 'student', null, `${r.changes} students → ${b.validFrom || '…'} to ${b.validUntil || 'no end date'} (${b.scope})`);
   res.json({ changed: r.changes });
 }));
@@ -630,7 +642,7 @@ router.post('/admin/import/:type', sheetUpload.single('file'), handle(async (req
         const h = await db.get<{ id: number }>('SELECT id FROM hostels WHERE lower(name) = lower(?)', [name]);
         if (h) return h.id;
         newHostels.push(name);
-        return insertId('INSERT INTO hostels (name) VALUES (?)', [name]);
+        return insertId(`INSERT INTO hostels (workspace_id, name) VALUES (${workspaceId()}, ?)`, [name]);
       };
       for (const r of parsed) {
         const hid = await hostelId(r.hostel);
@@ -641,11 +653,11 @@ router.post('/admin/import/:type', sheetUpload.single('file'), handle(async (req
           const vals: unknown[] = [hid, r.roomNo];
           if (hasFrom) { sets.push('valid_from = ?'); vals.push(r.validFrom || null); }
           if (hasUntil) { sets.push('valid_until = ?'); vals.push(r.validUntil || null); }
-          await db.run(`UPDATE students SET ${sets.join(', ')} WHERE user_id = ?`, [...vals, existing.user_id]);
+          await db.run(`UPDATE students SET ${sets.join(', ')} WHERE workspace_id = ${workspaceId()} AND (user_id = ?)`, [...vals, existing.user_id]);
           if (existing.claimable && r.email && r.email !== (existing.email ?? '').toLowerCase()) {
             // An office correction invalidates outstanding activation tickets and email challenges.
-            await db.run('UPDATE students SET email = ?, email_verified_at = NULL, claim_ticket_hash = NULL, claim_ticket_until = NULL WHERE user_id = ?', [r.email, existing.user_id]);
-            await db.run('UPDATE users SET token_version = token_version + 1 WHERE id = ?', [existing.user_id]);
+            await db.run(`UPDATE students SET email = ?, email_verified_at = NULL, claim_ticket_hash = NULL, claim_ticket_until = NULL WHERE workspace_id = ${workspaceId()} AND (user_id = ?)`, [r.email, existing.user_id]);
+            await db.run(`UPDATE users SET token_version = token_version + 1 WHERE id IN (SELECT id FROM users) AND (id = ?)`, [existing.user_id]);
           }
           updated++;
           continue;
@@ -683,8 +695,9 @@ router.post('/admin/import/:type', sheetUpload.single('file'), handle(async (req
     const out: { name: string; username: string; role: string; tempPassword: string }[] = [];
     for (const r of parsed) {
       const pass = tempPassword();
-      await insertId('INSERT INTO users (role, login_id, name, mobile, password_hash, must_change_password, password_expires_at, created_at) VALUES (?,?,?,?,?,1,?,?)',
+      const id = await insertId(`INSERT INTO users (workspace_id, role, login_id, name, mobile, password_hash, must_change_password, password_expires_at, created_at) VALUES (${workspaceId()}, ?,?,?,?,?,1,?,?)`,
         [r.role, r.loginId, r.name, r.mobile || null, await bcrypt.hash(pass, 10), tempPasswordExpiry(), nowIso()]);
+      if (r.role === 'STAFF') await db.run('INSERT INTO staff_workspaces(user_id,workspace_id) VALUES (?,?)',[id,workspaceId()]);
       out.push({ name: r.name, username: r.loginId, role: r.role, tempPassword: pass });
     }
     await logActivity(actor(req).id, 'STAFF_IMPORTED', 'user', null, `${out.length} accounts`);
@@ -867,8 +880,8 @@ router.post('/admin/students/leave', handle(async (req, res) => {
       if (!s || s.left_at) continue;
       const busy = await db.get<{ c: number }>(`SELECT COUNT(*) AS c FROM orders WHERE student_id = ? AND (status IN ('RECEIVED','WASHING','READY') OR payment_status = 'DUE')`, [id]);
       if (Number(busy?.c)) { blocked.push(`${s.name} (${s.id_card_no})`); continue; }
-      await db.run('UPDATE students SET left_at = ?, pending_hostel_id = NULL, pending_room_no = NULL, change_requested_at = NULL WHERE user_id = ?', [nowIso(), id]);
-      await db.run('UPDATE users SET active = 0, token_version = token_version + 1 WHERE id = ?', [id]);
+      await db.run(`UPDATE students SET left_at = ?, pending_hostel_id = NULL, pending_room_no = NULL, change_requested_at = NULL WHERE workspace_id = ${workspaceId()} AND (user_id = ?)`, [nowIso(), id]);
+      await db.run(`UPDATE users SET active = 0, token_version = token_version + 1 WHERE id IN (SELECT id FROM users) AND (id = ?)`, [id]);
       await logActivity(actor(req).id, 'STUDENT_LEFT', 'student', s.id_card_no, b.note || 'Left the hostel');
       changed++;
     }
@@ -881,8 +894,8 @@ router.post('/admin/students/:id/restore', handle(async (req, res) => {
   const s = await db.get<{ id_card_no: string; left_at: string | null }>('SELECT id_card_no, left_at FROM students WHERE user_id = ?', [id]);
   if (!s) throw new HttpError(404, 'Student not found.');
   if (!s.left_at) throw new HttpError(409, 'This student is on the list already.');
-  await db.run('UPDATE students SET left_at = NULL WHERE user_id = ?', [id]);
-  await db.run('UPDATE users SET active = 1 WHERE id = ?', [id]);
+  await db.run(`UPDATE students SET left_at = NULL WHERE workspace_id = ${workspaceId()} AND (user_id = ?)`, [id]);
+  await db.run(`UPDATE users SET active = 1 WHERE id IN (SELECT id FROM users) AND (id = ?)`, [id]);
   await logActivity(actor(req).id, 'STUDENT_RESTORED', 'student', s.id_card_no);
   res.json({ ok: true });
 }));

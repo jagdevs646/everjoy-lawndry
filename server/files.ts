@@ -1,3 +1,4 @@
+import { workspaceId } from './workspace-context.js';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -39,7 +40,7 @@ function looksLike(mime: string, b: Buffer) {
 export async function savePhoto(file: Express.Multer.File): Promise<string> {
   if (!looksLike(file.mimetype, file.buffer)) throw new HttpError(400, 'That file is not a photo. Attach a JPG, PNG, WEBP or HEIC picture.');
   const name = crypto.randomBytes(16).toString('hex') + (types[file.mimetype] || '.img');
-  await db.run('INSERT INTO files (name, mime, data, created_at) VALUES (?,?,?,?)', [name, file.mimetype, file.buffer, nowIso()]);
+  await db.run(`INSERT INTO files (workspace_id, name, mime, data, created_at) VALUES (${workspaceId()}, ?,?,?,?)`, [name, file.mimetype, file.buffer, nowIso()]);
   return name;
 }
 

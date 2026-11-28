@@ -1,3 +1,5 @@
+import { selectWorkspace, visibleWorkspaces, workspaceRouter } from './workspaces.js';
+import type { AuthedRequest } from './auth.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import express from 'express';
@@ -44,13 +46,14 @@ export async function createApp({ demo = false } = {}) {
   app.use(express.json({ limit: '100kb' }));
 
   const api = express.Router();
-  api.use(appCors, session, csrf, mustChangePassword);   // appCors answers the app's preflight before anything else
+  api.use(appCors, session, csrf, mustChangePassword, selectWorkspace);   // appCors answers the app's preflight before anything else
   // Signed-in requests also move orders along (washing / ready) on time, at most once a minute.
   if (process.env.NODE_ENV !== 'test') api.use((req, _res, next) => { if ((req as { user?: unknown }).user) maybeAutoAdvance(); next(); });
   api.use((_req, res, next) => { res.setHeader('Cache-Control', 'no-store'); next(); });
+  api.get('/access/workspaces', async (req, res) => { res.json({ rows: await visibleWorkspaces((req as AuthedRequest).user) }); });
   api.get('/health', (_req, res) => res.json({ ok: true }));
   api.get('/files/:name', serveFile);
-  api.use(publicRoutes, studentRoutes, opsRoutes, adminRoutes);
+  api.use(workspaceRouter, publicRoutes, studentRoutes, opsRoutes, adminRoutes);
   api.use((_req, _res, next) => next(new HttpError(404, 'Not found.')));
   app.use('/api', api);
 

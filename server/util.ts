@@ -1,3 +1,4 @@
+import { currentWorkspace } from './workspace-context.js';
 import type { NextFunction, Request, Response } from 'express';
 import { z } from 'zod';
 
@@ -13,13 +14,13 @@ export const nowIso = () => new Date().toISOString();
 
 /** YYYY-MM-DD for the given instant in campus time. */
 export function dayKey(date = new Date()) {
-  return new Intl.DateTimeFormat('en-CA', { timeZone: APP_TZ, year: 'numeric', month: '2-digit', day: '2-digit' }).format(date);
+  return new Intl.DateTimeFormat('en-CA', { timeZone: currentWorkspace().timezone, year: 'numeric', month: '2-digit', day: '2-digit' }).format(date);
 }
 export const monthKey = (date = new Date()) => dayKey(date).slice(0, 7);
 
 /** UTC instant of the most recent campus midnight, for comparing against stored ISO timestamps. */
 export function startOfLocalDayIso(date = new Date()) {
-  const asLocal = new Date(date.toLocaleString('en-US', { timeZone: APP_TZ }));
+  const asLocal = new Date(date.toLocaleString('en-US', { timeZone: currentWorkspace().timezone }));
   const asUtc = new Date(date.toLocaleString('en-US', { timeZone: 'UTC' }));
   const offsetMs = asLocal.getTime() - asUtc.getTime();
   return new Date(Date.parse(`${dayKey(date)}T00:00:00.000Z`) - offsetMs).toISOString();
@@ -36,7 +37,7 @@ export function addDays(day: string, n: number) {
 export function localDateTimeIso(day: string, hhmm: string) {
   const guess = Date.parse(`${day}T${hhmm}:00.000Z`);
   const at = new Date(guess);
-  const asLocal = new Date(at.toLocaleString('en-US', { timeZone: APP_TZ }));
+  const asLocal = new Date(at.toLocaleString('en-US', { timeZone: currentWorkspace().timezone }));
   const asUtc = new Date(at.toLocaleString('en-US', { timeZone: 'UTC' }));
   return new Date(guess - (asLocal.getTime() - asUtc.getTime())).toISOString();
 }

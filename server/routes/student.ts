@@ -1,3 +1,4 @@
+import { workspaceId } from '../workspace-context.js';
 import { NextFunction, Request, Response, Router } from 'express';
 import { z } from 'zod';
 import { db, insertId, logActivity } from '../db.js';
@@ -43,9 +44,9 @@ router.post('/me/complete-profile', handle(async (req, res) => {
     await db.tx(async () => {
       if (!p.mobile) {
         const b = parse(z.object({ mobile: zMobile }), req.body);
-        await db.run('UPDATE users SET mobile = ? WHERE id = ?', [b.mobile, user.id]);
+        await db.run(`UPDATE users SET mobile = ? WHERE id IN (SELECT id FROM users) AND (id = ?)`, [b.mobile, user.id]);
       }
-      await db.run('UPDATE students SET complete_profile = 0 WHERE user_id = ?', [user.id]);
+      await db.run(`UPDATE students SET complete_profile = 0 WHERE workspace_id = ${workspaceId()} AND (user_id = ?)`, [user.id]);
     });
   }
   res.json({ ok: true });
@@ -123,7 +124,7 @@ router.post('/me/orders/:id/dispute', handle(async (req, res) => {
     const r = await getRequest(id, b.kind);
     if (!r || r.status !== 'WAITING' || r.expires_at <= nowIso()) throw new HttpError(409, 'The counter is not waiting for you on this order any more.');
     const at = nowIso();
-    await db.run(`UPDATE confirm_requests SET status = 'DISPUTED', reason = ? WHERE order_id = ? AND kind = ?`, [b.reason, id, b.kind]);
+    await db.run(`UPDATE confirm_requests SET status = 'DISPUTED', reason = ? WHERE workspace_id = ${workspaceId()} AND (order_id = ? AND kind = ?)`, [b.reason, id, b.kind]);
     await recordSignoff({ o, kind: b.kind, proof: { method: 'PHONE', dispute: b.reason }, staffId: r.staff_id, at,
       statement: statementFor(b.kind, o, at, r.returned_count ?? undefined, r.note ?? ''), origin: origin(req), returned: r.returned_count ?? undefined });
     await disputeComplaint(o, b.kind, b.reason, at);
@@ -164,20 +165,20 @@ router.patch('/me/profile', handle(async (req, res) => {
     if (!(await db.get('SELECT 1 FROM hostels WHERE id = ? AND active = 1', [b.hostelId]))) throw new HttpError(400, 'Choose your hostel.');
     if (canEditIdentity && b.idCardNo && b.idCardNo !== current.id_card_no) {
       if (await db.get('SELECT 1 FROM users WHERE login_id = ? AND id != ?', [b.idCardNo, user.id])) throw new HttpError(409, 'That ID card no. is already registered.');
-      await db.run('UPDATE users SET login_id = ? WHERE id = ?', [b.idCardNo, user.id]);
-      await db.run('UPDATE students SET id_card_no = ? WHERE user_id = ?', [b.idCardNo, user.id]);
+      await db.run(`UPDATE users SET login_id = ? WHERE id IN (SELECT id FROM users) AND (id = ?)`, [b.idCardNo, user.id]);
+      await db.run(`UPDATE students SET id_card_no = ? WHERE workspace_id = ${workspaceId()} AND (user_id = ?)`, [b.idCardNo, user.id]);
     }
-    await db.run('UPDATE users SET mobile = ?, name = COALESCE(?, name) WHERE id = ?', [b.mobile, canEditIdentity ? b.name ?? null : null, user.id]);
+    await db.run(`UPDATE users SET mobile = ?, name = COALESCE(?, name) WHERE id IN (SELECT id FROM users) AND (id = ?)`, [b.mobile, canEditIdentity ? b.name ?? null : null, user.id]);
     const roomChanged = b.hostelId !== Number(current.hostel_id) || b.roomNo !== current.room_no;
     if (canEditIdentity) {
       // Not approved yet: the whole registration is checked by staff anyway, so change it directly.
-      await db.run(`UPDATE students SET hostel_id = ?, room_no = ?, status = CASE WHEN status = 'REJECTED' THEN 'PENDING' ELSE status END WHERE user_id = ?`, [b.hostelId, b.roomNo, user.id]);
+      await db.run(`UPDATE students SET hostel_id = ?, room_no = ?, status = CASE WHEN status = 'REJECTED' THEN 'PENDING' ELSE status END WHERE workspace_id = ${workspaceId()} AND (user_id = ?)`, [b.hostelId, b.roomNo, user.id]);
     } else if (roomChanged) {
       // Approved students: a new hostel/room waits for staff to check it before it replaces the old one.
-      await db.run('UPDATE students SET pending_hostel_id = ?, pending_room_no = ?, change_requested_at = ? WHERE user_id = ?', [b.hostelId, b.roomNo, nowIso(), user.id]);
+      await db.run(`UPDATE students SET pending_hostel_id = ?, pending_room_no = ?, change_requested_at = ? WHERE workspace_id = ${workspaceId()} AND (user_id = ?)`, [b.hostelId, b.roomNo, nowIso(), user.id]);
     } else if (current.pending_hostel_id) {
       // Back to the room already on file: withdraw the waiting change.
-      await db.run('UPDATE students SET pending_hostel_id = NULL, pending_room_no = NULL, change_requested_at = NULL WHERE user_id = ?', [user.id]);
+      await db.run(`UPDATE students SET pending_hostel_id = NULL, pending_room_no = NULL, change_requested_at = NULL WHERE workspace_id = ${workspaceId()} AND (user_id = ?)`, [user.id]);
     }
     await logActivity(user.id, current.status === 'REJECTED' ? 'STUDENT_RESUBMITTED' : !canEditIdentity && roomChanged ? 'ROOM_CHANGE_REQUESTED' : 'PROFILE_UPDATED', 'student', current.id_card_no, `room ${b.roomNo}, ${b.mobile}`);
   });
@@ -216,9 +217,9 @@ router.post('/me/complaints', activeOnly, photoUpload.single('photo'), handle(as
     // Saved only once the complaint is accepted, and inside the transaction so a failed insert leaves no stray photo.
     const photo = req.file ? await savePhoto(req.file) : null;
     const at = nowIso();
-    const newId = await insertId('INSERT INTO complaints (student_id, order_id, category, description, photo, created_at, updated_at) VALUES (?,?,?,?,?,?,?)',
+    const newId = await insertId(`INSERT INTO complaints (workspace_id, student_id, order_id, category, description, photo, created_at, updated_at) VALUES (${workspaceId()}, ?,?,?,?,?,?,?)`,
       [user.id, orderId, b.category, b.description, photo, at, at]);
-    await db.run('INSERT INTO complaint_updates (complaint_id, by_user, status, message, at) VALUES (?,?,?,?,?)', [newId, user.id, 'OPEN', null, at]);
+    await db.run(`INSERT INTO complaint_updates (workspace_id, complaint_id, by_user, status, message, at) VALUES (${workspaceId()}, ?,?,?,?,?)`, [newId, user.id, 'OPEN', null, at]);
     await logActivity(user.id, 'COMPLAINT_RAISED', 'complaint', newId, b.category);
     return newId;
   });
@@ -238,8 +239,8 @@ router.post('/me/photo', photoUpload.single('photo'), handle(async (req, res) =>
   if (p.status === 'ACTIVE' && p.photo) throw new HttpError(403, 'Your photo is locked after approval. Ask at the counter to change it.');
   if (p.status === 'SUSPENDED') throw new HttpError(403, 'Your account is on hold.');
   const name = await savePhoto(req.file);
-  await db.run('UPDATE users SET photo = ? WHERE id = ?', [name, user.id]);
-  if (p.photo) await db.run('DELETE FROM files WHERE name = ?', [p.photo]);
+  await db.run(`UPDATE users SET photo = ? WHERE id IN (SELECT id FROM users) AND (id = ?)`, [name, user.id]);
+  if (p.photo) await db.run(`DELETE FROM files WHERE workspace_id = ${workspaceId()} AND (name = ?)`, [p.photo]);
   await logActivity(user.id, 'PHOTO_ADDED', 'student', p.id_card_no);
   res.json(await studentProfile(user.id));
 }));

@@ -40,6 +40,8 @@ export async function seedDemo() {
     const staff: number[] = [];
     for (const [login, name, mobile] of [['STAFF1', 'Ramesh Yadav', '9811100001'], ['STAFF2', 'Sunita Devi', '9811100002']]) staff.push(await addUser('STAFF', login, name, mobile));
 
+    for (const id of staff) await db.run('INSERT INTO staff_workspaces(user_id,workspace_id) VALUES (?,1)',[id]);
+
     const people: [string, string, string, string, string, string][] = [
       ['EJ2026001', 'Priya Sharma', '9876500001', 'Girls Hostel 1', '214', 'ACTIVE'],
       ['EJ2026002', 'Arjun Mehta', '9876500002', 'Boys Hostel 2', 'B-108', 'ACTIVE'],

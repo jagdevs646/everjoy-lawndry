@@ -1,3 +1,5 @@
+import { scopeReads, workspaceId } from './workspace-context.js';
+import { migrateWorkspaces } from './workspace-migration.js';
 /**
  * Database layer with two interchangeable engines:
  *
@@ -221,6 +223,7 @@ class Db {
   }
 
   async run(sql: string, params: unknown[] = []): Promise<Result> {
+    sql = scopeReads(sql, this.dialect === 'sqlite' ? 'main' : 'public');
     const p = normalise(params);
     const q = this.#current();
     return q ? q(sql, p) : this.driver.query(sql, p);
@@ -252,7 +255,7 @@ class Db {
     // FOR NO KEY UPDATE: excludes other lockRow callers on the same row, but (unlike FOR UPDATE) does not
     // block the FOR KEY SHARE locks Postgres takes for foreign-key checks, so inserting a complaint,
     // notification or event that references this row from another transaction can't deadlock with it.
-    if (this.dialect === 'postgres') await this.run(`SELECT id FROM ${table} WHERE id = ? FOR NO KEY UPDATE`, [id]);
+    if (this.dialect === 'postgres') await this.run(`SELECT id FROM public.${table} WHERE id = ? AND id IN (SELECT id FROM ${table}) FOR NO KEY UPDATE`, [id]);
   }
 
   async backupFile(dest: string) {
@@ -273,9 +276,14 @@ class Db {
 export const db = new Db();
 
 /** Every table, in an order that respects foreign keys (used for JSON backups). */
-export const TABLES = ['users', 'hostels', 'students', 'settings', 'services', 'counters', 'orders', 'order_events', 'order_signoffs', 'notifications', 'announcements', 'complaints', 'complaint_updates', 'files', 'activity'] as const;
+export const TABLES = ['users', 'hostels', 'students', 'settings', 'services', 'counters', 'orders', 'order_events', 'order_signoffs', 'notifications', 'announcements', 'complaints', 'complaint_updates', 'files', 'activity', 'workspaces', 'staff_workspaces', 'customers', 'workspace_settings', 'workspace_counters'] as const;
 
 export async function migrate() {
+  await migrateLegacySchema();
+  await migrateWorkspaces();
+}
+
+export async function migrateLegacySchema() {
   const { id, blob } = db.types;
   await db.driver.script(`
     CREATE TABLE IF NOT EXISTS users (
@@ -295,7 +303,7 @@ export async function migrate() {
       name TEXT NOT NULL,
       active INTEGER NOT NULL DEFAULT 1
     );
-    CREATE UNIQUE INDEX IF NOT EXISTS idx_hostels_name ON hostels (lower(name));
+
     CREATE TABLE IF NOT EXISTS students (
       user_id INTEGER PRIMARY KEY REFERENCES users(id),
       id_card_no TEXT NOT NULL UNIQUE,
@@ -427,7 +435,7 @@ export async function migrate() {
       sort INTEGER NOT NULL DEFAULT 0,
       created_at TEXT NOT NULL
     );
-    CREATE UNIQUE INDEX IF NOT EXISTS idx_services_name ON services (lower(name));
+
   `);
 
   // Columns added after the first release. ADD COLUMN keeps existing data (Neon and local files).
@@ -486,7 +494,6 @@ export async function migrate() {
     id TEXT PRIMARY KEY, purpose TEXT NOT NULL, user_id INTEGER, email TEXT NOT NULL, code_hash TEXT NOT NULL, payload TEXT,
     attempts INTEGER NOT NULL DEFAULT 0, sends INTEGER NOT NULL DEFAULT 1, last_sent_at TEXT NOT NULL, expires_at TEXT NOT NULL, created_at TEXT NOT NULL)`);
   // One basket card can be on only one order that hasn't been collected yet (both SQLite and Postgres support this).
-  await db.driver.script(`CREATE UNIQUE INDEX IF NOT EXISTS idx_orders_open_tag ON orders (tag_no) WHERE tag_no IS NOT NULL AND status IN ('RECEIVED','WASHING','READY')`);
   // Two-sided register: every confirmation (or dispute) by the student, with the sentence they agreed to,
   // the signature image (files table), who was at the counter and a SHA-256 fingerprint. Never updated
   // except superseded_at (a correction asks the student to confirm again).
@@ -521,7 +528,6 @@ export async function migrate() {
   }
   for (const sql of [
     'CREATE UNIQUE INDEX IF NOT EXISTS idx_orders_order_key ON orders (order_key)',
-    `CREATE UNIQUE INDEX IF NOT EXISTS idx_orders_open_tag_key ON orders (tag_key) WHERE tag_key IS NOT NULL AND status IN ('RECEIVED','WASHING','READY')`,
   ]) {
     try { await db.driver.script(sql); } catch (e) { console.warn(`Could not add a uniqueness check (${(e as Error).message}). The app still checks before saving.`); }
   }
@@ -571,19 +577,19 @@ export async function insertId(sql: string, params: unknown[]): Promise<number> 
 }
 
 export async function logActivity(actorId: number | null, action: string, entity: string | null, entityId: unknown, detail = '') {
-  await db.run('INSERT INTO activity (actor_id, action, entity, entity_id, detail, created_at) VALUES (?,?,?,?,?,?)',
+  await db.run(`INSERT INTO activity (workspace_id, actor_id, action, entity, entity_id, detail, created_at) VALUES (${workspaceId()}, ?,?,?,?,?,?)`,
     [actorId, action, entity, entityId == null ? null : String(entityId), detail, nowIso()]);
 }
 
 export async function notify(userId: number, title: string, body: string, orderId: number | null = null) {
-  await db.run('INSERT INTO notifications (user_id, title, body, order_id, created_at) VALUES (?,?,?,?,?)',
+  await db.run(`INSERT INTO notifications (workspace_id, user_id, title, body, order_id, created_at) VALUES (${workspaceId()}, ?,?,?,?,?)`,
     [userId, title, body, orderId, nowIso()]);
 }
 
 /** Atomic counter (call inside a transaction): the upsert locks the row, so no two orders share a number. */
 export async function nextCounter(name: string, start: number) {
   const row = await db.get<{ value: number }>(
-    'INSERT INTO counters (name, value) VALUES (?, ?) ON CONFLICT(name) DO UPDATE SET value = counters.value + 1 RETURNING value',
-    [name, start]);
+    'INSERT INTO workspace_counters (workspace_id, name, value) VALUES (?, ?, ?) ON CONFLICT(workspace_id,name) DO UPDATE SET value = workspace_counters.value + 1 RETURNING value',
+    [workspaceId(), name, start]);
   return Number(row!.value);
 }

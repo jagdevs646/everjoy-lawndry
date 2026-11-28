@@ -1,3 +1,4 @@
+import { workspaceId } from '../workspace-context.js';
 import crypto from 'node:crypto';
 import { Router } from 'express';
 import bcrypt from 'bcryptjs';
@@ -131,18 +132,18 @@ router.patch('/ops/students/:id', handle(async (req, res) => {
   if (!(await db.get('SELECT 1 FROM hostels WHERE id = ?', [b.hostelId]))) throw new HttpError(400, 'Choose a hostel.');
   if (b.idCardNo !== before.id_card_no && (await db.get('SELECT 1 FROM users WHERE login_id = ? AND id != ?', [b.idCardNo, id]))) throw new HttpError(409, 'Another account already uses that ID card no.');
   await db.tx(async () => {
-    await db.run('UPDATE users SET name = ?, mobile = ?, login_id = ? WHERE id = ?', [b.name, b.mobile, b.idCardNo, id]);
-    await db.run('UPDATE students SET id_card_no = ?, hostel_id = ?, room_no = ? WHERE user_id = ?', [b.idCardNo, b.hostelId, b.roomNo, id]);
-    if (b.validUntil !== undefined) await db.run('UPDATE students SET valid_until = ? WHERE user_id = ?', [b.validUntil || null, id]);
-    if (b.validFrom !== undefined) await db.run('UPDATE students SET valid_from = ? WHERE user_id = ?', [b.validFrom || null, id]);
+    await db.run(`UPDATE users SET name = ?, mobile = ?, login_id = ? WHERE id IN (SELECT id FROM users) AND (id = ?)`, [b.name, b.mobile, b.idCardNo, id]);
+    await db.run(`UPDATE students SET id_card_no = ?, hostel_id = ?, room_no = ? WHERE workspace_id = ${workspaceId()} AND (user_id = ?)`, [b.idCardNo, b.hostelId, b.roomNo, id]);
+    if (b.validUntil !== undefined) await db.run(`UPDATE students SET valid_until = ? WHERE workspace_id = ${workspaceId()} AND (user_id = ?)`, [b.validUntil || null, id]);
+    if (b.validFrom !== undefined) await db.run(`UPDATE students SET valid_from = ? WHERE workspace_id = ${workspaceId()} AND (user_id = ?)`, [b.validFrom || null, id]);
     // A new email must be confirmed again with a code; the old trusted devices are signed out.
     if (emailChanged) {
-      await db.run('UPDATE students SET email = ?, email_verified_at = NULL WHERE user_id = ?', [b.email || null, id]);
-      await db.run('UPDATE users SET token_version = token_version + 1 WHERE id = ?', [id]);
+      await db.run(`UPDATE students SET email = ?, email_verified_at = NULL WHERE workspace_id = ${workspaceId()} AND (user_id = ?)`, [b.email || null, id]);
+      await db.run(`UPDATE users SET token_version = token_version + 1 WHERE id IN (SELECT id FROM users) AND (id = ?)`, [id]);
     }
     // Staff set the hostel/room themselves: a change the student asked for earlier no longer applies.
     if (b.hostelId !== Number(before.hostel_id) || b.roomNo !== before.room_no) {
-      await db.run('UPDATE students SET pending_hostel_id = NULL, pending_room_no = NULL, change_requested_at = NULL WHERE user_id = ?', [id]);
+      await db.run(`UPDATE students SET pending_hostel_id = NULL, pending_room_no = NULL, change_requested_at = NULL WHERE workspace_id = ${workspaceId()} AND (user_id = ?)`, [id]);
     }
     await logActivity(actor(req).id, 'STUDENT_EDITED', 'student', b.idCardNo, `${before.name}/${before.id_card_no} → ${b.name}/${b.idCardNo}, room ${b.roomNo}${b.validUntil !== undefined ? `, plan till ${b.validUntil || 'no end'}` : ''}`);
   });
@@ -158,10 +159,10 @@ router.post('/ops/students/:id/review', handle(async (req, res) => {
     if (s.status !== 'PENDING') throw new HttpError(409, `${s.name} is already ${s.status.toLowerCase()}.`);
     if (b.decision === 'REJECT' && !b.note) throw new HttpError(400, 'Tell the student why (e.g. “ID no. does not match portal”).');
     const status = b.decision === 'APPROVE' ? 'ACTIVE' : 'REJECTED';
-    await db.run('UPDATE students SET status = ?, review_note = ?, reviewed_by = ?, reviewed_at = ? WHERE user_id = ?', [status, b.note || null, actor(req).id, nowIso(), id]);
+    await db.run(`UPDATE students SET status = ?, review_note = ?, reviewed_by = ?, reviewed_at = ? WHERE workspace_id = ${workspaceId()} AND (user_id = ?)`, [status, b.note || null, actor(req).id, nowIso(), id]);
     // Approved hostelers get the current semester's plan end date, if the admin has set one.
     const { semester_start: semesterStart, semester_end: semesterEnd } = await getSettings();
-    if (status === 'ACTIVE' && semesterEnd && !s.valid_until) await db.run('UPDATE students SET valid_from = ?, valid_until = ? WHERE user_id = ?', [semesterStart || null, semesterEnd, id]);
+    if (status === 'ACTIVE' && semesterEnd && !s.valid_until) await db.run(`UPDATE students SET valid_from = ?, valid_until = ? WHERE workspace_id = ${workspaceId()} AND (user_id = ?)`, [semesterStart || null, semesterEnd, id]);
     await notify(id, status === 'ACTIVE' ? 'Registration approved 🎉' : 'Registration needs a fix', status === 'ACTIVE' ? 'You can now give laundry at the counter. Your digital slips will appear here.' : `Reason: ${b.note}. Update your details in Profile and resubmit.`);
     await logActivity(actor(req).id, status === 'ACTIVE' ? 'STUDENT_APPROVED' : 'STUDENT_REJECTED', 'student', s.id_card_no, b.note);
   });
@@ -174,7 +175,7 @@ router.post('/ops/students/:id/status', requireRole('ADMIN'), handle(async (req,
   await db.tx(async () => {
     await db.lockRow('users', id);
     const s = await studentProfile(id);
-    await db.run('UPDATE students SET status = ?, review_note = ?, reviewed_by = ?, reviewed_at = ? WHERE user_id = ?', [b.status, b.note || null, actor(req).id, nowIso(), id]);
+    await db.run(`UPDATE students SET status = ?, review_note = ?, reviewed_by = ?, reviewed_at = ? WHERE workspace_id = ${workspaceId()} AND (user_id = ?)`, [b.status, b.note || null, actor(req).id, nowIso(), id]);
     await notify(id, b.status === 'ACTIVE' ? 'Account active' : 'Account suspended', b.status === 'ACTIVE' ? 'You can use the laundry again.' : `Reason: ${b.note || 'contact the laundry office'}.`);
     await logActivity(actor(req).id, b.status === 'ACTIVE' ? 'STUDENT_REACTIVATED' : 'STUDENT_SUSPENDED', 'student', s.id_card_no, b.note);
   });
@@ -187,9 +188,9 @@ router.post('/ops/students/:id/reset-password', handle(async (req, res) => {
   const pass = tempPassword();
   const hash = await bcrypt.hash(pass, 10);
   await db.tx(async () => {
-    await db.run('UPDATE users SET password_hash = ?, must_change_password = 1, password_expires_at = ?, token_version = token_version + 1 WHERE id = ?', [hash, tempPasswordExpiry(), id]);
+    await db.run(`UPDATE users SET password_hash = ?, must_change_password = 1, password_expires_at = ?, token_version = token_version + 1 WHERE id IN (SELECT id FROM users) AND (id = ?)`, [hash, tempPasswordExpiry(), id]);
     // Staff checked the student in person: an imported account no longer waits to be claimed.
-    await db.run('UPDATE students SET claimable = 0, claim_hash = NULL, claim_expires_at = NULL WHERE user_id = ?', [id]);
+    await db.run(`UPDATE students SET claimable = 0, claim_hash = NULL, claim_expires_at = NULL WHERE workspace_id = ${workspaceId()} AND (user_id = ?)`, [id]);
     await logActivity(actor(req).id, 'PASSWORD_RESET', 'student', s.id_card_no);
   });
   res.json({ tempPassword: pass });
@@ -218,10 +219,10 @@ router.post('/ops/students/:id/room-change', handle(async (req, res) => {
     if (b.decision === 'REJECT' && !b.note) throw new HttpError(400, 'Tell the student why (e.g. "Room not on the hostel list").');
     const newHostel = await db.get<{ name: string }>('SELECT name FROM hostels WHERE id = ?', [s.pending_hostel_id]);
     if (b.decision === 'APPROVE') {
-      await db.run('UPDATE students SET hostel_id = ?, room_no = ?, pending_hostel_id = NULL, pending_room_no = NULL, change_requested_at = NULL WHERE user_id = ?', [s.pending_hostel_id, s.pending_room_no, id]);
+      await db.run(`UPDATE students SET hostel_id = ?, room_no = ?, pending_hostel_id = NULL, pending_room_no = NULL, change_requested_at = NULL WHERE workspace_id = ${workspaceId()} AND (user_id = ?)`, [s.pending_hostel_id, s.pending_room_no, id]);
       await notify(id, 'Room change approved', `Your laundry account now shows ${newHostel?.name}, room ${s.pending_room_no}.`);
     } else {
-      await db.run('UPDATE students SET pending_hostel_id = NULL, pending_room_no = NULL, change_requested_at = NULL WHERE user_id = ?', [id]);
+      await db.run(`UPDATE students SET pending_hostel_id = NULL, pending_room_no = NULL, change_requested_at = NULL WHERE workspace_id = ${workspaceId()} AND (user_id = ?)`, [id]);
       await notify(id, 'Room change not approved', `Reason: ${b.note}. Your hostel and room stay as before.`);
     }
     await logActivity(actor(req).id, b.decision === 'APPROVE' ? 'ROOM_CHANGE_APPROVED' : 'ROOM_CHANGE_REJECTED', 'student', s.id_card_no,
@@ -244,11 +245,11 @@ router.post('/ops/walk-in', handle(async (req, res) => {
   if (existing) throw new HttpError(409, 'This mobile number is tied to another account. Search for it in Students.');
   const id = await db.tx(async () => {
     const hostel = await db.get<{ id: number }>("SELECT id FROM hostels WHERE lower(name) = 'walk-in customers'");
-    const hostelId = hostel?.id ?? await insertId('INSERT INTO hostels (name, active) VALUES (?, 0)', ['Walk-in customers']);
+    const hostelId = hostel?.id ?? await insertId(`INSERT INTO hostels (workspace_id, name, active) VALUES (${workspaceId()}, ?, 0)`, ['Walk-in customers']);
     // No usable password: walk-ins are served at the counter and never sign in.
     const unusable = await bcrypt.hash(crypto.randomBytes(24).toString('hex'), 10);
-    const userId = await insertId(`INSERT INTO users (role, login_id, name, mobile, password_hash, created_at) VALUES ('STUDENT',?,?,?,?,?)`, [loginId, b.name, b.mobile, unusable, nowIso()]);
-    await db.run(`INSERT INTO students (user_id, id_card_no, hostel_id, room_no, status, kind, reviewed_by, reviewed_at) VALUES (?,?,?,?,'ACTIVE','WALKIN',?,?)`,
+    const userId = await insertId(`INSERT INTO users (workspace_id, role, login_id, name, mobile, password_hash, created_at) VALUES (${workspaceId()}, 'STUDENT',?,?,?,?,?)`, [loginId, b.name, b.mobile, unusable, nowIso()]);
+    await db.run(`INSERT INTO students (workspace_id, user_id, id_card_no, hostel_id, room_no, status, kind, reviewed_by, reviewed_at) VALUES (${workspaceId()}, ?,?,?,?,'ACTIVE','WALKIN',?,?)`,
       [userId, loginId, hostelId, '-', actor(req).id, nowIso()]);
     await logActivity(actor(req).id, 'WALKIN_ADDED', 'student', loginId, b.name);
     return userId;
@@ -358,7 +359,7 @@ router.post('/ops/orders/:id/dropoff-override', requireRole('ADMIN'), handle(asy
     const o = await orderForSign(id);
     if (!['RECEIVED', 'WASHING', 'READY'].includes(o.status)) throw new HttpError(409, `${o.order_no} is ${o.status.toLowerCase()}.`);
     if (isConfirmed(o.dropoff_ack) || o.dropoff_ack === 'OVERRIDE') throw new HttpError(409, `The drop-off of ${o.order_no} is already confirmed.`);
-    await db.run(`DELETE FROM confirm_requests WHERE order_id = ? AND kind = 'DROPOFF'`, [id]);
+    await db.run(`DELETE FROM confirm_requests WHERE workspace_id = ${workspaceId()} AND (order_id = ? AND kind = 'DROPOFF')`, [id]);
     const at = nowIso();
     await recordSignoff({ o, kind: 'DROPOFF', proof: { method: 'OVERRIDE', reason: b.reason }, staffId: actor(req).id, at, statement: statementFor('DROPOFF', o, at), origin: origin(req) });
   });
@@ -394,7 +395,7 @@ router.post('/ops/orders/:id/confirm-request', handle(async (req, res) => {
 router.delete('/ops/orders/:id/confirm-request', handle(async (req, res) => {
   const id = parse(zId, req.params.id);
   const kind = parse(zKind, req.query.kind);
-  await db.run('DELETE FROM confirm_requests WHERE order_id = ? AND kind = ?', [id, kind]);
+  await db.run(`DELETE FROM confirm_requests WHERE workspace_id = ${workspaceId()} AND (order_id = ? AND kind = ?)`, [id, kind]);
   res.json(await orderDetail(id));
 }));
 
@@ -413,7 +414,7 @@ router.post('/ops/orders/:id/confirm', handle(async (req, res) => {
       const o = await orderForSign(id);
       if (isConfirmed(o.dropoff_ack)) throw new HttpError(409, `The student already confirmed the drop-off of ${o.order_no}.`);
       await recordSignoff({ o, kind: 'DROPOFF', proof: { method: 'CODE' }, staffId: me.id, at, statement: statementFor('DROPOFF', o, at), origin: origin(req) });
-      await db.run('DELETE FROM confirm_requests WHERE order_id = ? AND kind = ?', [id, 'DROPOFF']);
+      await db.run(`DELETE FROM confirm_requests WHERE workspace_id = ${workspaceId()} AND (order_id = ? AND kind = ?)`, [id, 'DROPOFF']);
     } else {
       if (r.pay_method && (await getOrderRow(id)).payment_status === 'DUE') await recordPayment(me.id, id, r.pay_method, r.pay_ref ?? '');
       await deliverOrder(me.id, id, Number(r.returned_count), r.note ?? '', { method: 'CODE' }, origin(req));
@@ -484,7 +485,7 @@ router.patch('/ops/orders/:id/card', handle(async (req, res) => {
       const busy = await cardInUse(card, id);
       if (busy) throw new HttpError(409, `Card ${card} is still on ${busy.order_no} (${busy.status.toLowerCase()}, not collected). Use another card.`, { code: 'CARD_IN_USE' });
     }
-    await db.run('UPDATE orders SET tag_no = ?, tag_key = ?, updated_at = ? WHERE id = ?', [card, card ? codeKey(card) : null, nowIso(), id]).catch((e: unknown) => {
+    await db.run(`UPDATE orders SET tag_no = ?, tag_key = ?, updated_at = ? WHERE workspace_id = ${workspaceId()} AND (id = ?)`, [card, card ? codeKey(card) : null, nowIso(), id]).catch((e: unknown) => {
       if (isUniqueError(e)) throw new HttpError(409, `Card ${card} was just given to another basket. Use another card.`, { code: 'CARD_IN_USE' });
       throw e;
     });
@@ -502,16 +503,16 @@ router.post('/ops/students/:id/photo', photoUpload.single('photo'), handle(async
   if (!req.file) throw new HttpError(400, 'Choose a photo.');
   const before = await studentProfile(id);
   const name = await savePhoto(req.file);
-  await db.run('UPDATE users SET photo = ? WHERE id = ?', [name, id]);
-  if (before.photo) await db.run('DELETE FROM files WHERE name = ?', [before.photo]);
+  await db.run(`UPDATE users SET photo = ? WHERE id IN (SELECT id FROM users) AND (id = ?)`, [name, id]);
+  if (before.photo) await db.run(`DELETE FROM files WHERE workspace_id = ${workspaceId()} AND (name = ?)`, [before.photo]);
   await logActivity(actor(req).id, 'PHOTO_SET', 'student', before.id_card_no);
   res.json(await counterCard(id));
 }));
 router.delete('/ops/students/:id/photo', handle(async (req, res) => {
   const id = parse(zId, req.params.id);
   const before = await studentProfile(id);
-  await db.run('UPDATE users SET photo = NULL WHERE id = ?', [id]);
-  if (before.photo) await db.run('DELETE FROM files WHERE name = ?', [before.photo]);
+  await db.run(`UPDATE users SET photo = NULL WHERE id IN (SELECT id FROM users) AND (id = ?)`, [id]);
+  if (before.photo) await db.run(`DELETE FROM files WHERE workspace_id = ${workspaceId()} AND (name = ?)`, [before.photo]);
   await logActivity(actor(req).id, 'PHOTO_REMOVED', 'student', before.id_card_no);
   res.json(await counterCard(id));
 }));
@@ -538,8 +539,8 @@ router.post('/ops/complaints/:id/update', handle(async (req, res) => {
     const c = await complaintDetail(id);
     if (!b.message && (!b.status || b.status === c.status)) throw new HttpError(400, 'Write a reply or change the status.');
     const at = nowIso();
-    await db.run('INSERT INTO complaint_updates (complaint_id, by_user, status, message, at) VALUES (?,?,?,?,?)', [id, actor(req).id, b.status && b.status !== c.status ? b.status : null, b.message || null, at]);
-    await db.run('UPDATE complaints SET status = COALESCE(?, status), updated_at = ? WHERE id = ?', [b.status ?? null, at, id]);
+    await db.run(`INSERT INTO complaint_updates (workspace_id, complaint_id, by_user, status, message, at) VALUES (${workspaceId()}, ?,?,?,?,?)`, [id, actor(req).id, b.status && b.status !== c.status ? b.status : null, b.message || null, at]);
+    await db.run(`UPDATE complaints SET status = COALESCE(?, status), updated_at = ? WHERE workspace_id = ${workspaceId()} AND (id = ?)`, [b.status ?? null, at, id]);
     await notify(c.student_id, b.status === 'RESOLVED' ? 'Complaint resolved' : 'Reply on your complaint', b.message || `Status: ${(b.status ?? c.status).replace('_', ' ').toLowerCase()}`);
     await logActivity(actor(req).id, 'COMPLAINT_UPDATED', 'complaint', id, `${b.status ?? ''} ${b.message}`.trim());
   });

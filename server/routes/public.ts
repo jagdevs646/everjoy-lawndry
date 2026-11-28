@@ -1,3 +1,4 @@
+import { workspaceId } from '../workspace-context.js';
 import crypto from 'node:crypto';
 import { Request, Response, Router } from 'express';
 import bcrypt from 'bcryptjs';
@@ -31,6 +32,7 @@ const ALREADY_REGISTERED = 'This ID card no. is already registered. Sign in inst
 router.get('/public/info', handle(async (_req, res) => {
   const s = await getSettings();
   res.json({
+    campuses: await db.all("SELECT id, name, code FROM workspaces WHERE kind='CAMPUS' ORDER BY id"),
     hostels: await db.all('SELECT id, name FROM hostels WHERE active = 1 ORDER BY name'),
     max_kg_per_order: s.max_kg_per_order,
     counter_hours: s.counter_hours,
@@ -117,7 +119,7 @@ router.post('/auth/claim', handle(async (req, res) => {
   const matches = claimCodeMatches(b.code, st?.claim_hash ?? '0'.repeat(64));
   if (!matches || !st || !st.claim_expires_at || st.claim_expires_at < nowIso()) throw new HttpError(400, claimError);
   const ticket = crypto.randomBytes(32).toString('hex');
-  const updated = await db.run('UPDATE students SET claim_ticket_hash = ?, claim_ticket_until = ? WHERE user_id = ? AND claimable = 1 AND claim_hash = ?',
+  const updated = await db.run(`UPDATE students SET claim_ticket_hash = ?, claim_ticket_until = ? WHERE workspace_id = ${workspaceId()} AND (user_id = ? AND claimable = 1 AND claim_hash = ?)`,
     [ticketDigest(ticket), new Date(Date.now() + 12 * 60000).toISOString(), st.user_id, st.claim_hash]);
   if (!updated.changes) throw new HttpError(400, claimError);
   res.json({ ticket });
@@ -200,9 +202,9 @@ async function createStudent(d: NewStudent, emailVerified: boolean) {
   if (await db.get('SELECT 1 AS ok FROM users WHERE login_id = ?', [d.idCardNo])) throw new HttpError(409, ALREADY_REGISTERED);
   try {
     return await db.tx(async () => {
-      const userId = await insertId(`INSERT INTO users (role, login_id, name, mobile, password_hash, created_at) VALUES ('STUDENT',?,?,?,?,?)`,
+      const userId = await insertId(`INSERT INTO users (workspace_id, role, login_id, name, mobile, password_hash, created_at) VALUES (${workspaceId()}, 'STUDENT',?,?,?,?,?)`,
         [d.idCardNo, d.name, d.mobile, d.passwordHash, nowIso()]);
-      await db.run('INSERT INTO students (user_id, id_card_no, hostel_id, room_no, email, email_verified_at) VALUES (?,?,?,?,?,?)',
+      await db.run(`INSERT INTO students (workspace_id, user_id, id_card_no, hostel_id, room_no, email, email_verified_at) VALUES (${workspaceId()}, ?,?,?,?,?,?)`,
         [userId, d.idCardNo, d.hostelId, d.roomNo, d.email || null, emailVerified ? nowIso() : null]);
       await logActivity(userId, 'STUDENT_SIGNUP', 'student', d.idCardNo, `${d.name} · room ${d.roomNo}`);
       return userId;
@@ -223,10 +225,10 @@ async function claimAccount(userId: number, passwordHash: string, idCardNo: stri
     if (ticketHash && (!st || st.claim_ticket_hash !== ticketHash || st.claim_ticket_until < nowIso() || st.claim_expires_at < nowIso())) throw new HttpError(400, claimError);
     if (expectedCodeHash && st?.claim_hash !== expectedCodeHash) throw new HttpError(400, claimError);
     if (!st?.claimable) throw new HttpError(409, 'This account is already set up. Sign in instead, or ask the counter to reset your password.');
-    await db.run('UPDATE users SET password_hash = ?, password_expires_at = NULL, token_version = token_version + 1 WHERE id = ?', [passwordHash, userId]);
+    await db.run(`UPDATE users SET password_hash = ?, password_expires_at = NULL, token_version = token_version + 1 WHERE id IN (SELECT id FROM users) AND (id = ?)`, [passwordHash, userId]);
     const profile = ticketHash ? await studentProfile(userId) : null;
     const incomplete = profile && (!profile.mobile || !profile.photo || (!profile.email && await studentOtpOn()));
-    await db.run(`UPDATE students SET claimed_at = ?, complete_profile = ?, claim_ticket_hash = NULL, claim_ticket_until = NULL, claimable = 0, claim_hash = NULL, claim_expires_at = NULL${emailVerified ? ', email_verified_at = ?' : ''} WHERE user_id = ?`, [nowIso(), incomplete ? 1 : 0, ...(emailVerified ? [nowIso()] : []), userId]);
+    await db.run(`UPDATE students SET claimed_at = ?, complete_profile = ?, claim_ticket_hash = NULL, claim_ticket_until = NULL, claimable = 0, claim_hash = NULL, claim_expires_at = NULL${emailVerified ? ', email_verified_at = ?' : ''} WHERE workspace_id = ${workspaceId()} AND (user_id = ?)`, [nowIso(), incomplete ? 1 : 0, ...(emailVerified ? [nowIso()] : []), userId]);
     await logActivity(userId, 'STUDENT_CLAIMED', 'student', idCardNo, emailVerified ? 'Set up with a code from the university email' : 'Set up with the office claim code');
     return (await db.get<{ token_version: number }>('SELECT token_version FROM users WHERE id = ?', [userId]))!.token_version;
   });
@@ -265,7 +267,7 @@ router.post('/auth/otp', handle(async (req, res) => {
     if (!b.newPassword) throw new HttpError(400, 'Choose a new password.');
     const hash = await bcrypt.hash(b.newPassword, 10);
     const version = await db.tx(async () => {
-      await db.run('UPDATE users SET password_hash = ?, must_change_password = 0, password_expires_at = NULL, token_version = token_version + 1 WHERE id = ?', [hash, u.id]);
+      await db.run(`UPDATE users SET password_hash = ?, must_change_password = 0, password_expires_at = NULL, token_version = token_version + 1 WHERE id IN (SELECT id FROM users) AND (id = ?)`, [hash, u.id]);
       await logActivity(u.id, 'PASSWORD_RESET_BY_EMAIL', 'student', u.login_id);
       return (await db.get<{ token_version: number }>('SELECT token_version FROM users WHERE id = ?', [u.id]))!.token_version;
     });
@@ -274,7 +276,7 @@ router.post('/auth/otp', handle(async (req, res) => {
   if (c.purpose === 'EMAIL') {
     const email = String((c.payload as { email: string }).email);
     if (await db.get('SELECT 1 AS ok FROM students WHERE lower(email) = ? AND user_id != ?', [email, u.id])) throw new HttpError(409, 'This email is already used by another account.');
-    const r = await db.run('UPDATE students SET email = ?, email_verified_at = ? WHERE user_id = ? AND email IS NULL', [email, nowIso(), u.id]);
+    const r = await db.run(`UPDATE students SET email = ?, email_verified_at = ? WHERE workspace_id = ${workspaceId()} AND (user_id = ? AND email IS NULL)`, [email, nowIso(), u.id]);
     if (r.changes !== 1) throw new HttpError(409, 'An email is already on your account. Ask at the counter to change it.');
     await logActivity(u.id, 'EMAIL_ADDED', 'student', u.login_id, email);
     return signedIn(req, res, u.id, u.token_version, { trust: true });
@@ -284,7 +286,7 @@ router.post('/auth/otp', handle(async (req, res) => {
     return signedIn(req, res, u.id, version, { trust: true, extra: { claimed: true } });
   }
   // LOGIN: confirming the code also confirms the email address.
-  await db.run('UPDATE students SET email_verified_at = COALESCE(email_verified_at, ?) WHERE user_id = ?', [nowIso(), u.id]);
+  await db.run(`UPDATE students SET email_verified_at = COALESCE(email_verified_at, ?) WHERE workspace_id = ${workspaceId()} AND (user_id = ?)`, [nowIso(), u.id]);
   await signedIn(req, res, u.id, u.token_version, { trust: true });
 }));
 
@@ -297,7 +299,7 @@ router.post('/auth/otp/resend', handle(async (req, res) => {
 /** Sign out. The session token is cancelled on the server too, so a copied token stops working (this signs the account out everywhere). */
 router.post('/auth/logout', handle(async (req, res) => {
   const user = (req as AuthedRequest).user;
-  if (user) await db.run('UPDATE users SET token_version = token_version + 1 WHERE id = ?', [user.id]);
+  if (user) await db.run(`UPDATE users SET token_version = token_version + 1 WHERE id IN (SELECT id FROM users) AND (id = ?)`, [user.id]);
   clearSessionCookie(res);
   res.status(204).end();
 }));
@@ -320,7 +322,7 @@ router.post('/auth/password', handle(async (req, res) => {
     const u = (await db.get<{ password_hash: string; token_version: number }>('SELECT password_hash, token_version FROM users WHERE id = ?', [user.id]))!;
     if (!(await bcrypt.compare(b.current, u.password_hash))) throw new HttpError(400, 'Current password is wrong.');
     if (b.current === b.next) throw new HttpError(400, 'Choose a new password that is different from the current one.');
-    await db.run('UPDATE users SET password_hash = ?, must_change_password = 0, password_expires_at = NULL, token_version = token_version + 1 WHERE id = ?', [await bcrypt.hash(b.next, 10), user.id]);
+    await db.run(`UPDATE users SET password_hash = ?, must_change_password = 0, password_expires_at = NULL, token_version = token_version + 1 WHERE id IN (SELECT id FROM users) AND (id = ?)`, [await bcrypt.hash(b.next, 10), user.id]);
     await logActivity(user.id, 'PASSWORD_CHANGED', 'user', user.login_id);
     return u.token_version + 1;
   });
@@ -340,6 +342,6 @@ router.get('/notifications', handle(async (req, res) => {
 router.post('/notifications/read', handle(async (req, res) => {
   const user = (req as AuthedRequest).user;
   if (!user) throw new HttpError(401, 'Please sign in.');
-  await db.run('UPDATE notifications SET read_at = ? WHERE user_id = ? AND read_at IS NULL', [nowIso(), user.id]);
+  await db.run(`UPDATE notifications SET read_at = ? WHERE workspace_id = ${workspaceId()} AND (user_id = ? AND read_at IS NULL)`, [nowIso(), user.id]);
   res.status(204).end();
 }));

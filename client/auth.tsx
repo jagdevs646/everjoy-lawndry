@@ -1,10 +1,10 @@
 import { FormEvent, useEffect, useState } from 'react';
 import { api, ApiError, Student, Hostel, OtpStart, SignedIn, User } from './api';
 import { go, shrinkPhoto, toast, useFormAction, useLoad, useRoute } from './lib';
-import { builtInServer, canChangeServer, isApp, probeServer, serverAddress, setServer } from './platform';
+import { builtInServer, canChangeServer, isApp, probeServer, selectedWorkspace, selectWorkspace, serverAddress, setServer } from './platform';
 import { Brand, Button, ErrorNote, Field, Icon, Sheet } from './ui';
 
-type Info = { hostels: Hostel[]; max_kg_per_order: number; counter_hours: string; email_codes?: boolean; email_domain?: string };
+type Info = { campuses?: {id:number;name:string}[]; hostels: Hostel[]; max_kg_per_order: number; counter_hours: string; email_codes?: boolean; email_domain?: string };
 
 /**
  * "Check your email": the 6-digit code the server sent to the student's university email.
@@ -59,8 +59,10 @@ export function OtpStep({ start, onDone, onBack }: { start: OtpStart; onDone: (r
 
 export function PublicApp({ onSignedIn }: { onSignedIn: (u: User) => void }) {
   const [page] = useRoute();
+  const [campusQuestion, setCampusQuestion] = useState(false);
+  const [campus, setCampus] = useState(selectedWorkspace);
   const [serverRev, setServerRev] = useState(0);   // bump to reload after the app's server address changes
-  const info = useLoad(() => api<Info>('/public/info'), [serverRev]);
+  const info = useLoad(() => api<Info>('/public/info'), [serverRev,campus]);
   return (
     <div className="public">
       <aside className="public-art" aria-hidden="true">
@@ -77,17 +79,21 @@ export function PublicApp({ onSignedIn }: { onSignedIn: (u: User) => void }) {
       <main className="public-main">
         <div className="public-brand-mobile"><Brand /></div>
         {isApp && info.error && !info.data && <div className="server-problem"><ErrorNote error={info.error} retry={info.reload} /></div>}
+        {(page === 'register' || page === 'claim' || campusQuestion) && (info.data?.campuses?.length ?? 0) > 1 &&
+          <Field label="Which university?"><select value={campus || info.data?.campuses?.[0]?.id} onChange={e => { selectWorkspace(e.target.value); setCampus(e.target.value); }}>
+            {info.data?.campuses?.map(w => <option key={w.id} value={w.id}>{w.name}</option>)}
+          </select></Field>}
         {page === 'register'
-          ? <Register info={info.data} onSignedIn={onSignedIn} />
-          : page === 'claim' ? <Claim onSignedIn={onSignedIn} />
-          : <SignIn onSignedIn={onSignedIn} counterHours={info.data?.counter_hours} />}
+          ? <Register key={campus} info={info.data} onSignedIn={onSignedIn} />
+          : page === 'claim' ? <Claim key={campus} onSignedIn={onSignedIn} />
+          : <SignIn onChooseCampus={() => { setCampusQuestion(true); const id = String(info.data?.campuses?.[0]?.id ?? 1); selectWorkspace(id); setCampus(id); }} onSignedIn={onSignedIn} counterHours={info.data?.counter_hours} />}
         {isApp && canChangeServer && <ServerLine onChanged={() => setServerRev(r => r + 1)} highlight={!!info.error && !info.data} />}
       </main>
     </div>
   );
 }
 
-function SignIn({ onSignedIn, counterHours }: { onSignedIn: (u: User) => void; counterHours?: string }) {
+function SignIn({ onSignedIn, counterHours, onChooseCampus }: { onChooseCampus: () => void; onSignedIn: (u: User) => void; counterHours?: string }) {
   const [loginId, setLoginId] = useState('');
   const [password, setPassword] = useState('');
   const [otp, setOtp] = useState<OtpStart | null>(null);
@@ -95,7 +101,7 @@ function SignIn({ onSignedIn, counterHours }: { onSignedIn: (u: User) => void; c
   const { busy, error, submit: send } = useFormAction();
   const submit = async (e: FormEvent) => {
     e.preventDefault();
-    const r = await send(() => api<SignedIn | OtpStart>('/auth/login', { body: { loginId, password } }));
+    const r = await send(() => api<SignedIn | OtpStart>('/auth/login', { body: { loginId, password } }).catch((e: ApiError) => { if (e.details?.code === 'CHOOSE_CAMPUS') onChooseCampus(); throw e; }));
     if (!r) return;
     if ('otp_required' in r) { setOtp(r); return; }
     onSignedIn(r.user);

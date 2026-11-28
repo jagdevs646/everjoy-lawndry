@@ -1,5 +1,6 @@
 import { FormEvent, KeyboardEvent, useEffect, useRef, useState } from 'react';
 import { Announcement, api, ApiError, Order, Service, Student, User } from './api';
+import { selectedWorkspace, selectWorkspace } from './platform';
 import { ChangePassword } from './auth';
 import { go, kg, plural, requestId, rupees, toast, useAction, useFormAction, useLoad, useRoute, useScrollTop, when } from './lib';
 import { CardInput, ComplaintsBoard, CounterStudent, HandOver, OpsSettings, OrderSheet, serviceLine, StudentFacts, StudentLine, StudentSheet } from './ops';
@@ -13,6 +14,24 @@ type Summary = {
 };
 
 export function StaffApp({ user, onSignOut, onUser, onAdmin }: { user: User; onSignOut: () => void; onUser: (u: User) => void; onAdmin?: () => void }) {
+  const [location, setLocation] = useState(selectedWorkspace);
+  const places = useLoad(() => api<{rows: {id:number; name:string}[]}>('/access/workspaces'), []);
+  return <CounterWorkspace key={location} {...{user,onSignOut,onUser,onAdmin}} locationPicker={places.data && places.data.rows.length > 1 ? (
+    <label className="counter-location">Working at
+      <select value={location || places.data.rows[0].id} onChange={e => {
+        selectWorkspace(e.target.value);
+        setLocation(e.target.value);
+        window.location.hash = '/orders';
+      }}>
+        {places.data.rows.map(w => <option value={w.id} key={w.id}>{w.name}</option>)}
+      </select>
+    </label>
+  ) : null} />;
+}
+
+function CounterWorkspace({ user, onSignOut, onUser, onAdmin, locationPicker }: {
+  user: User; onSignOut: () => void; onUser: (u: User) => void; onAdmin?: () => void; locationPicker: React.ReactNode;
+}) {
   const parts = useRoute();
   const page = ['pickup', 'orders', 'students', 'issues'].includes(parts[0]) ? parts[0] : 'counter';
   const sum = useLoad(() => api<Summary>('/ops/summary'), [], { every: 30_000 });
@@ -38,6 +57,7 @@ export function StaffApp({ user, onSignOut, onUser, onAdmin }: { user: User; onS
         <button className="sf-user" onClick={() => setMenu(true)} aria-label="Account menu"><span className="avatar">{user.name.split(' ').map(x => x[0]).slice(0, 2).join('')}</span></button>
       </header>
       <main className="sf-main">
+        {locationPicker}
         {page === 'counter' && <Counter settings={s?.settings} services={s?.services ?? []} onCreated={refresh} openOrder={setOrderId} openStudent={setStudentId} pending={s?.pending_students ?? 0} notices={s?.announcements ?? []} />}
         {page === 'pickup' && <Pickup settings={s?.settings} onDone={refresh} openOrder={setOrderId} isAdmin={isAdmin} />}
         {page === 'orders' && <Orders summary={s} onChanged={refresh} openOrder={setOrderId} />}

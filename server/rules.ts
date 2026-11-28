@@ -1,3 +1,5 @@
+import { assertOrderPrefix } from './workspaces.js';
+import { currentWorkspace, inWorkspace, outsideWorkspace, workspaceId, type Workspace } from './workspace-context.js';
 import crypto from 'node:crypto';
 import { z } from 'zod';
 import { db, insertId, logActivity, nextCounter, notify } from './db.js';
@@ -135,7 +137,7 @@ export function readyTime(s: Settings, express: boolean, now = new Date()) {
 }
 
 export async function getSettings(): Promise<Settings> {
-  const rows = await db.all<{ key: string; value: string }>('SELECT key, value FROM settings');
+  const rows = await db.all<{ key: string; value: string }>('SELECT key, value FROM workspace_settings WHERE workspace_id = ?', [workspaceId()]);
   const stored = Object.fromEntries(rows.map(r => [r.key, JSON.parse(r.value)]));
   // Older installs stored over_limit_action; BLOCK meant "no paid extra".
   if (stored.allow_paid_extra === undefined && stored.over_limit_action) stored.allow_paid_extra = stored.over_limit_action === 'CHARGE';
@@ -151,15 +153,17 @@ export async function saveSettings(actorId: number, input: unknown): Promise<Set
     const before = await getSettings();
     const next = parse(settingsSchema, { ...before, ...(input as object) });
     if (next.semester_start && next.semester_end && next.semester_start > next.semester_end) throw new HttpError(400, 'The semester start must be before its end.');
+    if (JSON.stringify(before.order_no_format) !== JSON.stringify(next.order_no_format))
+      await assertOrderPrefix(workspaceId(), next.order_no_format.prefix, next.order_no_format.suffix);
     const lookAlike = next.card_series.find(x => cardLooksLikeOrderNo(x, next.order_no_format));
     if (lookAlike) throw new HttpError(400, `Card series ${seriesLabel(lookAlike)} looks like your order numbers (${formatOrderNo(next.order_no_format, next.order_no_format.start)}). Use other letters or signs for cards, so a card is never mixed up with an order.`);
     const changed = (Object.keys(next) as (keyof Settings)[]).filter(k => JSON.stringify(next[k]) !== JSON.stringify(before[k]));
     for (const k of changed) {
-      await db.run('INSERT INTO settings (key, value, updated_at, updated_by) VALUES (?,?,?,?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at, updated_by = excluded.updated_by',
-        [k, JSON.stringify(next[k]), nowIso(), actorId]);
+      await db.run('INSERT INTO workspace_settings (workspace_id, key, value, updated_at, updated_by) VALUES (?,?,?,?,?) ON CONFLICT(workspace_id,key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at, updated_by = excluded.updated_by',
+        [workspaceId(), k, JSON.stringify(next[k]), nowIso(), actorId]);
     }
     // Switching drop-off confirmation off: orders waiting for a code now count as received.
-    if (before.sign_dropoff && !next.sign_dropoff) await db.run(`UPDATE orders SET dropoff_needed = 0 WHERE ${awaitingSql()}`);
+    if (before.sign_dropoff && !next.sign_dropoff) await db.run(`UPDATE orders SET dropoff_needed = 0 WHERE workspace_id = ${workspaceId()} AND (${awaitingSql()})`);
     const show = (v: unknown) => (typeof v === 'object' && v !== null ? JSON.stringify(v) : String(v));
     if (changed.length) await logActivity(actorId, 'SETTINGS_CHANGED', 'settings', null, changed.map(k => `${k}: ${show(before[k])} → ${show(next[k])}`).join('; '));
     return next;
@@ -389,7 +393,7 @@ async function nextOrderNo(f: OrderNoFormat) {
   const name = orderCounter(f, day);
   for (let i = 0; i < 10000; i++) {
     let n = await nextCounter(name, f.start);
-    if (n < f.start) { await db.run('UPDATE counters SET value = ? WHERE name = ?', [f.start, name]); n = f.start; }
+    if (n < f.start) { await db.run('UPDATE workspace_counters SET value = ? WHERE workspace_id = ? AND name = ?', [f.start, workspaceId(), name]); n = f.start; }
     const no = formatOrderNo(f, n, day);
     if (!(await db.get('SELECT id FROM orders WHERE order_key = ?', [codeKey(no)]))) return no;
   }
@@ -399,7 +403,7 @@ async function nextOrderNo(f: OrderNoFormat) {
 /** What the next order no. will be, without using it up (for the admin's screen). */
 export async function peekOrderNo(f: OrderNoFormat) {
   const day = dayKey();
-  const row = await db.get<{ value: number }>('SELECT value FROM counters WHERE name = ?', [orderCounter(f, day)]);
+  const row = await db.get<{ value: number }>('SELECT value FROM workspace_counters WHERE workspace_id = ? AND name = ?', [workspaceId(), orderCounter(f, day)]);
   let n = row ? Math.max(Number(row.value) + 1, f.start) : f.start;
   for (let i = 0; i < 1000 && (await db.get('SELECT id FROM orders WHERE order_key = ?', [codeKey(formatOrderNo(f, n, day))])); i++) n++;
   return { no: formatOrderNo(f, n, day), n };
@@ -492,6 +496,7 @@ export type PriceSnapshot = { hosteler: boolean; rate: number | null; unit: 'KG'
 export async function quote(raw: OrderInput, excludeOrderId = 0, snapshot?: PriceSnapshot) {
   const input = orderInput.parse(raw);
   const s = await getSettings();
+  if (currentWorkspace().status === 'PAUSED') throw new HttpError(409, 'This workspace is paused for new orders.');
   const student = await studentForOrder(input.studentId);
   if (student.status === 'PENDING') throw new HttpError(409, `${student.name}'s registration is not approved yet. Verify the ID card and approve first.`);
   if (!student.active) throw new HttpError(409, `${student.name}'s account is switched off (removed from the hostel list). The admin can restore it under Students → Left hostel.`);
@@ -601,10 +606,10 @@ export async function createOrder(actorId: number, input: OrderInput, requestId?
     const at = nowIso();
     const token = crypto.randomBytes(16).toString('base64url');
     const note = String(orderInput.parse(input).note || '') || null;
-    const id = await insertId(`INSERT INTO orders (order_no, student_id, hostel_name, room_no, mobile, weight_kg, clothes_count, service, note,
+    const id = await insertId(`INSERT INTO orders (workspace_id, order_no, student_id, hostel_name, room_no, mobile, weight_kg, clothes_count, service, note,
         within_kg, extra_kg, amount, payment_status, qr_token, request_id, received_by, received_at, day_key, month_key, expected_at, updated_at,
         service_id, service_name, unit, rate, charge_note, plan_hosteler, tag_no, order_key, tag_key, dropoff_needed)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, [
+      VALUES (${workspaceId()}, ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, [
       no, q.student.id, q.student.hostel_name, q.student.room_no, q.student.mobile, q.weight_kg, q.clothes_count, q.express ? 'EXPRESS' : 'REGULAR', note,
       q.within_kg, q.extra_kg, q.amount, q.amount > 0 ? 'DUE' : 'NONE', token, requestId ?? null, actorId, at, dayKey(), monthKey(), q.expected_at, at,
       q.service.id, q.service.name, q.service.unit, q.service.rate, q.charge_note, q.plan.hosteler ? 1 : 0, q.tag_no, codeKey(no), q.tag_no ? codeKey(q.tag_no) : null,
@@ -623,7 +628,7 @@ export async function createOrder(actorId: number, input: OrderInput, requestId?
 }
 
 export async function addEvent(orderId: number, type: string, note: string | null, byUser: number | null) {
-  await db.run('INSERT INTO order_events (order_id, type, note, by_user, at) VALUES (?,?,?,?,?)', [orderId, type, note, byUser, nowIso()]);
+  await db.run(`INSERT INTO order_events (workspace_id, order_id, type, note, by_user, at) VALUES (${workspaceId()}, ?,?,?,?,?)`, [orderId, type, note, byUser, nowIso()]);
 }
 
 type OrderRow = { id: number; order_no: string; student_id: number; status: string; payment_status: string; amount: number; clothes_count: number; ready_at: string | null };
@@ -649,7 +654,7 @@ export async function setStatus(actorId: number, ids: number[], status: 'RECEIVE
       }
       if (status === 'RECEIVED' && !opts.allowBackToReceived) throw new HttpError(403, `${o.order_no} is already ${o.status.toLowerCase()}. Only the admin can move it back to received.`);
       const now = nowIso();
-      await db.run('UPDATE orders SET status = ?, ready_at = ?, updated_at = ? WHERE id = ?', [status, status === 'READY' ? now : o.ready_at, now, id]);
+      await db.run(`UPDATE orders SET status = ?, ready_at = ?, updated_at = ? WHERE workspace_id = ${workspaceId()} AND (id = ?)`, [status, status === 'READY' ? now : o.ready_at, now, id]);
       await addEvent(id, status, null, actorId);
       if (status === 'READY') await notify(o.student_id, `${o.order_no} is ready for pickup`, `Show your slip QR at the counter.${o.payment_status === 'DUE' ? ` Please pay ₹${o.amount} before pickup.` : ''}`, id);
       changed++;
@@ -664,7 +669,7 @@ export async function recordPayment(actorId: number, id: number, method: 'CASH' 
     await db.lockRow('orders', id);
     const o = await getOrderRow(id);
     if (o.payment_status !== 'DUE') throw new HttpError(409, `${o.order_no} has no payment due.`);
-    await db.run('UPDATE orders SET payment_status = ?, paid_method = ?, paid_ref = ?, paid_at = ?, paid_by = ?, updated_at = ? WHERE id = ?',
+    await db.run(`UPDATE orders SET payment_status = ?, paid_method = ?, paid_ref = ?, paid_at = ?, paid_by = ?, updated_at = ? WHERE workspace_id = ${workspaceId()} AND (id = ?)`,
       [method === 'WAIVED' ? 'WAIVED' : 'PAID', method, ref || null, nowIso(), actorId, nowIso(), id]);
     await addEvent(id, method === 'WAIVED' ? 'PAYMENT_WAIVED' : 'PAID', method === 'WAIVED' ? ref || null : `₹${o.amount} via ${method}${ref ? `, ${ref}` : ''}`, actorId);
     await notify(o.student_id, method === 'WAIVED' ? `Payment waived for ${o.order_no}` : `Payment received for ${o.order_no}`, method === 'WAIVED' ? 'No payment is needed for this order.' : `₹${o.amount} received via ${method}. Thank you!`, id);
@@ -694,14 +699,14 @@ export async function deliverOrder(actorId: number, id: number, returnedCount: n
     if (s.sign_pickup && !proof) throw new HttpError(409, 'Ask the student for the code on their phone before you hand the clothes over.', { code: 'SIGN_NEEDED' });
     const at = nowIso();
     if (o.status !== 'READY') await addEvent(id, 'READY', 'Marked ready at handover', actorId);
-    await db.run(`UPDATE orders SET status = 'DELIVERED', ready_at = COALESCE(ready_at, ?), delivered_by = ?, delivered_at = ?, returned_count = ?, updated_at = ? WHERE id = ?`,
+    await db.run(`UPDATE orders SET status = 'DELIVERED', ready_at = COALESCE(ready_at, ?), delivered_by = ?, delivered_at = ?, returned_count = ?, updated_at = ? WHERE workspace_id = ${workspaceId()} AND (id = ?)`,
       [at, actorId, at, returnedCount, at, id]);
     await addEvent(id, 'DELIVERED', `${returnedCount} of ${o.clothes_count} clothes returned${note ? `, ${note}` : ''}`, actorId);
     if (proof) {
       const so = await orderForSign(id);
       await recordSignoff({ o: so, kind: 'PICKUP', proof, staffId: actorId, at, statement: statementFor('PICKUP', so, at, returnedCount, note.trim()), origin, returned: returnedCount });
     }
-    await db.run('DELETE FROM confirm_requests WHERE order_id = ?', [id]);
+    await db.run(`DELETE FROM confirm_requests WHERE workspace_id = ${workspaceId()} AND (order_id = ?)`, [id]);
     await notify(o.student_id, `${o.order_no} handed over`, `${returnedCount} clothes returned. ${returnedCount !== o.clothes_count ? 'Count differed from drop-off — raise a complaint if something is missing.' : 'Thank you for using Everjoy Lawndry!'}`, id);
     await logActivity(actorId, 'ORDER_DELIVERED', 'order', o.order_no, `${returnedCount}/${o.clothes_count} clothes${note ? `, ${note}` : ''}`);
   });
@@ -712,8 +717,8 @@ export async function cancelOrder(actorId: number, id: number, reason: string) {
     await db.lockRow('orders', id);
     const o = await getOrderRow(id);
     if (!OPEN.includes(o.status)) throw new HttpError(409, `${o.order_no} is ${o.status.toLowerCase()} and cannot be cancelled.`);
-    await db.run(`UPDATE orders SET status = 'CANCELLED', cancel_reason = ?, payment_status = CASE WHEN payment_status = 'DUE' THEN 'NONE' ELSE payment_status END, updated_at = ? WHERE id = ?`, [reason, nowIso(), id]);
-    await db.run('DELETE FROM confirm_requests WHERE order_id = ?', [id]);
+    await db.run(`UPDATE orders SET status = 'CANCELLED', cancel_reason = ?, payment_status = CASE WHEN payment_status = 'DUE' THEN 'NONE' ELSE payment_status END, updated_at = ? WHERE workspace_id = ${workspaceId()} AND (id = ?)`, [reason, nowIso(), id]);
+    await db.run(`DELETE FROM confirm_requests WHERE workspace_id = ${workspaceId()} AND (order_id = ?)`, [id]);
     await addEvent(id, 'CANCELLED', reason, actorId);
     await notify(o.student_id, `${o.order_no} cancelled`, reason, id);
     await logActivity(actorId, 'ORDER_CANCELLED', 'order', o.order_no, reason);
@@ -735,10 +740,10 @@ export async function correctOrder(actorId: number, id: number, weightKg: number
     // Orders from before plans existed were all hostel orders.
     const snapshot: PriceSnapshot = { hosteler: o.plan_hosteler === null || o.plan_hosteler === undefined ? true : !!Number(o.plan_hosteler), rate: o.rate ?? null, unit: o.unit ?? null };
     const q = await quote({ studentId: o.student_id, serviceId: o.service_id ?? undefined, weightKg, clothesCount, express: o.service === 'EXPRESS', acceptExtra: true, note: '' }, id, snapshot);
-    await db.run(`UPDATE orders SET weight_kg = ?, clothes_count = ?, within_kg = ?, extra_kg = ?, amount = ?, payment_status = ?, charge_note = ?, updated_at = ? WHERE id = ?`,
+    await db.run(`UPDATE orders SET weight_kg = ?, clothes_count = ?, within_kg = ?, extra_kg = ?, amount = ?, payment_status = ?, charge_note = ?, updated_at = ? WHERE workspace_id = ${workspaceId()} AND (id = ?)`,
       [q.weight_kg, q.clothes_count, q.within_kg, q.extra_kg, q.amount, q.amount > 0 ? (o.payment_status === 'WAIVED' ? 'WAIVED' : 'DUE') : 'NONE', q.charge_note, nowIso(), id]);
     const detail = `${o.clothes_count}→${q.clothes_count} clothes, ${o.weight_kg}→${q.weight_kg} kg, ${reason}`;
-    await db.run('DELETE FROM confirm_requests WHERE order_id = ?', [id]);   // the student would confirm old numbers
+    await db.run(`DELETE FROM confirm_requests WHERE workspace_id = ${workspaceId()} AND (order_id = ?)`, [id]);   // the student would confirm old numbers
     await addEvent(id, 'CORRECTED', detail, actorId);
     // The student confirmed the old count/weight: that confirmation no longer describes this order.
     const ack = (o as unknown as { dropoff_ack: string | null }).dropoff_ack;
@@ -766,7 +771,7 @@ export async function runAutoAdvance(now = new Date()) {
   const toReady = await db.all<{ id: number; order_no: string; student_id: number; payment_status: string; amount: number }>(
     `SELECT id, order_no, student_id, payment_status, amount FROM orders WHERE status IN ('RECEIVED','WASHING') AND expected_at <= ? AND NOT ${awaitingSql()} ORDER BY id LIMIT 500`, [at]);
   for (const o of toReady) {
-    const r = await db.run(`UPDATE orders SET status = 'READY', ready_at = ?, updated_at = ? WHERE id = ? AND status IN ('RECEIVED','WASHING')`, [at, at, o.id]);
+    const r = await db.run(`UPDATE orders SET status = 'READY', ready_at = ?, updated_at = ? WHERE workspace_id = ${workspaceId()} AND (id = ? AND status IN ('RECEIVED','WASHING'))`, [at, at, o.id]);
     if (r.changes !== 1) continue;
     ready++;
     await addEvent(o.id, 'READY', 'Automatic: ready time reached', null);
@@ -775,7 +780,7 @@ export async function runAutoAdvance(now = new Date()) {
   const washingBefore = new Date(now.getTime() - s.auto_washing_hours * 3600_000).toISOString();
   const toWash = await db.all<{ id: number }>(`SELECT id FROM orders WHERE status = 'RECEIVED' AND received_at <= ? AND NOT ${awaitingSql()} ORDER BY id LIMIT 500`, [washingBefore]);
   for (const o of toWash) {
-    const r = await db.run(`UPDATE orders SET status = 'WASHING', updated_at = ? WHERE id = ? AND status = 'RECEIVED'`, [at, o.id]);
+    const r = await db.run(`UPDATE orders SET status = 'WASHING', updated_at = ? WHERE workspace_id = ${workspaceId()} AND (id = ? AND status = 'RECEIVED')`, [at, o.id]);
     if (r.changes !== 1) continue;
     washing++;
     await addEvent(o.id, 'WASHING', 'Automatic', null);
@@ -791,5 +796,8 @@ export function maybeAutoAdvance() {
   if (autoRunning || Date.now() - lastAuto < 60_000) return;
   lastAuto = Date.now();
   autoRunning = true;
-  runAutoAdvance().catch(e => console.error('Automatic status step failed:', (e as Error).message)).finally(() => { autoRunning = false; });
+  outsideWorkspace(async () => {
+    const workspaces = await db.all<Workspace>('SELECT * FROM workspaces ORDER BY id');
+    for (const workspace of workspaces) await inWorkspace(workspace, () => runAutoAdvance());
+  }).catch(e => console.error('Automatic status step failed:', (e as Error).message)).finally(() => { autoRunning = false; });
 }

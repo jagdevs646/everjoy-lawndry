@@ -5,7 +5,7 @@ import { db } from './db.js';
 import { HttpError } from './util.js';
 
 export type Role = 'ADMIN' | 'STAFF' | 'STUDENT';
-export type AuthUser = { id: number; role: Role; name: string; login_id: string; must_change_password: boolean; complete_profile?: boolean; student_status?: string };
+export type AuthUser = { workspace_id: number; id: number; role: Role; name: string; login_id: string; must_change_password: boolean; complete_profile?: boolean; student_status?: string };
 export type AuthedRequest = Request & { user: AuthUser };
 
 /**
@@ -78,7 +78,7 @@ export function appCors(req: Request, res: Response, next: NextFunction) {
     res.setHeader('Access-Control-Allow-Origin', origin);
     res.setHeader('Vary', 'Origin');
     res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, x-ej, x-ej-client, x-ej-device');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, x-ej, x-ej-client, x-ej-device, x-ej-workspace');
     res.setHeader('Access-Control-Expose-Headers', 'Content-Disposition');
     res.setHeader('Access-Control-Max-Age', '86400');
     if (req.method === 'OPTIONS') return res.status(204).end();
@@ -96,12 +96,12 @@ function readCookie(req: Request, name: string) {
 }
 
 export async function loadUser(id: number, version?: number): Promise<AuthUser | null> {
-  const u = await db.get<{ id: number; role: Role; name: string; login_id: string; active: number; must_change_password: number; token_version: number; complete_profile: number; student_status: string | null }>(
-    `SELECT u.id, u.role, u.name, u.login_id, u.active, u.must_change_password, u.token_version, s.complete_profile, s.status AS student_status
+  const u = await db.get<{ workspace_id: number; id: number; role: Role; name: string; login_id: string; active: number; must_change_password: number; token_version: number; complete_profile: number; student_status: string | null }>(
+    `SELECT u.workspace_id, u.id, u.role, u.name, u.login_id, u.active, u.must_change_password, u.token_version, s.complete_profile, s.status AS student_status
     FROM users u LEFT JOIN students s ON s.user_id = u.id WHERE u.id = ?`, [id]);
   if (!u || !u.active) return null;
   if (version !== undefined && version !== u.token_version) return null;  // password changed / reset → old sessions die
-  return { id: u.id, role: u.role, name: u.name, login_id: u.login_id, must_change_password: !!u.must_change_password, ...(u.complete_profile ? { complete_profile: true } : {}), ...(u.student_status ? { student_status: u.student_status } : {}) };
+  return { workspace_id: u.workspace_id, id: u.id, role: u.role, name: u.name, login_id: u.login_id, must_change_password: !!u.must_change_password, ...(u.complete_profile ? { complete_profile: true } : {}), ...(u.student_status ? { student_status: u.student_status } : {}) };
 }
 
 /** Attach req.user when a valid bearer token (app) or session cookie (website) is present. */

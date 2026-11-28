@@ -213,3 +213,6 @@ html[data-theme='staff'] h1 { font-stretch: 85%; font-weight: 800; letter-spacin
 .find-input.upper::placeholder { text-transform: none; }
 
 .row-check.lock { color: var(--warn); }
+
+.counter-location { display:flex; align-items:center; gap:.65rem; padding:.6rem 1rem; border-inline-start:4px solid var(--accent, #987133); font-weight:600; }
+.counter-location select { width:auto; max-width:70%; }
