@@ -24,7 +24,7 @@ jobs:
           npm ci --include=dev
           npx vite build --mode app
           npx cap sync android
-          cd android && bash gradlew assembleDebug assembleDebugAndroidTest
+          cd android && bash gradlew :app:assembleDebug :app:assembleDebugAndroidTest
       - run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm.rules
           sudo udevadm control --reload-rules
@@ -37,5 +37,5 @@ jobs:
             adb reverse tcp:3344 tcp:3344
             nohup npm start -- --demo --port 3344 >/tmp/everjoy-demo.log 2>&1 &
             curl --retry 15 --retry-all-errors --retry-delay 2 -fsS http://localhost:3344/api/health
-            cd android && bash gradlew connectedDebugAndroidTest -Pandroid.testInstrumentationRunnerArguments.class=com.everjoy.lawndry.PasswordLayoutTest
+            cd android && bash gradlew :app:connectedDebugAndroidTest -Pandroid.testInstrumentationRunnerArguments.class=com.everjoy.lawndry.PasswordLayoutTest
             adb logcat -d -s EverjoyLayout:I
