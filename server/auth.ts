@@ -5,7 +5,7 @@ import { db } from './db.js';
 import { HttpError } from './util.js';
 
 export type Role = 'ADMIN' | 'STAFF' | 'STUDENT';
-export type AuthUser = { id: number; role: Role; name: string; login_id: string; must_change_password: boolean; student_status?: string };
+export type AuthUser = { id: number; role: Role; name: string; login_id: string; must_change_password: boolean; complete_profile?: boolean; student_status?: string };
 export type AuthedRequest = Request & { user: AuthUser };
 
 /**
@@ -96,12 +96,12 @@ function readCookie(req: Request, name: string) {
 }
 
 export async function loadUser(id: number, version?: number): Promise<AuthUser | null> {
-  const u = await db.get<{ id: number; role: Role; name: string; login_id: string; active: number; must_change_password: number; token_version: number; student_status: string | null }>(
-    `SELECT u.id, u.role, u.name, u.login_id, u.active, u.must_change_password, u.token_version, s.status AS student_status
+  const u = await db.get<{ id: number; role: Role; name: string; login_id: string; active: number; must_change_password: number; token_version: number; complete_profile: number; student_status: string | null }>(
+    `SELECT u.id, u.role, u.name, u.login_id, u.active, u.must_change_password, u.token_version, s.complete_profile, s.status AS student_status
     FROM users u LEFT JOIN students s ON s.user_id = u.id WHERE u.id = ?`, [id]);
   if (!u || !u.active) return null;
   if (version !== undefined && version !== u.token_version) return null;  // password changed / reset → old sessions die
-  return { id: u.id, role: u.role, name: u.name, login_id: u.login_id, must_change_password: !!u.must_change_password, ...(u.student_status ? { student_status: u.student_status } : {}) };
+  return { id: u.id, role: u.role, name: u.name, login_id: u.login_id, must_change_password: !!u.must_change_password, ...(u.complete_profile ? { complete_profile: true } : {}), ...(u.student_status ? { student_status: u.student_status } : {}) };
 }
 
 /** Attach req.user when a valid bearer token (app) or session cookie (website) is present. */

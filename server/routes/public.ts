@@ -87,7 +87,7 @@ router.post('/auth/login', handle(async (req, res) => {
   const ok = await bcrypt.compare(body.password, u?.password_hash ?? DUMMY_HASH);
   if (!u || !ok) {
     throw new HttpError(401, u?.claimable
-      ? 'Your account was added by the laundry office. Tap "Register with your ID card" to set it up.'
+      ? 'Your account was added by the laundry office. Choose "Have a claim code?" to set it up.'
       : 'Wrong ID / username or password.');
   }
   unhit(ipKey); unhit(accountKey);
@@ -103,6 +103,35 @@ router.post('/auth/login', handle(async (req, res) => {
   await signedIn(req, res, u.id, u.token_version);
 }));
 
+const claimError = 'Check the ID and code, or ask at the counter.';
+const ticketDigest = (ticket: string) => crypto.createHash('sha256').update(ticket).digest('hex');
+
+router.post('/auth/claim', handle(async (req, res) => {
+  const b = parse(z.object({ identifier: z.string().trim().min(1).max(120), code: z.string().max(40) }), req.body);
+  if (limited(`claim-ip:${ip(req)}`, 120, 3600000)) throw new HttpError(429, 'Too many tries. Wait an hour.');
+  const st = await db.get<{ user_id: number; id_card_no: string; claim_hash: string; claim_expires_at: string }>(
+    `SELECT st.user_id, st.id_card_no, st.claim_hash, st.claim_expires_at FROM students st JOIN users u ON u.id = st.user_id
+     WHERE st.claimable = 1 AND st.left_at IS NULL AND u.active = 1 AND (st.id_card_no = ? OR lower(st.email) = ?)`,
+    [normaliseLogin(b.identifier), b.identifier.toLowerCase()]);
+  if (limited(`claim:${st?.id_card_no ?? normaliseLogin(b.identifier)}`, 6, 3600000)) throw new HttpError(429, 'Too many tries. Wait an hour.');
+  const matches = claimCodeMatches(b.code, st?.claim_hash ?? '0'.repeat(64));
+  if (!matches || !st || !st.claim_expires_at || st.claim_expires_at < nowIso()) throw new HttpError(400, claimError);
+  const ticket = crypto.randomBytes(32).toString('hex');
+  const updated = await db.run('UPDATE students SET claim_ticket_hash = ?, claim_ticket_until = ? WHERE user_id = ? AND claimable = 1 AND claim_hash = ?',
+    [ticketDigest(ticket), new Date(Date.now() + 12 * 60000).toISOString(), st.user_id, st.claim_hash]);
+  if (!updated.changes) throw new HttpError(400, claimError);
+  res.json({ ticket });
+}));
+
+router.post('/auth/claim/password', handle(async (req, res) => {
+  const b = parse(z.object({ ticket: z.string().length(64), password: zPassword(6) }), req.body);
+  const hash = ticketDigest(b.ticket);
+  const st = await db.get<{ user_id: number; id_card_no: string }>('SELECT user_id, id_card_no FROM students WHERE claim_ticket_hash = ? AND claim_ticket_until >= ?', [hash, nowIso()]);
+  if (!st) throw new HttpError(400, claimError);
+  const version = await claimAccount(st.user_id, await bcrypt.hash(b.password, 10), st.id_card_no, false, hash);
+  await signedIn(req, res, st.user_id, version, { trust: true, extra: { claimed: true } });
+}));
+
 const zEmail = z.string().trim().toLowerCase().max(120).email('Enter your university email address');
 
 router.post('/auth/signup', handle(async (req, res) => {
@@ -116,6 +145,7 @@ router.post('/auth/signup', handle(async (req, res) => {
     hostelId: z.coerce.number().int().positive('Choose your hostel').max(2147483647),
     roomNo: zRoom,
     password: zPassword(6),
+    selfRegistration: z.boolean().optional(),
     claimCode: z.string().trim().max(40).optional().default(''),
   }), req.body);
   const otp = await studentOtpOn();
@@ -125,6 +155,7 @@ router.post('/auth/signup', handle(async (req, res) => {
   const imported = await db.get<{ user_id: number; mobile: string | null; token_version: number; claim_hash: string | null; claim_expires_at: string | null; email: string | null }>(
     'SELECT st.user_id, u.mobile, u.token_version, st.claim_hash, st.claim_expires_at, st.email FROM students st JOIN users u ON u.id = st.user_id WHERE st.id_card_no = ? AND st.claimable = 1', [b.idCardNo]);
   if (imported) {
+    if (b.selfRegistration) throw new HttpError(409, 'Open “Have a claim code?” to activate your office account.', { code: 'CLAIM_CODE' });
     const claimKey = `claim:${b.idCardNo}`;
     if (overLimit(claimKey, 6)) throw new HttpError(429, 'Too many tries. Wait an hour, or ask at the counter.');
     hit(claimKey, 60 * 60_000);   // every attempt counts, right or wrong
@@ -142,7 +173,7 @@ router.post('/auth/signup', handle(async (req, res) => {
     if (!codeOk || imported.mobile !== b.mobile) {
       throw new HttpError(409, 'This ID card no. was added by the laundry office. Enter your mobile number and the claim code they gave you, or ask at the counter.', { code: 'CLAIM_CODE' });
     }
-    const version = await claimAccount(imported.user_id, await bcrypt.hash(b.password, 10), b.idCardNo, false);
+    const version = await claimAccount(imported.user_id, await bcrypt.hash(b.password, 10), b.idCardNo, false, undefined, imported.claim_hash!);
     return signedIn(req, res, imported.user_id, version, { extra: { claimed: true } });
   }
 
@@ -184,13 +215,18 @@ async function createStudent(d: NewStudent, emailVerified: boolean) {
 }
 
 /** Set the password of an imported account and open it. Returns the new token version. */
-async function claimAccount(userId: number, passwordHash: string, idCardNo: string, emailVerified: boolean) {
+async function claimAccount(userId: number, passwordHash: string, idCardNo: string, emailVerified: boolean, ticketHash?: string, expectedCodeHash?: string) {
   return db.tx(async () => {
     await db.lockRow('users', userId);
-    const st = await db.get<{ claimable: number }>('SELECT claimable FROM students WHERE user_id = ?', [userId]);
+    const st = await db.get<{ claimable: number; claim_ticket_hash: string; claim_ticket_until: string; claim_expires_at: string; claim_hash: string }>(
+      'SELECT st.claimable, st.claim_ticket_hash, st.claim_ticket_until, st.claim_expires_at, st.claim_hash FROM students st JOIN users u ON u.id = st.user_id WHERE u.active = 1 AND st.left_at IS NULL AND st.user_id = ?', [userId]);
+    if (ticketHash && (!st || st.claim_ticket_hash !== ticketHash || st.claim_ticket_until < nowIso() || st.claim_expires_at < nowIso())) throw new HttpError(400, claimError);
+    if (expectedCodeHash && st?.claim_hash !== expectedCodeHash) throw new HttpError(400, claimError);
     if (!st?.claimable) throw new HttpError(409, 'This account is already set up. Sign in instead, or ask the counter to reset your password.');
     await db.run('UPDATE users SET password_hash = ?, password_expires_at = NULL, token_version = token_version + 1 WHERE id = ?', [passwordHash, userId]);
-    await db.run(`UPDATE students SET claimable = 0, claim_hash = NULL, claim_expires_at = NULL${emailVerified ? ', email_verified_at = ?' : ''} WHERE user_id = ?`, emailVerified ? [nowIso(), userId] : [userId]);
+    const profile = ticketHash ? await studentProfile(userId) : null;
+    const incomplete = profile && (!profile.mobile || !profile.photo || (!profile.email && await studentOtpOn()));
+    await db.run(`UPDATE students SET claimed_at = ?, complete_profile = ?, claim_ticket_hash = NULL, claim_ticket_until = NULL, claimable = 0, claim_hash = NULL, claim_expires_at = NULL${emailVerified ? ', email_verified_at = ?' : ''} WHERE user_id = ?`, [nowIso(), incomplete ? 1 : 0, ...(emailVerified ? [nowIso()] : []), userId]);
     await logActivity(userId, 'STUDENT_CLAIMED', 'student', idCardNo, emailVerified ? 'Set up with a code from the university email' : 'Set up with the office claim code');
     return (await db.get<{ token_version: number }>('SELECT token_version FROM users WHERE id = ?', [userId]))!.token_version;
   });

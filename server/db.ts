@@ -447,6 +447,10 @@ export async function migrate() {
     ['users', 'password_expires_at', 'TEXT'],                     // temporary passwords stop working after this
     ['students', 'claim_hash', 'TEXT'],                            // imported account: sha256 of the one-time claim code
     ['students', 'claim_expires_at', 'TEXT'],
+    ['students', 'claim_ticket_hash', 'TEXT'],
+    ['students', 'claim_ticket_until', 'TEXT'],
+    ['students', 'claimed_at', 'TEXT'],
+    ['students', 'complete_profile', 'INTEGER NOT NULL DEFAULT 0'],
     ['users', 'photo', 'TEXT'],                                     // profile photo (files table name)
     ['students', 'email', 'TEXT'],                                  // university email: sign-in codes are sent here
     ['students', 'email_verified_at', 'TEXT'],
@@ -470,6 +474,12 @@ export async function migrate() {
       if (!/duplicate column|already exists/i.test(String((e as Error).message))) throw e;
     }
   }
+
+  // Older office claims already have an audit timestamp. Self-registrations have no claim date.
+  await db.run(`UPDATE students SET claimed_at = (SELECT MIN(a.created_at) FROM activity a
+    WHERE a.action = 'STUDENT_CLAIMED' AND a.actor_id = students.user_id)
+    WHERE claimed_at IS NULL AND claimable = 0 AND user_id IN (SELECT actor_id FROM activity WHERE action = 'STUDENT_CLAIMED')`);
+  await db.driver.script('CREATE UNIQUE INDEX IF NOT EXISTS idx_students_claim_ticket ON students (claim_ticket_hash) WHERE claim_ticket_hash IS NOT NULL');
 
   // Sign-in codes waiting for the student to type them (see otp.ts).
   await db.driver.script(`CREATE TABLE IF NOT EXISTS login_challenges (

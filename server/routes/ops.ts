@@ -85,7 +85,7 @@ async function pickSettings() {
 /* ---------------------------------------------------------------- students */
 
 router.get('/ops/students', handle(async (req, res) => {
-  const q = parse(z.object({ q: z.string().optional(), status: z.enum(['PENDING', 'ACTIVE', 'REJECTED', 'SUSPENDED', 'LEFT']).optional().or(z.literal('')), hostelId: z.coerce.number().int().positive().max(MAX_ID).optional(), plan: z.enum(['EXPIRED', 'VALID', 'UPCOMING', 'WALKIN', '']).optional(), limit: z.coerce.number().int().optional(), offset: z.coerce.number().int().min(0).optional() }), req.query);
+  const q = parse(z.object({ q: z.string().optional(), status: z.enum(['PENDING', 'ACTIVE', 'REJECTED', 'SUSPENDED', 'LEFT', 'UNCLAIMED']).optional().or(z.literal('')), hostelId: z.coerce.number().int().positive().max(MAX_ID).optional(), plan: z.enum(['EXPIRED', 'VALID', 'UPCOMING', 'WALKIN', '']).optional(), limit: z.coerce.number().int().optional(), offset: z.coerce.number().int().min(0).optional() }), req.query);
   res.json(await listStudents({ ...q, status: q.status || undefined }));
 }));
 

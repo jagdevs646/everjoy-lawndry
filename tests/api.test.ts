@@ -5,7 +5,10 @@ import ExcelJS from 'exceljs';
 import { createApp } from '../server/app.js';
 import { outbox } from '../server/mail.js';
 
-const app = await createApp();
+// Keep one listener alive while concurrent Supertest requests share a signed-in agent.
+const app = (await createApp()).listen(0, '127.0.0.1');
+await new Promise<void>(resolve => app.once('listening', resolve));
+afterAll(() => new Promise<void>((resolve, reject) => app.close(error => error ? reject(error) : resolve())));
 type Agent = ReturnType<typeof request.agent>;
 
 /** The 6-digit code in the newest email (to this address, if given). Tests run without a real mail service. */
@@ -1270,5 +1273,59 @@ describe('two-sided register: the student confirms with the code on their phone'
     // Backups carry the evidence.
     const backup = await admin.get('/api/admin/backup');
     if (backup.status === 200 && backup.body?.tables) expect(backup.body.tables.order_signoffs.length).toBeGreaterThan(0);
+  });
+});
+
+describe('office claim registration', () => {
+  const officeStudent = async (id: string, email = '') => {
+    const result = await post(admin, '/api/admin/students', { idCardNo: id, name: 'Office Student', hostelId, roomNo: '102', email });
+    expect(result.status, result.body.error).toBe(201);
+    return result.body.codes[0] as { code: string; expires: string };
+  };
+  const claim = (identifier: string, code: string) => post(request.agent(app), '/api/auth/claim', { identifier, code });
+  it('preserves an issued code on monthly import, accepts email and requires the missing profile details', async () => {
+    const id = 'OFFICE101', email = 'office101@uni.test';
+    const issued = await officeStudent(id, email);
+    const buf = await xlsx([{ 'ID Card No': id, 'Full Name': 'Office Student', Mobile: '9811100101', Hostel: 'Test Hostel', Room: '102' }]);
+    const upload = await admin.post('/api/admin/import/students').set('x-ej', '1').attach('file', buf, 'students.xlsx');
+    expect(upload.body.codes).toEqual([]);
+    const ticket = await claim(email.toUpperCase(), issued.code.toLowerCase().replace('-', ' '));
+    expect(ticket.status, ticket.body.error).toBe(200);
+    const a = request.agent(app);
+    const body = { ticket: ticket.body.ticket, password: 'account-pass' };
+    const saved = await post(a, '/api/auth/claim/password', body);
+    expect(saved.status, saved.body.error).toBe(200);
+    expect(saved.body.user.complete_profile).toBe(true);
+    expect((await a.get('/api/me/home')).status).toBe(403);
+    expect((await post(a, '/api/me/complete-profile', { mobile: '9811100101' })).status).toBe(400);
+    expect((await post(a, '/api/auth/claim/password', body)).status).toBe(400);
+    expect((await claim(id, issued.code)).status).toBe(400);
+    const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==', 'base64');
+    expect((await a.post('/api/me/photo').set('x-ej', '1').attach('photo', png, 'profile.png')).status).toBe(200);
+    expect((await post(a, '/api/me/complete-profile', { mobile: '9811100101' })).status).toBe(200);
+    expect((await a.get('/api/me/home')).status).toBe(200);
+    expect((await post(a, '/api/auth/login', { loginId: id, password: body.password })).body.user.id).toBe(saved.body.user.id);
+  });
+  it('replaces old codes and tickets only on explicit reissue, and rejects expired credentials', async () => {
+    const { db } = await import('../server/db.js');
+    const id = 'OFFICE102';
+    const issued = await officeStudent(id);
+    const { body } = await claim(id, issued.code);
+    const student = (await admin.get('/api/ops/students?status=UNCLAIMED&q=' + id)).body.rows[0];
+    const replacement = await post(admin, '/api/admin/students/reissue', { studentId: student.id });
+    expect(replacement.status).toBe(200);
+    expect((await post(request.agent(app), '/api/auth/claim/password', { ticket: body.ticket, password: 'account-pass' })).status).toBe(400);
+    const old = await claim(id, issued.code);
+    expect(old.status).toBe(400);
+    expect((await claim('UNKNOWN101', issued.code)).body.error).toBe(old.body.error);
+    const next = await claim(id, replacement.body.codes[0].code);
+    expect(next.status).toBe(200);
+    await db.run('UPDATE students SET claim_ticket_until = ?, claim_expires_at = ? WHERE user_id = ?', ['2000-01-01', '2000-01-01', student.id]);
+    expect((await post(request.agent(app), '/api/auth/claim/password', { ticket: next.body.ticket, password: 'account-pass' })).status).toBe(400);
+    expect((await claim(id, replacement.body.codes[0].code)).status).toBe(400);
+  });
+  it('limits an identifier to six attempts', async () => {
+    for (let i = 0; i < 6; i++) expect((await claim('OFFICE103', 'invalid')).status).toBe(400);
+    expect((await claim('OFFICE103', 'invalid')).status).toBe(429);
   });
 });

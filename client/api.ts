@@ -1,7 +1,7 @@
 import { apiUrl, authHeaders, bumpSession, clearExportsFolder, EXPORTS_DIR, getToken, isApp, serverAddress, sessionGeneration, setDeviceToken, setToken } from './platform';
 
 export type Role = 'ADMIN' | 'STAFF' | 'STUDENT';
-export type User = { id: number; role: Role; name: string; login_id: string; must_change_password: boolean; student_status?: string };
+export type User = { id: number; role: Role; name: string; login_id: string; must_change_password: boolean; complete_profile?: boolean; student_status?: string };
 export type OrderStatus = 'RECEIVED' | 'WASHING' | 'READY' | 'DELIVERED' | 'CANCELLED';
 export type Order = {
   id: number; order_no: string; student_id?: number; student_name?: string; id_card_no?: string; hostel_name: string; room_no: string; mobile?: string;
@@ -36,7 +36,7 @@ export type Student = {
   id: number; name: string; mobile: string; login_id: string; active: number; created_at: string; id_card_no: string; hostel_id: number; hostel_name: string;
   room_no: string; status: 'PENDING' | 'ACTIVE' | 'REJECTED' | 'SUSPENDED'; review_note?: string | null; reviewed_at?: string | null; reviewed_by_name?: string | null;
   month_orders?: number; month_kg?: number; open_orders?: number;
-  kind?: 'HOSTELER' | 'WALKIN'; valid_until?: string | null; valid_from?: string | null; claimable?: number;
+  kind?: 'HOSTELER' | 'WALKIN'; valid_until?: string | null; valid_from?: string | null; claimable?: number; claimed_at?: string | null;
   photo?: string | null; email?: string | null; email_verified_at?: string | null; left_at?: string | null;
   pending_hostel_id?: number | null; pending_hostel_name?: string | null; pending_room_no?: string | null; change_requested_at?: string | null;
 };
@@ -94,7 +94,7 @@ export async function api<T = unknown>(path: string, init: { method?: string; bo
   const data = await res.json();
   // A successful sign-in, sign-up, email code or password change starts a new session (new cookie or token).
   // "Check your email for a code" is not a session yet.
-  if (/^\/auth\/(login|signup|password|otp)$/.test(path) && data && !data.otp_required) {
+  if (/^\/auth\/(login|signup|password|otp|claim\/password)$/.test(path) && data && !data.otp_required) {
     if (isApp && typeof data.token === 'string') await setToken(data.token);
     else bumpSession();
     if (isApp && typeof data.deviceToken === 'string') await setDeviceToken(data.deviceToken);
@@ -120,7 +120,10 @@ export async function download(path: string, fallbackName: string) {
   }
   if (!res.ok) { const d = await res.json().catch(() => ({})); throw new ApiError(res.status, d.error || 'Download failed.'); }
   const name = safeFileName(/filename="([^"]+)"/.exec(res.headers.get('content-disposition') || '')?.[1] || fallbackName, fallbackName);
-  const blob = await res.blob();
+  return saveDownload(await res.blob(), name);
+}
+
+export async function saveDownload(blob: Blob, name: string) {
   if (isApp) return saveAndShare(blob, name);
   const url = URL.createObjectURL(blob);
   const a = Object.assign(document.createElement('a'), { href: url, download: name });

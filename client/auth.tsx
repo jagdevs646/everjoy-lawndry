@@ -1,5 +1,5 @@
 import { FormEvent, useEffect, useState } from 'react';
-import { api, ApiError, Hostel, OtpStart, SignedIn, User } from './api';
+import { api, ApiError, Student, Hostel, OtpStart, SignedIn, User } from './api';
 import { go, toast, useFormAction, useLoad, useRoute } from './lib';
 import { builtInServer, canChangeServer, isApp, probeServer, serverAddress, setServer } from './platform';
 import { Brand, Button, ErrorNote, Field, Icon, Sheet } from './ui';
@@ -79,6 +79,7 @@ export function PublicApp({ onSignedIn }: { onSignedIn: (u: User) => void }) {
         {isApp && info.error && !info.data && <div className="server-problem"><ErrorNote error={info.error} retry={info.reload} /></div>}
         {page === 'register'
           ? <Register info={info.data} onSignedIn={onSignedIn} />
+          : page === 'claim' ? <Claim onSignedIn={onSignedIn} />
           : <SignIn onSignedIn={onSignedIn} counterHours={info.data?.counter_hours} />}
         {isApp && canChangeServer && <ServerLine onChanged={() => setServerRev(r => r + 1)} highlight={!!info.error && !info.data} />}
       </main>
@@ -113,7 +114,7 @@ function SignIn({ onSignedIn, counterHours }: { onSignedIn: (u: User) => void; c
       </Field>
       {error && <ErrorNote error={error} />}
       <Button tone="primary" size="lg" block busy={busy} disabled={!loginId || !password}>Sign in</Button>
-      <p className="auth-alt">New to Everjoy? <a href="#/register">Register with your ID card</a></p>
+      <p className="auth-alt">New to Everjoy? <a href="#/register">Register with your ID card</a><br /><a href="#/claim">Have a claim code?</a></p>
       <p className="auth-foot"><a href="guide/students.html">New to Everjoy? Read the student guide</a></p>
       {!isApp && <p className="auth-foot"><a href="/download.html">Get the app for Android or iPhone</a></p>}
       <p className="auth-foot"><button type="button" className="link-btn inline" onClick={() => setForgot(true)}>Forgot your password?</button> Students can reset it with a code from their university email. Staff, or anyone without an email on file, ask at the laundry counter{counterHours ? ` (${counterHours})` : ''} or the admin.</p>
@@ -143,9 +144,84 @@ function Forgot({ loginId, counterHours, onCode, onBack }: { loginId: string; co
   );
 }
 
+function Claim({ onSignedIn }: { onSignedIn: (user: User) => void }) {
+  const [identifier, setIdentifier] = useState('');
+  const [code, setCode] = useState('');
+  const [ticket, setTicket] = useState('');
+  const [password, setPassword] = useState('');
+  const [repeat, setRepeat] = useState('');
+  const { busy, submit, error, setError } = useFormAction();
+  async function save(e: FormEvent) {
+    e.preventDefault();
+    if (!ticket) {
+      const r = await submit(() => api<{ ticket: string }>('/auth/claim', { body: { identifier, code } }));
+      if (r) { setTicket(r.ticket); setCode(''); }
+    } else {
+      if (password !== repeat) return setError('The two passwords do not match.');
+      const r = await submit(() => api<SignedIn>('/auth/claim/password', { body: { ticket, password } }));
+      if (r) onSignedIn(r.user);
+    }
+  }
+  return <form className="auth-card" onSubmit={save}>
+    <a className="auth-back" href="#/">Back to sign in</a>
+    <h1>{ticket ? 'Set your password' : 'Have a claim code?'}</h1>
+    {ticket ? <div className="field-row">
+      <Field label="Password" hint="At least 6 characters"><input type="password" minLength={6} required autoComplete="new-password" value={password} onChange={e => setPassword(e.target.value)} /></Field>
+      <Field label="Repeat password"><input type="password" required autoComplete="new-password" value={repeat} onChange={e => setRepeat(e.target.value)} /></Field>
+    </div> : <>
+      <Field label="ID card no. or university email"><input required autoComplete="username" value={identifier} onChange={e => setIdentifier(e.target.value)} /></Field>
+      <Field label="Claim code"><input required placeholder="NZVE-6H4H" autoComplete="one-time-code" value={code} onChange={e => setCode(e.target.value.toUpperCase())} /></Field>
+    </>}
+    {error && <ErrorNote error={error} />}
+    <Button tone="primary" busy={busy}>{ticket ? 'Save password' : 'Register'}</Button>
+  </form>;
+}
+
+export function CompleteProfile({ onDone, onSignOut }: { onDone: () => void; onSignOut: () => void }) {
+  const profile = useLoad(() => api<{ profile: Student }>('/auth/me'), []);
+  const info = useLoad(() => api<Info>('/public/info'), []);
+  const [mobile, setMobile] = useState('');
+  const [email, setEmail] = useState('');
+  const [photo, setPhoto] = useState<File | null>(null);
+  const [otp, setOtp] = useState<OtpStart | null>(null);
+  const { busy, error, submit } = useFormAction();
+  const p = profile.data?.profile;
+  const finish = () => submit(async () => {
+    await api('/me/complete-profile', { body: { mobile } });
+    onDone();
+  });
+  if (otp) return <OtpStep start={otp} onBack={() => setOtp(null)} onDone={() => { setOtp(null); void finish(); }} />;
+  async function save(e: FormEvent) {
+    e.preventDefault();
+    if (!p || !info.data) return;
+    await submit(async () => {
+      if (!p.photo && photo) {
+        const form = new FormData(); form.append('photo', photo);
+        await api('/me/photo', { form });
+        await profile.reload();
+      }
+      if (info.data?.email_codes && !p.email) {
+        setOtp(await api<OtpStart>('/me/email', { method: 'PUT', body: { email } }));
+      } else {
+        await api('/me/complete-profile', { body: { mobile } });
+        onDone();
+      }
+    });
+  }
+  return <div className="forced-wrap"><form className="auth-card" onSubmit={save}>
+    <h1>Complete your profile</h1>
+    {p && !p.mobile && <Field label="Mobile number"><input required type="tel" pattern="[6-9][0-9]{9}" value={mobile} onChange={e => setMobile(e.target.value)} /></Field>}
+    {p && !p.photo && <Field label="Profile photo"><input required type="file" accept="image/*" onChange={e => setPhoto(e.target.files?.[0] ?? null)} /></Field>}
+    {p && info.data?.email_codes && !p.email && <Field label="University email"><input required type="email" value={email} onChange={e => setEmail(e.target.value)} /></Field>}
+    {(error || profile.error || info.error) && <ErrorNote error={error || profile.error || info.error || ''} />}
+    <Button tone="primary" busy={busy} disabled={!p || !info.data}>Continue</Button>
+    <Button type="button" onClick={onSignOut}>Sign out</Button>
+  </form></div>;
+}
+
 function Register({ info, onSignedIn }: { info?: Info; onSignedIn: (u: User) => void }) {
-  const [f, setF] = useState({ idCardNo: '', name: '', mobile: '', email: '', hostelId: '', roomNo: '', password: '', confirm: '', claimCode: '' });
-  const [needsCode, setNeedsCode] = useState(false);
+  const [f, setF] = useState({ idCardNo: '', name: '', mobile: '', email: '', hostelId: '', roomNo: '', password: '', confirm: '' });
+  const [showClaim, setShowClaim] = useState(false);
   const [otp, setOtp] = useState<OtpStart | null>(null);
   const finish = (r: SignedIn) => { if (r.claimed) toast('Your account is ready. The laundry office already checked your details.'); go(''); onSignedIn(r.user); };
   const { busy, error, setError, submit: send } = useFormAction();
@@ -153,8 +229,8 @@ function Register({ info, onSignedIn }: { info?: Info; onSignedIn: (u: User) => 
   const submit = async (e: FormEvent) => {
     e.preventDefault();
     if (f.password !== f.confirm) return setError('The two passwords do not match.');
-    const r = await send(() => api<SignedIn | OtpStart>('/auth/signup', { body: f }).catch((err: ApiError) => {
-      if (err.details?.code === 'CLAIM_CODE') setNeedsCode(true);
+    const r = await send(() => api<SignedIn | OtpStart>('/auth/signup', { body: { ...f, selfRegistration: true } }).catch((err: ApiError) => {
+      if (err.details?.code === 'CLAIM_CODE') setShowClaim(true);
       throw err;
     }));
     if (!r) return;
@@ -168,7 +244,6 @@ function Register({ info, onSignedIn }: { info?: Info; onSignedIn: (u: User) => 
       <a className="auth-back" href="#/"><Icon name="back" size={18} />Sign in</a>
       <h1>Register</h1>
       <p className="lede">Fill this once. Then show your ID card at the counter and staff will approve you.</p>
-      <p className="muted small">Already added by the laundry office? Use the same ID card no. and mobile number they have and choose your password. We email a code to your university email (or enter the claim code the office gave you).</p>
       {noHostels && <ErrorNote error="Registration opens once the laundry office adds the hostel list. Please check back soon." />}
       <Field label="ID card no." hint="Exactly as printed on your university ID card">
         <input value={f.idCardNo} onChange={set('idCardNo')} autoCapitalize="characters" spellCheck={false} autoComplete="username" required />
@@ -179,7 +254,7 @@ function Register({ info, onSignedIn }: { info?: Info; onSignedIn: (u: User) => 
       <Field label="Mobile number">
         <input value={f.mobile} onChange={set('mobile')} inputMode="tel" autoComplete="tel-national" placeholder="10 digits" required />
       </Field>
-      <Field label={info?.email_codes ? 'University email' : 'University email (optional)'} hint={`A code is sent here to confirm it's you${info?.email_domain ? `. Must end with @${info.email_domain.replace(/^@/, '')}` : ''}. Added by the office? Leave it empty.`}>
+      <Field label={info?.email_codes ? 'University email' : 'University email (optional)'} hint={`A code is sent here to confirm it's you${info?.email_domain ? `. Must end with @${info.email_domain.replace(/^@/, '')}` : ''}.`}>
         <input type="email" value={f.email} onChange={set('email')} inputMode="email" autoComplete="email" autoCapitalize="none" spellCheck={false}
           placeholder={info?.email_domain ? `name@${info.email_domain.replace(/^@/, '')}` : 'name@university.edu'} />
       </Field>
@@ -194,11 +269,7 @@ function Register({ info, onSignedIn }: { info?: Info; onSignedIn: (u: User) => 
           <input value={f.roomNo} onChange={set('roomNo')} autoCapitalize="characters" required />
         </Field>
       </div>
-      {needsCode || f.claimCode ? (
-        <Field label="Claim code" hint="From the laundry office, e.g. K7QM-4821. No code? Ask at the counter.">
-          <input value={f.claimCode} onChange={set('claimCode')} autoCapitalize="characters" spellCheck={false} autoComplete="one-time-code" />
-        </Field>
-      ) : <button type="button" className="link-btn" onClick={() => setNeedsCode(true)}>I have a claim code from the office</button>}
+      {showClaim && <a href="#/claim">Have a claim code?</a>}
       <div className="field-row">
         <Field label="Password" hint="At least 6 characters">
           <input type="password" value={f.password} onChange={set('password')} autoComplete="new-password" required />

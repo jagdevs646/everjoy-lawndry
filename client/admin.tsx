@@ -1,5 +1,5 @@
 import { FormEvent, ReactNode, useEffect, useRef, useState } from 'react';
-import { Announcement, api, ApiError, blobUrl, Complaint, download, Hostel, Order, Service, Student, User } from './api';
+import { Announcement, api, ApiError, blobUrl, Complaint, download, saveDownload, Hostel, Order, Service, Student, User } from './api';
 import { ChangePassword } from './auth';
 import { ago, kg, planPeriod, plural, rupees, shiftDay, toast, todayKey, useAction, useFormAction, useLoad, useRoute, useScrollTop, when } from './lib';
 import { ComplaintSheet, OrderSheet, SemesterChips, StudentSheet } from './ops';
@@ -441,7 +441,8 @@ function Complaints({ onOpenOrder }: { onOpenOrder: (id: number) => void }) {
 
 function Students({ open }: { open: Openers }) {
   const [f, setF] = useState({ q: '', status: '', hostelId: '', plan: '' });
-  const [sheet, setSheet] = useState<'import' | 'plan' | null>(null);
+  const [sheet, setSheet] = useState<'import' | 'plan' | 'add' | null>(null);
+  const [codes, setCodes] = useState<ClaimCode[] | null>(null);
   const [sel, setSel] = useState<Set<number>>(new Set());
   const [temp, setTemp] = useState<{ name: string; pass: string } | null>(null);
   const hostels = useLoad(() => api<{ hostels: Hostel[] }>('/public/info'), []);
@@ -468,6 +469,11 @@ function Students({ open }: { open: Openers }) {
     setSel(new Set());
     void list.reload();
   };
+  async function reissue(student?: Student) {
+    if (!window.confirm(student ? `Replace the claim code for ${student.name}?` : 'Replace every outstanding claim code? Students will need the new codes to register.')) return;
+    const r = await run(() => api<{ codes: ClaimCode[] }>('/admin/students/reissue', { body: student ? { studentId: student.id } : { all: true } }));
+    if (r) setCodes(r.codes);
+  }
   const restore = async (s: Student) => {
     if (await run(() => api(`/admin/students/${s.id}/restore`, { method: 'POST' }), `${s.name} is back on the list`) !== undefined) void list.reload();
   };
@@ -481,12 +487,16 @@ function Students({ open }: { open: Openers }) {
     <div className="stack">
       <div className="filters">
         <input className="grow" value={f.q} onChange={set('q')} placeholder="Search name, ID card, mobile or room" aria-label="Search students" />
-        <select value={f.status} onChange={set('status')} aria-label="Account status"><option value="">Everyone on the list</option><option value="PENDING">Waiting for approval</option><option value="ACTIVE">Approved</option><option value="REJECTED">Rejected</option><option value="SUSPENDED">On hold</option><option value="LEFT">Left hostel (removed)</option></select>
+        <select value={f.status} onChange={set('status')} aria-label="Account status"><option value="">Everyone on the list</option><option value="UNCLAIMED">Unclaimed</option><option value="PENDING">Waiting for approval</option><option value="ACTIVE">Approved</option><option value="REJECTED">Rejected</option><option value="SUSPENDED">On hold</option><option value="LEFT">Left hostel (removed)</option></select>
         <select value={f.hostelId} onChange={set('hostelId')} aria-label="Hostel"><option value="">All hostels</option>{hostels.data?.hostels.map(h => <option key={h.id} value={h.id}>{h.name}</option>)}</select>
         <select value={f.plan} onChange={set('plan')} aria-label="Hostel plan"><option value="">Any plan</option><option value="VALID">Plan valid</option><option value="UPCOMING">Plan not started</option><option value="EXPIRED">Plan ended</option><option value="WALKIN">Walk-ins</option></select>
         <Button icon="clock" onClick={() => setSheet('plan')}>Plan dates</Button>
+        <Button onClick={() => setSheet('add')}>Add student</Button>
+        <Button busy={busy} onClick={() => reissue()}>Reissue for all unclaimed</Button>
         <Button tone="primary" icon="plus" onClick={() => setSheet('import')}>Add from Excel</Button>
       </div>
+      {sheet === 'add' && <OfficeStudentForm hostels={hostels.data?.hostels ?? []} close={() => setSheet(null)} done={entries => { setSheet(null); setCodes(entries); void list.reload(); }} />}
+      {codes && <Sheet title="Claim codes" onClose={() => setCodes(null)}><CodeList codes={codes} /></Sheet>}
       {sheet === 'import' && <ImportSheet type="students" close={() => setSheet(null)} onDone={() => void list.reload()} />}
       {sheet === 'plan' && <PlanDates hostels={hostels.data?.hostels ?? []} close={() => setSheet(null)} onDone={() => { setSheet(null); void list.reload(); }} />}
       {temp && <div className="temp-pass" role="status"><span>Temporary password for {temp.name}</span><b>{temp.pass}</b><small>Tell them in person. It works for 7 days; they choose a new one at sign-in.</small></div>}
@@ -506,13 +516,14 @@ function Students({ open }: { open: Openers }) {
                     <td><span className="who-cell"><Avatar name={s.name} photo={s.photo} size={32} /><span><b>{s.name}</b><small>{s.left_at ? `Left ${when(s.left_at, 'date')}` : `Joined ${when(s.created_at, 'date')}`}</small></span></span></td>
                     <td><span className="ord">{s.id_card_no}</span><small>{s.mobile}</small></td>
                     <td>{s.kind === 'WALKIN' ? <span className="muted">Walk-in</span> : <>{s.hostel_name}, {s.room_no}</>}{s.pending_hostel_id ? <small className="bad">Moving to {s.pending_hostel_name} {s.pending_room_no}</small> : null}</td>
-                    <td>{s.left_at ? <span className="pill acc-suspended">Left hostel</span> : <span className={`pill acc-${s.status.toLowerCase()}`}>{label[s.status]}</span>}{s.claimable ? <small>Not signed in yet</small> : null}</td>
+                    <td>{s.left_at ? <span className="pill acc-suspended">Left hostel</span> : <span className={`pill acc-${s.status.toLowerCase()}`}>{label[s.status]}</span>}{s.claimable ? <small>Not claimed</small> : s.claimed_at ? <small>Claimed on {when(s.claimed_at, 'date')}</small> : null}</td>
                     <td>{s.kind === 'WALKIN' ? <span className="muted">–</span> : s.valid_until || s.valid_from
                       ? <span className={(s.valid_until && s.valid_until < today) || (s.valid_from && s.valid_from > today) ? 'bad' : ''}>{planPeriod(s.valid_from, s.valid_until)}</span>
                       : <span className="muted">No dates</span>}</td>
                     <td className="num">{s.month_orders}<small>{kg(s.month_kg)}</small></td>
                     <td className="num">{s.open_orders || <span className="muted">–</span>}</td>
                     <td className="row-actions" onClick={e => e.stopPropagation()}>
+                      {!!s.claimable && !s.left_at && <Button size="sm" busy={busy} onClick={() => reissue(s)}>Reissue code</Button>}
                       {s.left_at ? <Button size="sm" busy={busy} onClick={() => restore(s)}>Restore</Button>
                         : s.kind !== 'WALKIN' && <Button size="sm" icon="lock" busy={busy} onClick={() => reset(s)} title={`Reset ${s.name}'s password`} aria-label={`Reset ${s.name}'s password`}>Reset</Button>}
                     </td>
@@ -1094,12 +1105,51 @@ function UpiQrSetting({ onChanged }: { onChanged: () => void }) {
 
 /* ------------------------------------------------------------ Excel import */
 
-type ImportResult = { created: number; updated?: number; newHostels?: string[]; codes?: { idCardNo: string; name: string; code: string }[]; accounts?: { name: string; username: string; role: string; tempPassword: string }[] };
+type ClaimCode = { idCardNo: string; name: string; code: string; expires: string };
+type ImportResult = { created: number; updated?: number; newHostels?: string[]; codes?: ClaimCode[]; accounts?: { name: string; username: string; role: string; tempPassword: string }[] };
 
-/** Claim codes as tab-separated text: pastes straight into Excel or a message. */
-async function copyCodes(codes: { idCardNo: string; name: string; code: string }[]) {
-  const text = ['ID card no.\tName\tClaim code', ...codes.map(c => `${c.idCardNo}\t${c.name}\t${c.code}`)].join('\n');
-  try { await navigator.clipboard.writeText(text); toast('Claim codes copied'); } catch { toast('Could not copy. Use Print instead.', 'bad'); }
+function OfficeStudentForm({ hostels, close, done }: { hostels: Hostel[]; close: () => void; done: (codes: ClaimCode[]) => void }) {
+  const { submit, error, busy } = useFormAction();
+  async function save(e: FormEvent<HTMLFormElement>) {
+    e.preventDefault();
+    const body: Record<string, string> = {};
+    new FormData(e.currentTarget).forEach((v, k) => { body[k] = String(v); });
+    const result = await submit(() => api<{ codes: ClaimCode[] }>('/admin/students', { body }));
+    if (result) done(result.codes);
+  }
+  return <Sheet title="Add student" onClose={close}><form className="stack" onSubmit={save}>
+    <Field label="ID card no."><input required name="idCardNo" /></Field>
+    <Field label="Name"><input required name="name" /></Field>
+    <Field label="Hostel"><select required name="hostelId" defaultValue=""><option value="">Choose hostel</option>{hostels.map(h => <option key={h.id} value={h.id}>{h.name}</option>)}</select></Field>
+    <Field label="Room"><input required name="roomNo" /></Field>
+    <Field label="Mobile (optional)"><input name="mobile" type="tel" /></Field>
+    <Field label="University email (optional)"><input name="email" type="email" /></Field>
+    <div className="field-row"><Field label="Plan starts"><input name="validFrom" type="date" /></Field>
+    <Field label="Plan ends"><input name="validUntil" type="date" /></Field></div>
+    {error && <ErrorNote error={error} />}
+    <Button tone="primary" busy={busy}>Add and issue claim code</Button>
+  </form></Sheet>;
+}
+
+function CodeList({ codes }: { codes: ClaimCode[] }) {
+  const { run } = useAction();
+  if (!codes.length) return <p>No unclaimed accounts.</p>;
+  const rows = [['ID card no.', 'Name', 'Claim code', 'Expiry'], ...codes.map(c => [c.idCardNo, c.name, c.code, c.expires])];
+  const tsv = rows.map(row => row.join('\t')).join('\n');
+  const csvCell = (value: string) => '"' + (/^[=+@\-\t\r]/.test(value) ? "'" : '') + value.replaceAll('"', '""') + '"';
+  const csv = rows.map(row => row.map(csvCell).join(',')).join('\r\n');
+  return <div className="stack">
+    <p>Give each student their own code privately. Save this list before closing.</p>
+    <div className="ledger-wrap claim-codes"><table className="mini-table"><thead><tr>{rows[0].map(col => <th key={col}>{col}</th>)}</tr></thead>
+      <tbody>{codes.map(c => <tr key={c.idCardNo}><td>{c.idCardNo}</td><td>{c.name}</td><td>{c.code}</td><td>{when(c.expires, 'date')}</td></tr>)}</tbody>
+    </table></div>
+    <div className="btn-pair">
+      <Button onClick={() => run(() => navigator.clipboard.writeText(tsv), 'Copied')}>Copy</Button>
+      {codes.length === 1 && !!navigator.share && <Button onClick={() => run(() => navigator.share({ text: tsv }))}>Share</Button>}
+      <Button onClick={() => run(() => saveDownload(new Blob([csv], { type: 'text/csv' }), 'claim-codes.csv'))}>Download</Button>
+      <Button onClick={() => window.print()}>Print</Button>
+    </div>
+  </div>;
 }
 
 function ImportSheet({ type, close, onDone }: { type: 'students' | 'staff'; close: () => void; onDone: () => void }) {
@@ -1136,20 +1186,7 @@ function ImportSheet({ type, close, onDone }: { type: 'students' | 'staff'; clos
               ? `${plural(result.created, 'student')} added${result.updated ? `, ${result.updated} updated` : ''}.${result.newHostels?.length ? ` New hostels: ${result.newHostels.join(', ')}.` : ''}`
               : `${plural(result.created, 'account')} created.`}
           </p>
-          {type === 'students' && <p className="muted">Each student <b>Registers</b> with the same ID card no. and mobile number from the sheet plus their <b>claim code</b>, and chooses a password. Give each student their own code privately (print this list or send it one by one). The codes are shown only now and work for 30 days. Lost a code? Upload the student again for a new one, or reset their password at the counter.</p>}
-          {!!result.codes?.length && (
-            <>
-              <div className="ledger-wrap claim-codes">
-                <table className="mini-table"><thead><tr><th>ID card no.</th><th>Name</th><th>Claim code</th></tr></thead>
-                  <tbody>{result.codes.map(c => <tr key={c.idCardNo}><td className="ord">{c.idCardNo}</td><td>{c.name}</td><td className="ord">{c.code}</td></tr>)}</tbody>
-                </table>
-              </div>
-              <div className="btn-pair">
-                <Button type="button" icon="download" onClick={() => void copyCodes(result.codes!)}>Copy list</Button>
-                <Button type="button" onClick={() => window.print()}>Print</Button>
-              </div>
-            </>
-          )}
+          {!!result.codes?.length && <CodeList codes={result.codes} />}
           {result.accounts && result.accounts.length > 0 && (
             <>
               <p className="muted">Temporary passwords. Share each one privately; it is shown only now. They choose their own at first sign-in.</p>

@@ -437,6 +437,64 @@ router.delete('/admin/upi-qr', handle(async (req, res) => {
  * Set the hostel plan end date for many students at once (e.g. new semester).
  * scope ALL = every hosteler, HOSTEL = one hostel, IDS = chosen students.
  */
+function issueClaimCode() {
+  const alphabet = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
+  const raw = Array.from({ length: 8 }, () => alphabet[crypto.randomInt(alphabet.length)]).join('');
+  return { code: `${raw.slice(0, 4)}-${raw.slice(4)}`, expires: new Date(Date.now() + 30 * 86400000).toISOString() };
+}
+
+type OfficeStudent = { idCardNo: string; name: string; mobile: string; roomNo: string; email: string; validFrom: string; validUntil: string };
+async function addOfficeStudent(r: OfficeStudent, hostelId: number, actorId: number) {
+  const unusable = await bcrypt.hash(crypto.randomBytes(24).toString('hex'), 8);
+  const userId = await insertId(`INSERT INTO users (role, login_id, name, mobile, password_hash, created_at) VALUES ('STUDENT',?,?,?,?,?)`,
+    [r.idCardNo, r.name, r.mobile || null, unusable, nowIso()]);
+  const { code, expires } = issueClaimCode();
+  await db.run(`INSERT INTO students (user_id, id_card_no, hostel_id, room_no, status, kind, valid_from, valid_until, claimable, claim_hash, claim_expires_at, email, reviewed_by, reviewed_at)
+    VALUES (?,?,?,?,'ACTIVE','HOSTELER',?,?,1,?,?,?,?,?)`,
+    [userId, r.idCardNo, hostelId, r.roomNo, r.validFrom || null, r.validUntil || null, claimHash(code), expires, r.email || null, actorId, nowIso()]);
+  return { idCardNo: r.idCardNo, name: r.name, code, expires };
+}
+
+router.post('/admin/students', handle(async (req, res) => {
+  const b = parse(z.object({
+    idCardNo: zIdCard, name: zText(2, 80), hostelId: zId, roomNo: zRoom,
+    mobile: zMobile.or(z.literal('')).default(''), email: z.string().trim().toLowerCase().email().max(120).or(z.literal('')).default(''),
+    validFrom: zDate.or(z.literal('')).default(''), validUntil: zDate.or(z.literal('')).default('')
+  }).refine(r => !r.validFrom || !r.validUntil || r.validFrom <= r.validUntil, 'Check the plan dates'), req.body);
+  if (b.email) await checkStudentEmail(b.email);
+  const entry = await db.tx(async () => {
+    if (!await db.get('SELECT id FROM hostels WHERE id = ? AND active = 1', [b.hostelId])) throw new HttpError(400, 'Choose an active hostel.');
+    if (await db.get('SELECT id FROM users WHERE login_id = ?', [b.idCardNo])) throw new HttpError(409, 'This ID already exists.');
+    if (b.email && await db.get('SELECT user_id FROM students WHERE lower(email) = ?', [b.email])) throw new HttpError(409, 'This email already exists.');
+    const entry = await addOfficeStudent(b, b.hostelId, actor(req).id);
+    await logActivity(actor(req).id, 'STUDENT_ADDED', 'student', b.idCardNo, b.name);
+    return entry;
+  });
+  res.status(201).json({ codes: [entry] });
+}));
+
+router.post('/admin/students/reissue', handle(async (req, res) => {
+  const b = parse(z.union([z.object({ studentId: zId }), z.object({ all: z.literal(true) })]), req.body);
+  const codes = await db.tx(async () => {
+    const id = 'studentId' in b ? b.studentId : null;
+    const rows = await db.all<{ user_id: number; id_card_no: string; name: string }>(
+      `SELECT st.user_id, st.id_card_no, u.name FROM students st JOIN users u ON st.user_id = u.id
+       WHERE u.active = 1 AND st.claimable = 1 AND st.left_at IS NULL ${id ? 'AND st.user_id = ?' : ''} ORDER BY st.user_id`, id ? [id] : []);
+    const result = [];
+    for (const row of rows) {
+      await db.lockRow('users', row.user_id);
+      const { code, expires } = issueClaimCode();
+      const updated = await db.run('UPDATE students SET claim_hash = ?, claim_expires_at = ?, claim_ticket_hash = NULL, claim_ticket_until = NULL WHERE user_id = ? AND claimable = 1',
+        [claimHash(code), expires, row.user_id]);
+      if (updated.changes) result.push({ idCardNo: row.id_card_no, name: row.name, code, expires });
+    }
+    if (id && !result.length) throw new HttpError(409, 'Only unclaimed accounts can receive a new code.');
+    await logActivity(actor(req).id, 'CLAIM_CODES_REISSUED', 'student', id ? String(id) : null, `${result.length} codes issued`);
+    return result;
+  });
+  res.json({ codes });
+}));
+
 router.post('/admin/students/validity', handle(async (req, res) => {
   const b = parse(z.object({
     validFrom: z.union([z.literal(''), zDate]).optional().default(''),
@@ -482,8 +540,8 @@ router.get('/admin/import/template/:type', handle(async (req, res) => {
     : [{ 'Full Name': 'Suresh Kumar', 'Username': 'SURESH', 'Mobile': '9811122233', 'Role': 'STAFF' }];
   const help = type === 'students'
     ? [['How to fill this sheet'], ['One student per row. Keep the header row exactly as it is and delete the example row.'],
-      ['ID Card No: as printed on the ID card. Students sign in with it.'], ['Mobile: 10 digits. Students use it to set their own password: Register with the same ID card no. and mobile.'],
-      ['University Email: the student gets a sign-in code here the first time (and on each new phone). Without it, the office hands out a claim code instead.'],
+      ['ID Card No: as printed on the ID card. Students sign in with it.'], ['Mobile: 10 digits. Used by staff to contact the student.'],
+      ['University Email: Students can claim with their ID or this email. Hand out the one-time code privately.'],
       ['Hostel: must match a hostel name (a new name creates that hostel).'],
       ['Valid From / Valid Until: the semester of the hostel plan, as YYYY-MM-DD. Jan–Jun semester: 2027-01-01 to 2027-06-30. Jul–Dec semester: 2027-07-01 to 2027-12-31. Leave both empty for no dates.'],
       ['A student who is already registered is updated (hostel, room, valid until), not added twice.']]
@@ -568,8 +626,6 @@ router.post('/admin/import/:type', sheetUpload.single('file'), handle(async (req
       const newHostels: string[] = [];
       // One-time claim codes for students who haven't set their password yet (shown once, stored hashed, 30 days).
       const codes: { idCardNo: string; name: string; code: string }[] = [];
-      const claimExpires = new Date(Date.now() + 30 * 86400_000).toISOString();
-      const newCode = () => { const a = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789'; const c = Array.from({ length: 8 }, () => a[crypto.randomInt(a.length)]).join(''); return `${c.slice(0, 4)}-${c.slice(4)}`; };
       const hostelId = async (name: string) => {
         const h = await db.get<{ id: number }>('SELECT id FROM hostels WHERE lower(name) = lower(?)', [name]);
         if (h) return h.id;
@@ -586,29 +642,15 @@ router.post('/admin/import/:type', sheetUpload.single('file'), handle(async (req
           if (hasFrom) { sets.push('valid_from = ?'); vals.push(r.validFrom || null); }
           if (hasUntil) { sets.push('valid_until = ?'); vals.push(r.validUntil || null); }
           await db.run(`UPDATE students SET ${sets.join(', ')} WHERE user_id = ?`, [...vals, existing.user_id]);
-          if (r.email && r.email !== (existing.email ?? '').toLowerCase()) {
-            // New address from the office: confirmed again by the next sign-in code; trusted devices start over.
-            await db.run('UPDATE students SET email = ?, email_verified_at = NULL WHERE user_id = ?', [r.email, existing.user_id]);
+          if (existing.claimable && r.email && r.email !== (existing.email ?? '').toLowerCase()) {
+            // An office correction invalidates outstanding activation tickets and email challenges.
+            await db.run('UPDATE students SET email = ?, email_verified_at = NULL, claim_ticket_hash = NULL, claim_ticket_until = NULL WHERE user_id = ?', [r.email, existing.user_id]);
             await db.run('UPDATE users SET token_version = token_version + 1 WHERE id = ?', [existing.user_id]);
-          }
-          if (existing.claimable) {
-            // Not claimed yet: a fresh code replaces the old one (it may have been lost).
-            const code = newCode();
-            await db.run('UPDATE students SET claim_hash = ?, claim_expires_at = ? WHERE user_id = ?', [claimHash(code), claimExpires, existing.user_id]);
-            codes.push({ idCardNo: r.idCardNo, name: r.name, code });
           }
           updated++;
           continue;
         }
-        // No usable password: the student claims the account by registering with this ID card no. and mobile.
-        const unusable = await bcrypt.hash(crypto.randomBytes(24).toString('hex'), 8);
-        const userId = await insertId(`INSERT INTO users (role, login_id, name, mobile, password_hash, created_at) VALUES ('STUDENT',?,?,?,?,?)`, [r.idCardNo, r.name, r.mobile, unusable, nowIso()]);
-        // The student sets up the account with an emailed code (when email codes are on) or with this claim code from
-        // the office. Every new account gets a claim code, so nobody is stuck if email codes are off.
-        const code = newCode();
-        await db.run(`INSERT INTO students (user_id, id_card_no, hostel_id, room_no, status, kind, valid_from, valid_until, claimable, claim_hash, claim_expires_at, email, reviewed_by, reviewed_at) VALUES (?,?,?,?,'ACTIVE','HOSTELER',?,?,1,?,?,?,?,?)`,
-          [userId, r.idCardNo, hid, r.roomNo, r.validFrom || null, r.validUntil || null, code ? claimHash(code) : null, code ? claimExpires : null, r.email || null, actor(req).id, nowIso()]);
-        if (code) codes.push({ idCardNo: r.idCardNo, name: r.name, code });
+        codes.push(await addOfficeStudent(r, hid, actor(req).id));
         created++;
       }
       await logActivity(actor(req).id, 'STUDENTS_IMPORTED', 'student', null, `${created} added, ${updated} updated${newHostels.length ? `, new hostels: ${newHostels.join(', ')}` : ''}`);

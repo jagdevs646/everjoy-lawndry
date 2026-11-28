@@ -75,7 +75,7 @@ img { max-width: 100%; }
 .field textarea { resize: vertical; min-height: 96px; }
 .field input:focus, .field select:focus, .field textarea:focus, .filter-input:focus, .find-row input:focus, .filters input:focus, .filters select:focus { border-color: var(--accent); outline: none; box-shadow: 0 0 0 3px var(--accent-soft); }
 .field.has-error input { border-color: var(--bad); }
-.field-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.field-row { display: grid; align-items: start; grid-template-columns: 1fr 1fr; gap: 12px; }
 @media (max-width: 380px) { .field-row { grid-template-columns: 1fr; } }
 
 .stepper { display: grid; grid-template-columns: 52px 1fr 52px; align-items: stretch; border: 1.5px solid var(--line); border-radius: var(--radius-sm); overflow: hidden; background: var(--field-bg, var(--surface)); }

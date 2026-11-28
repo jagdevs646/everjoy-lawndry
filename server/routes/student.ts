@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { db, insertId, logActivity } from '../db.js';
 import { AuthedRequest, requireRole } from '../auth.js';
 import { photoUpload, savePhoto } from '../files.js';
-import { checkStudentEmail, startChallenge } from '../otp.js';
+import { checkStudentEmail, startChallenge, studentOtpOn } from '../otp.js';
 import { slipKey } from '../auth.js';
 import { getSettings, listServices, monthUsage, planStatus } from '../rules.js';
 import { CODE_STEP_SECONDS, disputeComplaint, getRequest, orderForSign, recordSignoff, requestKey, statementFor, type ConfirmRequest, type Origin } from '../signoff.js';
@@ -28,6 +28,28 @@ const withSlipKey = <T extends Record<string, unknown>>(o: T) => {
   const { qr_token: token, ...rest } = o as T & { qr_token?: string | null };
   return { ...rest, qr_key: token && ['RECEIVED', 'WASHING', 'READY'].includes(String(o.status)) ? slipKey(token) : null };
 };
+
+router.use('/me', (req, _res, next) => {
+  if (me(req).complete_profile && !['/complete-profile', '/photo', '/email'].includes(req.path))
+    return next(new HttpError(403, 'Complete your profile first.'));
+  next();
+});
+
+router.post('/me/complete-profile', handle(async (req, res) => {
+  const user = me(req);
+  if (user.complete_profile) {
+    const p = await studentProfile(user.id);
+    if (!p.photo || (!p.email && await studentOtpOn())) throw new HttpError(400, 'Complete your missing profile details.');
+    await db.tx(async () => {
+      if (!p.mobile) {
+        const b = parse(z.object({ mobile: zMobile }), req.body);
+        await db.run('UPDATE users SET mobile = ? WHERE id = ?', [b.mobile, user.id]);
+      }
+      await db.run('UPDATE students SET complete_profile = 0 WHERE user_id = ?', [user.id]);
+    });
+  }
+  res.json({ ok: true });
+}));
 
 router.get('/me/home', handle(async (req, res) => {
   const user = me(req);
