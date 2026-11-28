@@ -22,6 +22,7 @@ jobs:
           java-version: '21'
       - run: |
           npm ci --include=dev
+          npm install --prefix /tmp/ej-webview-runner playwright-core@1.56.1
           npx vite build --mode app
           npx cap sync android
           cd android && bash gradlew :app:assembleDebug :app:assembleDebugAndroidTest
@@ -39,3 +40,5 @@ jobs:
             curl --retry 15 --retry-all-errors --retry-delay 2 -fsS http://localhost:3344/api/health
             cd android && bash gradlew :app:connectedDebugAndroidTest -Pandroid.testInstrumentationRunnerArguments.class=com.everjoy.lawndry.PasswordLayoutTest
             adb logcat -d -s EverjoyLayout:I
+            adb install -r android/app/build/outputs/apk/debug/app-debug.apk
+            NODE_PATH=/tmp/ej-webview-runner/node_modules node .github/workflows/verify-claim.cjs
