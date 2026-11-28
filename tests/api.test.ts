@@ -1366,3 +1366,23 @@ describe('workspace isolation', () => {
     expect(samePrefix.status).toBe(409);
   });
 });
+
+describe('office scopes', () => {
+  it('reconciles office report counts, keeps aggregate scopes read-only and limits the campus directory to administrators', async () => {
+    const directory = await admin.get('/api/admin/workspaces').set('x-ej-workspace','-1').expect(200);
+    const rows = directory.body.rows as {id:number;kind:string}[];
+    expect(rows.filter(r => r.kind==='CAMPUS').length).toBeGreaterThan(1);
+    const range = '/api/admin/report?from=2020-01-01&to=2099-12-31';
+    const totals = async (id:number) => {
+      const r=await admin.get(range).set('x-ej-workspace',String(id)).expect(200);
+      return Number(r.body.totals.orders);
+    };
+    let campus=0,retail=0;
+    for(const w of rows){const n=await totals(w.id); if(w.kind==='RETAIL') retail+=n; else campus+=n;}
+    expect(await totals(-1)).toBe(campus+retail);
+    expect(await totals(-2)).toBe(campus);
+    await admin.put('/api/admin/settings').set('x-ej','1').set('x-ej-workspace','-1').send({max_active_orders:5}).expect(409);
+    await staff.get('/api/admin/workspaces').set('x-ej-workspace','-1').expect(403);
+    await staff.get('/api/ops/customers').expect(403);
+  });
+});

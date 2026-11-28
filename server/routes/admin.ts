@@ -1,4 +1,4 @@
-import { currentWorkspace, outsideWorkspace, workspaceId } from '../workspace-context.js';
+import { currentWorkspace, outsideWorkspace, workspaceId, scopeFilter } from '../workspace-context.js';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -369,8 +369,8 @@ router.get('/admin/backup', handle(async (req, res) => {
     const out: Record<string, Row[]> = {};
     for (const table of TABLES) {
       if (!full && (table === 'settings' || table === 'counters')) continue;
-      const filter = !full && table === 'workspaces' ? ' WHERE id=?' : !full && table === 'staff_workspaces' ? ' WHERE workspace_id=?' : '';
-      out[table] = (await db.all(`SELECT * FROM ${table}${filter} ORDER BY 1`, filter ? [workspaceId()] : [])).map(jsonSafe);
+      const filter = !full && ['workspaces','staff_workspaces'].includes(table) ? ' WHERE ' + scopeFilter(workspaceId(), table === 'workspaces' ? 'id' : 'workspace_id') : '';
+      out[table] = (await db.all(`SELECT * FROM ${table}${filter} ORDER BY 1`)).map(jsonSafe);
     }
     return out;
   });

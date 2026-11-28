@@ -448,3 +448,8 @@ body.col-resizing { cursor: col-resize; user-select: none; }
   .sheet:has(.claim-codes) button, .sheet:has(.claim-codes) .btn-pair { display: none; }
   .claim-codes tr { break-inside: avoid; }
 }
+.office-scope-side { padding:0 1rem .5rem }
+.scope-picker select,.scope-picker input { max-width:100%; width:100%; min-width:0; color:#25171a; background:white; border:1px solid #a9a0a2; border-radius:.4rem; padding:.42rem; font:inherit }
+.office-scope-phone { display:none }
+.workspace-facts { display:flex; flex-wrap:wrap; gap:.4rem 1.1rem }
+@media(max-width:900px){.office-scope-phone { display:block; max-width:33%; margin-left:auto } .ad-top { flex-wrap:wrap } .scope-picker select {font-size:.85rem}}

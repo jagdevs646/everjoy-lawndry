@@ -577,7 +577,7 @@ export async function insertId(sql: string, params: unknown[]): Promise<number> 
 }
 
 export async function logActivity(actorId: number | null, action: string, entity: string | null, entityId: unknown, detail = '') {
-  await db.run(`INSERT INTO activity (workspace_id, actor_id, action, entity, entity_id, detail, created_at) VALUES (${workspaceId()}, ?,?,?,?,?,?)`,
+  await db.run(`INSERT INTO activity (workspace_id, actor_id, action, entity, entity_id, detail, created_at) VALUES (${workspaceId() > 0 ? workspaceId() : 'NULL'}, ?,?,?,?,?,?)`,
     [actorId, action, entity, entityId == null ? null : String(entityId), detail, nowIso()]);
 }
 

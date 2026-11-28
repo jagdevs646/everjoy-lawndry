@@ -1,3 +1,4 @@
+import { selectedWorkspace, sessionGeneration } from './platform';
 import { ButtonHTMLAttributes, ReactNode, Ref, useEffect, useId, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import QRCode from 'qrcode';
@@ -393,7 +394,7 @@ export function Scanner({ onResult, hint }: { onResult: (text: string) => void; 
 
 /* ------------------------------------------------------------------- UPI */
 
-let payInfo: { p: Promise<PaymentInfo>; at: number } | null = null;
+let payInfo: { scope:string; p: Promise<PaymentInfo>; at: number } | null = null;
 /** Forget the cached UPI details (after the admin uploads or removes the QR). */
 export const invalidatePaymentInfo = () => { payInfo = null; };
 /** UPI details change rarely: share one copy between components for up to a minute. */
@@ -401,9 +402,10 @@ export function usePaymentInfo() {
   const [info, setInfo] = useState<PaymentInfo | null>(null);
   useEffect(() => {
     let live = true;
-    if (!payInfo || Date.now() - payInfo.at > 60_000) {
+    const scope = sessionGeneration() + '/' + selectedWorkspace();
+    if (!payInfo || payInfo.scope !== scope || Date.now() - payInfo.at > 60_000) {
       const p = api<PaymentInfo>('/payment-info');
-      payInfo = { p, at: Date.now() };
+      payInfo = { scope, p, at: Date.now() };
       p.catch(() => { if (payInfo?.p === p) payInfo = null; });
     }
     payInfo.p.then(i => live && setInfo(i)).catch(() => {});

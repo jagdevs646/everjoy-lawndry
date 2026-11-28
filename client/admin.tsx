@@ -1,5 +1,7 @@
 import { FormEvent, ReactNode, useEffect, useRef, useState } from 'react';
 import { Announcement, api, ApiError, blobUrl, Complaint, download, saveDownload, Hostel, Order, Service, Student, User } from './api';
+import { Campuses, ScopePicker, officeScopes, officeLink, type Place } from './workspaces';
+import { selectedWorkspace, selectWorkspace } from './platform';
 import { ChangePassword } from './auth';
 import { ago, kg, planPeriod, plural, rupees, shiftDay, toast, todayKey, useAction, useFormAction, useLoad, useRoute, useScrollTop, when } from './lib';
 import { ComplaintSheet, OrderSheet, SemesterChips, StudentSheet } from './ops';
@@ -52,14 +54,41 @@ const NAV: { key: string; label: string; icon: IconName }[] = [
   { key: 'notices', label: 'Notices', icon: 'megaphone' },
   { key: 'stats', label: 'Stats', icon: 'clock' },
   { key: 'reports', label: 'Reports', icon: 'download' },
+  { key: 'campuses', label: 'Campuses', icon: 'list' },
   { key: 'staff', label: 'Staff', icon: 'card' },
   { key: 'settings', label: 'Rules & pricing', icon: 'sliders' },
   { key: 'activity', label: 'Activity log', icon: 'activity' },
 ];
 
-export function AdminApp({ user, onSignOut, onUser, onCounter }: { user: User; onSignOut: () => void; onUser: (u: User) => void; onCounter: () => void }) {
-  const [page] = useRoute();
-  const current = NAV.find(n => n.key === (page ?? '')) ?? NAV[0];
+type OfficeProps = { user: User; onSignOut: () => void; onUser: (u: User) => void; onCounter: () => void };
+export function AdminApp(props: OfficeProps) {
+  const parts = useRoute();
+  const places = useLoad(() => api<{rows:Place[]}>('/access/workspaces'), []);
+  const rows = places.data?.rows || [];
+  const choices = [...officeScopes, ...rows];
+  const scoped = parts[0] === 'w';
+  const page = (scoped ? parts[2] : parts[0]) || '';
+  const place = scoped ? choices.find(w => w.code === parts[1]) : choices.find(w => String(w.id) === selectedWorkspace()) || rows[0];
+  const [ready,setReady] = useState('');
+  useEffect(() => {
+    if (!place || !places.data) return;
+    selectWorkspace(String(place.id));
+    setReady(String(place.id));
+    if (!scoped) window.location.replace(officeLink(place,page));
+  }, [place?.id, place?.code, scoped, page, !!places.data]);
+  if (!places.data) return places.error ? <ErrorNote error={places.error} retry={places.reload}/> : <Loading/>;
+  if (!place) return <section className="ad-card"><h1>Workspace unavailable</h1><a href={officeLink(rows[0] || officeScopes[0])}>Open office</a></section>;
+  if (ready !== String(place.id) || !scoped) return <Loading/>;
+  return <Office key={place.id} {...props} place={place} places={rows} page={page} refresh={places.reload}/>;
+}
+function Office({user,onSignOut,onUser,onCounter,place,places,page,refresh}: OfficeProps & {place:Place; places:Place[]; page:string; refresh:()=>Promise<void>}) {
+  const aggregate = place.id < 0;
+  const retail = place.kind === 'RETAIL';
+  const nav = NAV.filter(n => !aggregate || ['', 'stats','activity','reports','campuses','staff'].includes(n.key))
+    .map(n => retail && n.key==='students' ? {...n,label:'Customers'} : n);
+  const current = nav.find(n => n.key === page) || NAV.find(n=>n.key===page) || nav[0];
+  const pick = (w:Place) => { window.location.hash=officeLink(w,page); };
+  const picker = <ScopePicker places={places} selected={place} change={pick}/>;
   const [drawer, setDrawer] = useState(false);
   const [orderId, setOrderId] = useState<number | null>(null);
   const [studentId, setStudentId] = useState<number | null>(null);
@@ -76,11 +105,12 @@ export function AdminApp({ user, onSignOut, onUser, onCounter }: { user: User; o
     <div className={`ad-shell${drawer ? ' drawer-open' : ''}`}>
       <aside className="ad-side">
         <div className="ad-side-head"><Brand sub="Office" /></div>
+        <div className="office-scope-side">{picker}</div>
         <nav aria-label="Admin">
-          {NAV.map(n => <a key={n.key} href={`#/${n.key}`} className={current.key === n.key ? 'on' : ''} aria-current={current.key === n.key ? 'page' : undefined}><Icon name={n.icon} size={18} />{n.label}</a>)}
+          {nav.map(n => <a key={n.key} href={officeLink(place,n.key)} className={current.key === n.key ? 'on' : ''} aria-current={current.key === n.key ? 'page' : undefined}><Icon name={n.icon} size={18} />{n.label}</a>)}
         </nav>
         <div className="ad-side-foot">
-          <button onClick={onCounter}><Icon name="washer" size={18} />Open the counter</button>
+          {!aggregate && <button onClick={onCounter}><Icon name="washer" size={18} />Open the counter</button>}
           <a href="guide/staff.html"><Icon name="help" size={18} />Guide</a>
           <button onClick={() => setPw(true)}><Icon name="lock" size={18} />Change password</button>
           <button onClick={onSignOut}><Icon name="logout" size={18} />Sign out</button>
@@ -95,27 +125,30 @@ export function AdminApp({ user, onSignOut, onUser, onCounter }: { user: User; o
             <h1>{current.label}</h1>
             <p>{new Date().toLocaleDateString('en-IN', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })}</p>
           </div>
+          <div className="office-scope-phone">{picker}</div>
           <div className="ad-top-actions">
-            <Button icon="washer" onClick={onCounter} className="ad-counter-btn">Counter</Button>
+            {!aggregate && <Button icon="washer" onClick={onCounter} className="ad-counter-btn">Counter</Button>}
             <Button icon="logout" tone="plain" onClick={onSignOut} className="ad-signout-top">Sign out</Button>
           </div>
         </header>
         <main className="ad-main" key={bump} ref={mainRef}>
-          {current.key === '' && <OverviewPage open={open} />}
-          {current.key === 'register' && <Register open={open} />}
-          {current.key === 'students' && <Students open={open} />}
+          {!nav.some(n=>n.key===current.key) ? <section className="ad-card"><h2>Pick a campus or workspace</h2><ScopePicker places={places} selected={place} change={pick} specific/></section> : <>
+          {current.key === '' && <OverviewPage open={open} place={place} />}
+          {current.key === 'register' && <Register open={open} retail={retail} />}
+          {current.key === 'students' && (retail ? <CustomersList/> : <Students open={open} />)}
           {current.key === 'complaints' && <Complaints onOpenOrder={setOrderId} />}
-          {current.key === 'notices' && <Notices />}
+          {current.key === 'notices' && <Notices retail={retail} />}
           {current.key === 'stats' && <Stats />}
-          {current.key === 'reports' && <Reports />}
-          {current.key === 'staff' && <Staff me={user} />}
-          {current.key === 'settings' && <Settings />}
-          {current.key === 'activity' && <Activity />}
+          {current.key === 'reports' && <Reports retail={retail} />}
+          {current.key === 'staff' && <Staff me={user} readOnly={aggregate} />}
+          {current.key === 'settings' && <Settings retail={retail} />}
+          {current.key === 'campuses' && <Campuses onChanged={()=>void refresh()}/>}
+          {current.key === 'activity' && <Activity />}</>}
         </main>
       </div>
       <nav className="ad-tabs" aria-label="Admin, main pages">
-        {NAV.filter(n => PHONE_TABS.includes(n.key)).map(n => (
-          <a key={n.key} href={`#/${n.key}`} className={current.key === n.key ? 'on' : ''} aria-current={current.key === n.key ? 'page' : undefined}>
+        {nav.filter(n => PHONE_TABS.includes(n.key)).map(n => (
+          <a key={n.key} href={officeLink(place,n.key)} className={current.key === n.key ? 'on' : ''} aria-current={current.key === n.key ? 'page' : undefined}>
             <span className="tab-icon"><Icon name={n.icon} size={22} /></span>{n.key === 'complaints' ? 'Issues' : n.label}
           </a>
         ))}
@@ -134,11 +167,11 @@ type Openers = { order: (id: number) => void; student: (id: number) => void };
 
 /* --------------------------------------------------------------- overview */
 
-function OverviewPage(_: { open: Openers }) {
+function OverviewPage({ place }: { open: Openers; place:Place }) {
   const d = useLoad(() => api<Overview>('/admin/overview'), [], { every: 60_000 });
   if (!d.data) return d.error ? <ErrorNote error={d.error} retry={d.reload} /> : <Loading />;
   const o = d.data;
-  const setupLeft = o.setup.filter(s => !s.done);
+  const setupLeft = place.id > 0 && place.kind === 'CAMPUS' ? o.setup.filter(s => !s.done) : [];
   const items: { n: number; text: string; to: string; icon: IconName; tone?: string }[] = [
     { n: o.open.pending_students, text: `${plural(o.open.pending_students, 'student')} waiting for approval`, to: 'students', icon: 'card' },
     { n: o.open.late, text: `${plural(o.open.late, 'order')} past the promised time`, to: 'register?LATE', icon: 'clock', tone: 'bad' },
@@ -160,7 +193,7 @@ function OverviewPage(_: { open: Openers }) {
       {setupLeft.length > 0 && (
         <section className="ad-card setup">
           <h2>Finish setting up</h2>
-          <ul>{o.setup.map(s => <li key={s.key} className={s.done ? 'done' : ''}><Icon name={s.done ? 'check' : 'clock'} size={18} /><a href={`#/${s.key === 'hostels' || s.key === 'rules' ? 'settings' : s.key === 'staff' ? 'staff' : ''}`} onClick={e => { if (s.key === 'password') { e.preventDefault(); toast('Use “Change password” at the bottom of the menu.'); } }}>{s.label}</a></li>)}</ul>
+          <ul>{o.setup.map(s => <li key={s.key} className={s.done ? 'done' : ''}><Icon name={s.done ? 'check' : 'clock'} size={18} /><a href={officeLink(place, s.key === 'hostels' || s.key === 'rules' ? 'settings' : s.key === 'staff' ? 'staff' : '')} onClick={e => { if (s.key === 'password') { e.preventDefault(); toast('Use “Change password” at the bottom of the menu.'); } }}>{s.label}</a></li>)}</ul>
         </section>
       )}
 
@@ -172,7 +205,7 @@ function OverviewPage(_: { open: Openers }) {
           <h2>Needs attention</h2>
           {attention.length ? (
             <ul className="attention">
-              {attention.map(a => <li key={a.text} className={a.tone}><a href={`#/${a.to.split('?')[0]}`} onClick={() => a.to.includes('?') && sessionStorage.setItem('ej-register-preset', a.to.split('?')[1])}><Icon name={a.icon} size={18} />{a.text}<Icon name="next" size={16} /></a></li>)}
+              {attention.map(a => <li key={a.text} className={a.tone}><a href={officeLink(place,a.to.split('?')[0])} onClick={() => a.to.includes('?') && sessionStorage.setItem('ej-register-preset', a.to.split('?')[1])}><Icon name={a.icon} size={18} />{a.text}<Icon name="next" size={16} /></a></li>)}
             </ul>
           ) : <p className="muted">All clear. Nothing late, nothing waiting.</p>}
         </section>
@@ -184,10 +217,10 @@ function OverviewPage(_: { open: Openers }) {
           <dl className="month-facts">
             <div><dt>Orders</dt><dd>{o.month.orders}</dd></div>
             <div><dt>Washed</dt><dd>{kg(o.month.kg)}</dd></div>
-            <div><dt>Students served</dt><dd>{o.month.students}<small> of {o.totals.students}</small></dd></div>
+            <div><dt>{place.kind==='RETAIL'?'Customers served':'People served'}</dt><dd>{o.month.students}<small> of {o.totals.students}</small></dd></div>
             <div><dt>Collected</dt><dd>{rupees(o.month.revenue)}</dd></div>
           </dl>
-          {o.hostels.length > 0 && (
+          {place.kind !== 'RETAIL' && o.hostels.length > 0 && (
             <table className="hostel-bars">
               <caption>By hostel</caption>
               <tbody>
@@ -204,7 +237,7 @@ function OverviewPage(_: { open: Openers }) {
           <ul className="recent">
             {o.recent.map((r, i) => <li key={i}><span><b>{r.actor_name ?? 'System'}</b> {actionText(r.action)} {r.entity_id ?? ''}</span><small>{ago(r.created_at)}</small></li>)}
           </ul>
-          <a className="more-link" href="#/activity">Full activity log</a>
+          <a className="more-link" href={officeLink(place,'activity')}>Full activity log</a>
         </section>
       </div>
     </div>
@@ -316,7 +349,7 @@ export function actionText(a: string) {
 
 const monthStart = () => `${todayKey().slice(0, 7)}-01`;
 
-function Register({ open }: { open: Openers }) {
+function Register({ open, retail }: { open: Openers; retail:boolean }) {
   const preset = (() => { try { const p = sessionStorage.getItem('ej-register-preset'); sessionStorage.removeItem('ej-register-preset'); return p; } catch { return null; } })();
   const [f, setF] = useState({ q: '', from: preset ? '' : monthStart(), to: '', status: preset && preset !== 'DUE' ? preset : '', hostel: '', payment: preset === 'DUE' ? 'DUE' : '' });
   const hostels = useLoad(() => api<{ hostels: Hostel[] }>('/public/info'), []);
@@ -334,7 +367,7 @@ function Register({ open }: { open: Openers }) {
   return (
     <div className="stack">
       <div className="filters">
-        <input className="grow" value={f.q} onChange={set('q')} placeholder="Search order no., name, ID card, room, mobile" aria-label="Search" />
+        <input className="grow" value={f.q} onChange={set('q')} placeholder={retail?"Search order, name or mobile":"Search order no., name, ID card, room, mobile"} aria-label="Search" />
         <label>From <input type="date" value={f.from} onChange={set('from')} /></label>
         <label>To <input type="date" value={f.to} onChange={set('to')} /></label>
         <select value={f.status} onChange={set('status')} aria-label="Status">
@@ -342,9 +375,9 @@ function Register({ open }: { open: Openers }) {
           <option value="UNCONFIRMED">Not confirmed by student</option><option value="DISPUTED">Disputed by student</option>
           <option value="RECEIVED">Received</option><option value="WASHING">Washing</option><option value="READY">Ready</option><option value="DELIVERED">Handed over</option><option value="CANCELLED">Cancelled</option>
         </select>
-        <select value={f.hostel} onChange={set('hostel')} aria-label="Hostel">
+        {!retail && <select value={f.hostel} onChange={set('hostel')} aria-label="Hostel">
           <option value="">All hostels</option>{hostels.data?.hostels.map(h => <option key={h.id}>{h.name}</option>)}
-        </select>
+        </select>}
         <select value={f.payment} onChange={set('payment')} aria-label="Payment">
           <option value="">Any payment</option><option value="DUE">Due</option><option value="PAID">Paid</option><option value="WAIVED">Waived</option><option value="NONE">No charge</option>
         </select>
@@ -355,15 +388,15 @@ function Register({ open }: { open: Openers }) {
           <p className="muted small">{list.data.total} {list.data.total === 1 ? 'order' : 'orders'}{f.from ? ` from ${when(`${f.from}T12:00:00`, 'date')}` : ''}{f.to ? ` to ${when(`${f.to}T12:00:00`, 'date')}` : ''}</p>
           <GridFrame grid={grid} total={list.data.total} shown={list.data.rows.length}>
             <table className="ledger">
-              <thead><tr><th>Order</th><th>Card</th><th>Date in</th><th>Student</th><th>Room</th><th>Service</th><th className="num">Clothes</th><th className="num">Kg</th><th>Status</th><th>Payment</th><th>Handed over</th><th>Student confirmed</th></tr></thead>
+              <thead><tr><th>Order</th><th>Card</th><th>Date in</th><th>{retail?'Customer':'Student'}</th>{!retail && <th>Room</th>}<th>Service</th><th className="num">Clothes</th><th className="num">Kg</th><th>Status</th><th>Payment</th><th>Handed over</th><th>Student confirmed</th></tr></thead>
               <tbody>
                 {list.data.rows.map(o => (
                   <tr key={o.id} onClick={() => open.order(o.id)} tabIndex={0} onKeyDown={e => e.key === 'Enter' && open.order(o.id)}>
                     <td className="ord">{o.order_no}</td>
                     <td>{o.tag_no ? <span className="card-no">{o.tag_no}</span> : <span className="muted">–</span>}</td>
                     <td>{when(o.received_at)}</td>
-                    <td><b>{o.student_name}</b><small>{o.id_card_no}</small></td>
-                    <td>{o.room_no}<small>{o.hostel_name}</small></td>
+                    <td><b>{o.student_name}</b><small>{retail?o.mobile:o.id_card_no}</small></td>
+                    {!retail && <td>{o.room_no}<small>{o.hostel_name}</small></td>}
                     <td>{o.service_name || 'Wash & fold'}{o.charge_note ? <small>{o.charge_note}</small> : null}</td>
                     <td className="num">{o.clothes_count}{o.returned_count != null && o.returned_count !== o.clothes_count && <small className="bad">{o.returned_count} back</small>}</td>
                     <td className="num">{Number(o.weight_kg).toFixed(1)}</td>
@@ -549,7 +582,7 @@ function Students({ open }: { open: Openers }) {
 
 type StaffRow = { id: number; name: string; login_id: string; mobile: string | null; role: 'STAFF' | 'ADMIN'; active: number; created_at: string; month_received: number; month_delivered: number; month_collected: number; last_active: string | null };
 
-function Staff({ me }: { me: User }) {
+function Staff({ me, readOnly }: { me: User; readOnly:boolean }) {
   const list = useLoad(() => api<{ rows: StaffRow[] }>('/admin/staff'), []);
   const grid = useGrid('staff');
   const staffRows = list.data?.rows.slice(grid.offset, grid.offset + grid.size) ?? [];
@@ -569,7 +602,7 @@ function Staff({ me }: { me: User }) {
   };
   return (
     <div className="stack">
-      <div className="row-between"><p className="muted">People who can sign in to the counter or this office. Switch someone off when they leave; their history stays.</p><div className="btn-pair"><Button icon="download" onClick={() => setImporting(true)}>Add from Excel</Button><Button tone="primary" icon="plus" onClick={() => setAdding(true)}>Add staff</Button></div></div>
+      <div className="row-between"><p className="muted">People who can sign in to the counter or this office. Switch someone off when they leave; their history stays.</p>{!readOnly && <div className="btn-pair"><Button icon="download" onClick={() => setImporting(true)}>Add from Excel</Button><Button tone="primary" icon="plus" onClick={() => setAdding(true)}>Add staff</Button></div>}</div>
       {temp && <div className="temp-pass" role="status"><span>Temporary password for {temp.name}</span><b>{temp.pass}</b><small>They will choose a new one after signing in.</small></div>}
       {!list.data ? <Loading /> : (
         <GridFrame grid={grid} total={list.data.rows.length} shown={staffRows.length}>
@@ -588,8 +621,8 @@ function Staff({ me }: { me: User }) {
                   <td><span className={`pill ${s.active ? 'acc-active' : 'acc-suspended'}`}>{s.active ? 'Active' : 'Switched off'}</span></td>
                   <td className="row-actions">
                     <Button size="sm" icon="chart" onClick={() => setWork(s)}>Work</Button>
-                    <Button size="sm" busy={busy} onClick={() => reset(s)}>Reset password</Button>
-                    {s.id !== me.id && <Button size="sm" tone={s.active ? 'danger' : 'quiet'} onClick={() => toggle(s)}>{s.active ? 'Switch off' : 'Switch on'}</Button>}
+                    {!readOnly && <Button size="sm" busy={busy} onClick={() => reset(s)}>Reset password</Button>}
+                    {!readOnly && s.id !== me.id && <Button size="sm" tone={s.active ? 'danger' : 'quiet'} onClick={() => toggle(s)}>{s.active ? 'Switch off' : 'Switch on'}</Button>}
                   </td>
                 </tr>
               ))}
@@ -628,7 +661,7 @@ function AddStaff({ close, onDone }: { close: () => void; onDone: () => void }) 
 
 /* ---------------------------------------------------------------- notices */
 
-function Notices() {
+function Notices({ retail }: { retail:boolean }) {
   const list = useLoad(() => api<{ rows: Announcement[] }>('/admin/announcements'), []);
   const hostels = useLoad(() => api<{ hostels: Hostel[] }>('/public/info'), []);
   const [f, setF] = useState({ title: '', body: '', hostelId: '', expiresOn: '', notify: true });
@@ -647,22 +680,22 @@ function Notices() {
       <form className="ad-card stack" onSubmit={post}>
         <h2>Post a notice</h2>
         <Field label="Title"><input value={f.title} onChange={e => setF({ ...f, title: e.target.value })} placeholder="e.g. Counter closed on Sunday" maxLength={80} /></Field>
-        <Field label="Message"><textarea rows={4} value={f.body} onChange={e => setF({ ...f, body: e.target.value })} maxLength={600} placeholder="What students need to know and do" /></Field>
+        <Field label="Message"><textarea rows={4} value={f.body} onChange={e => setF({ ...f, body: e.target.value })} maxLength={600} placeholder="Message for this workspace" /></Field>
         <div className="field-row">
-          <Field label="Who sees it"><select value={f.hostelId} onChange={e => setF({ ...f, hostelId: e.target.value })}><option value="">All students</option>{hostels.data?.hostels.map(h => <option key={h.id} value={h.id}>{h.name} only</option>)}</select></Field>
+          {!retail && <Field label="Who sees it"><select value={f.hostelId} onChange={e => setF({ ...f, hostelId: e.target.value })}><option value="">All students</option>{hostels.data?.hostels.map(h => <option key={h.id} value={h.id}>{h.name} only</option>)}</select></Field>}
           <Field label="Hide after (optional)"><input type="date" value={f.expiresOn} min={todayKey()} onChange={e => setF({ ...f, expiresOn: e.target.value })} /></Field>
         </div>
-        <Switch checked={f.notify} onChange={notify => setF({ ...f, notify })} label="Also send as a notification" hint="Shows on the bell icon on each student’s phone" />
+        <Switch checked={f.notify} onChange={notify => setF({ ...f, notify })} label="Also send as a notification" hint="Shows on the bell icon for people in this workspace" />
         {error && <ErrorNote error={error} />}
         <Button tone="primary" busy={busy} icon="megaphone" disabled={f.title.trim().length < 3 || f.body.trim().length < 3}>Post notice</Button>
       </form>
       <section className="stack">
-        <h2 className="sub">Showing to students</h2>
+        <h2 className="sub">Showing to {retail?'customers':'students'}</h2>
         {!list.data ? <Loading /> : !list.data.rows.length ? <Empty icon="megaphone" title="No notices">Post holidays, closures or timing changes here.</Empty> : list.data.rows.map(a => (
           <article key={a.id} className={`ad-card notice-item${a.expired ? ' expired' : ''}`}>
             <div className="row-between"><b>{a.title}</b><Button size="sm" tone="plain" icon="x" onClick={() => remove(a)} aria-label={`Remove ${a.title}`} /></div>
             <p>{a.body}</p>
-            <small className="muted">{a.hostel_name ? `${a.hostel_name} only` : 'All students'}. Posted {ago(a.created_at)} by {a.created_by_name}.{a.expires_on ? ` ${a.expired ? 'Expired' : 'Hides after'} ${when(`${a.expires_on}T12:00:00`, 'date')}.` : ''}</small>
+            <small className="muted">{a.hostel_name ? `${a.hostel_name} only` : retail?'All customers':'All students'}. Posted {ago(a.created_at)} by {a.created_by_name}.{a.expires_on ? ` ${a.expired ? 'Expired' : 'Hides after'} ${when(`${a.expires_on}T12:00:00`, 'date')}.` : ''}</small>
           </article>
         ))}
       </section>
@@ -681,7 +714,7 @@ type Report = {
   topStudents: { name: string; id_card_no: string; orders: number; kg: number }[];
 };
 
-function Reports() {
+function Reports({ retail }: { retail:boolean }) {
   const today = todayKey();
   const presets = [
     { key: 'today', label: 'Today', from: today, to: today },
@@ -726,9 +759,9 @@ function Reports() {
             </ReportBlock>
           )}
           <div className="ad-grid">
-            <ReportBlock title="By hostel">
+            {!retail && <ReportBlock title="By hostel">
               {t.byHostel.length ? <table className="mini-table"><thead><tr><th>Hostel</th><th className="num">Orders</th><th className="num">Clothes</th><th className="num">Kg</th></tr></thead><tbody>{t.byHostel.map(h => <tr key={h.name}><td>{h.name}</td><td className="num">{h.orders}</td><td className="num">{h.clothes}</td><td className="num">{h.kg}</td></tr>)}</tbody></table> : <p className="muted">No orders.</p>}
-            </ReportBlock>
+            </ReportBlock>}
             <ReportBlock title="Heaviest users">
               {t.topStudents.length ? <table className="mini-table"><thead><tr><th>Student</th><th className="num">Orders</th><th className="num">Kg</th></tr></thead><tbody>{t.topStudents.map(s => <tr key={s.id_card_no}><td>{s.name}<small>{s.id_card_no}</small></td><td className="num">{s.orders}</td><td className="num">{s.kg}</td></tr>)}</tbody></table> : <p className="muted">No orders.</p>}
             </ReportBlock>
@@ -737,6 +770,7 @@ function Reports() {
       )}
       <section className="ad-card backup">
         <div><h2>Backup</h2><p className="muted">Download a full copy of the database (students, orders, payments, complaints). Keep one copy every week on a pen drive or Google Drive.</p></div>
+        <Button icon="download" busy={backup.busy} onClick={() => backup.run(() => download('/admin/backup?scope=selected','workspace-backup.json'),'Workspace backup downloaded')}>Download selected scope</Button>
         <Button icon="database" busy={backup.busy} onClick={() => backup.run(() => download('/admin/backup', 'everjoy-backup.db'), 'Backup downloaded')}>Download backup</Button>
       </section>
     </div>
@@ -770,10 +804,10 @@ type SettingTab = typeof SETTING_TABS[number]['key'];
 /** "19:00" → "7:00 PM" */
 const time12 = (hhmm: string) => { const [h, m] = hhmm.split(':').map(Number); return `${((h + 11) % 12) + 1}:${String(m).padStart(2, '0')} ${h < 12 ? 'AM' : 'PM'}`; };
 
-function Settings() {
+function Settings({ retail }: { retail:boolean }) {
   const s = useLoad(() => api<Settings>('/admin/settings'), []);
   const [draft, setDraft] = useState<Settings | null>(null);
-  const [tab, setTab] = useState<SettingTab>(() => { try { return (sessionStorage.getItem('ej-settings-tab') as SettingTab) || 'orders'; } catch { return 'orders'; } });
+  const [tab, setTab] = useState<SettingTab>(() => { try { const stored=sessionStorage.getItem('ej-settings-tab') as SettingTab; return (retail && stored==='students' ? 'services' : stored) || 'orders'; } catch { return 'orders'; } });
   const { busy, error, setError, submit } = useFormAction();
   useEffect(() => { if (s.data) setDraft(d => d && JSON.stringify(d) !== JSON.stringify(s.data) && d.upi_qr_file !== s.data!.upi_qr_file ? { ...d, upi_qr_file: s.data!.upi_qr_file } : s.data!); }, [s.data]);
   useEffect(() => { try { sessionStorage.setItem('ej-settings-tab', tab); } catch { /* ignore */ } }, [tab]);
@@ -798,13 +832,13 @@ function Settings() {
   return (
     <div className="settings-page">
       <nav className="tabs" role="tablist" aria-label="Rules and pricing">
-        {SETTING_TABS.map(t => <button key={t.key} role="tab" aria-selected={tab === t.key} className={tab === t.key ? 'on' : ''} onClick={() => setTab(t.key)}>{t.label}</button>)}
+        {SETTING_TABS.filter(t => !retail || t.key!=='students').map(t => <button key={t.key} role="tab" aria-selected={tab === t.key} className={tab === t.key ? 'on' : ''} onClick={() => setTab(t.key)}>{t.label}</button>)}
       </nav>
 
       <form onSubmit={save} className="settings-form">
         {tab === 'orders' && (
           <div className="settings-cards">
-            <section className="ad-card settings-group">
+            {!retail && <><section className="ad-card settings-group">
               <h2>Each order</h2>
               <div className="field-grid">
                 <Field label="Free kg per order" hint="For hostelers with a valid plan"><input type="number" step="0.5" min="0.5" value={draft.max_kg_per_order} onChange={num('max_kg_per_order')} /></Field>
@@ -823,8 +857,8 @@ function Settings() {
               <Switch checked={draft.allow_paid_extra} onChange={v => setDraft({ ...draft, allow_paid_extra: v })} label="Let students pay for extra kg" hint="The counter offers two choices: take clothes back, or charge for the extra kg. Off = only take clothes back." />
               {draft.allow_paid_extra && <Field label="Price per extra kg (₹)"><input type="number" min="0" value={draft.extra_rate_per_kg} onChange={num('extra_rate_per_kg')} /></Field>}
             </section>
-            <section className="ad-card settings-group">
-              <h2>Student confirmation (two-sided register)</h2>
+            </>}<section className="ad-card settings-group">
+              <h2>{retail?'Customer confirmation':'Student confirmation (two-sided register)'}</h2>
               <p className="muted small">Like signing the paper register, without paper: a pop-up on the student's app shows what they confirm and a 6-digit code that changes every 30 seconds. The student reads it out and staff type it in. Each confirmation keeps the exact sentence, the time, who was at the counter and a tamper-proof fingerprint.</p>
               <Switch checked={draft.sign_dropoff} onChange={v => setDraft({ ...draft, sign_dropoff: v })} label="Student confirms every drop-off with a code"
                 hint="After staff take an order, the student's app shows the code. “Something is wrong” on the pop-up opens a complaint." />
@@ -929,7 +963,7 @@ function Settings() {
         )}
       </form>
 
-      {tab === 'services' && <Services />}
+      {tab === 'services' && <Services retail={retail} />}
       {tab === 'students' && <Hostels />}
     </div>
   );
@@ -1010,21 +1044,21 @@ function Activity() {
 
 /* ------------------------------------------------------- services & prices */
 
-function Services() {
+function Services({ retail }: { retail:boolean }) {
   const list = useLoad(() => api<{ rows: Service[] }>('/admin/services'), []);
   const [edit, setEdit] = useState<Service | 'new' | null>(null);
   return (
     <section className="ad-card settings-group">
       <div className="row-between"><h2>Services and prices</h2><Button size="sm" icon="plus" onClick={() => setEdit('new')}>Add service</Button></div>
-      <p className="muted small">Each service gets its own slip. “Hosteler price” is for students with a valid hostel plan; everyone else (plan ended, walk-ins) pays the normal price. Services marked “uses the free kg” are free for hostelers up to the kg limits above.</p>
+      {!retail && <p className="muted small">Each service gets its own slip. “Hosteler price” is for students with a valid hostel plan; everyone else (plan ended, walk-ins) pays the normal price. Services marked “uses the free kg” are free for hostelers up to the kg limits above.</p>}
       {!list.data ? <Loading /> : (
         <table className="mini-table services-table">
-          <thead><tr><th>Service</th><th className="num">Hosteler price</th><th className="num">Normal price</th><th /></tr></thead>
+          <thead><tr><th>Service</th>{!retail && <th className="num">Hosteler price</th>}<th className="num">Normal price</th><th /></tr></thead>
           <tbody>
             {list.data.rows.map(x => (
               <tr key={x.id} className={x.active ? '' : 'off'}>
                 <td><b>{x.name}</b><small>{x.uses_allowance ? 'Uses the free kg' : x.unit === 'KG' ? 'Per kg' : 'Per piece'}{x.active ? '' : ', hidden'}</small></td>
-                <td className="num">{x.uses_allowance && !x.hosteler_rate ? 'Free' : `${rupees(x.hosteler_rate)}/${x.unit === 'KG' ? 'kg' : 'pc'}`}</td>
+                {!retail && <td className="num">{x.uses_allowance && !x.hosteler_rate ? 'Free' : `${rupees(x.hosteler_rate)}/${x.unit === 'KG' ? 'kg' : 'pc'}`}</td>}
                 <td className="num">{rupees(x.rate)}/{x.unit === 'KG' ? 'kg' : 'pc'}</td>
                 <td className="row-actions"><Button size="sm" tone="plain" icon="edit" onClick={() => setEdit(x)} aria-label={`Edit ${x.name}`} /></td>
               </tr>
@@ -1032,12 +1066,12 @@ function Services() {
           </tbody>
         </table>
       )}
-      {edit && <ServiceForm s={edit === 'new' ? null : edit} close={() => setEdit(null)} onDone={() => { setEdit(null); void list.reload(); }} />}
+      {edit && <ServiceForm retail={retail} s={edit === 'new' ? null : edit} close={() => setEdit(null)} onDone={() => { setEdit(null); void list.reload(); }} />}
     </section>
   );
 }
 
-function ServiceForm({ s, close, onDone }: { s: Service | null; close: () => void; onDone: () => void }) {
+function ServiceForm({ retail,s, close, onDone }: { retail:boolean; s: Service | null; close: () => void; onDone: () => void }) {
   const [f, setF] = useState({ name: s?.name ?? '', unit: s?.unit ?? 'PIECE' as 'KG' | 'PIECE', rate: String(s?.rate ?? ''), hosteler_rate: String(s?.hosteler_rate ?? ''), uses_allowance: !!s?.uses_allowance, active: s ? !!s.active : true, sort: String(s?.sort ?? 10) });
   const { busy, error, submit } = useFormAction();
   const save = async (e: FormEvent) => {
@@ -1051,10 +1085,10 @@ function ServiceForm({ s, close, onDone }: { s: Service | null; close: () => voi
         <Field label="Name" hint="Shown on the slip, e.g. Dry cleaning, Blanket wash"><input value={f.name} onChange={e => setF({ ...f, name: e.target.value })} maxLength={40} /></Field>
         <Segmented label="Charged" value={f.unit} onChange={unit => setF({ ...f, unit })} options={[{ value: 'KG', label: 'Per kg' }, { value: 'PIECE', label: 'Per piece' }]} />
         <div className="field-row">
-          <Field label="Hosteler price (₹)"><input type="number" min="0" step="0.5" value={f.hosteler_rate} onChange={e => setF({ ...f, hosteler_rate: e.target.value })} /></Field>
+          {!retail && <Field label="Hosteler price (₹)"><input type="number" min="0" step="0.5" value={f.hosteler_rate} onChange={e => setF({ ...f, hosteler_rate: e.target.value })} /></Field>}
           <Field label="Normal price (₹)"><input type="number" min="0" step="0.5" value={f.rate} onChange={e => setF({ ...f, rate: e.target.value })} /></Field>
         </div>
-        <Switch checked={f.uses_allowance} onChange={v => setF({ ...f, uses_allowance: v })} label="Uses the free kg" hint="Weight counts toward the per-order and monthly free kg for hostelers" />
+        {!retail && <Switch checked={f.uses_allowance} onChange={v => setF({ ...f, uses_allowance: v })} label="Uses the free kg" hint="Weight counts toward the per-order and monthly free kg for hostelers" />}
         <Switch checked={f.active} onChange={v => setF({ ...f, active: v })} label="Offered at the counter" hint="Hide a service instead of deleting it; old slips keep its name" />
         <Field label="Order in the list" hint="Smaller numbers come first"><input type="number" min="0" max="999" value={f.sort} onChange={e => setF({ ...f, sort: e.target.value })} /></Field>
         {error && <ErrorNote error={error} />}
@@ -1758,3 +1792,10 @@ function Stats() {
 const Kpi = ({ label, value, note, warn }: { label: string; value: string; note?: string; warn?: boolean }) => (
   <div className={`kpi${warn ? ' warn' : ''}`}><span>{label}</span><b>{value}</b>{note && <small>{note}</small>}</div>
 );
+
+export function CustomersList() {
+  const d=useLoad(()=>api<{rows:{user_id:number; name:string; mobile:string; address:string; orders:number}[]}>('/ops/customers'),[]);
+  if(!d.data) return d.error?<ErrorNote error={d.error} retry={d.reload}/>:<Loading/>;
+  return <section className="ad-card"><h2>Customers</h2>{!d.data.rows.length?<p>No customers yet.</p>:<table className="mini-table"><thead><tr><th>Name</th><th>Mobile</th><th>Address</th><th>Orders</th></tr></thead><tbody>
+    {d.data.rows.map(c=><tr key={c.user_id}><td>{c.name}</td><td>{c.mobile}</td><td>{c.address || '—'}</td><td>{c.orders}</td></tr>)}</tbody></table>}</section>;
+}

@@ -4,8 +4,8 @@ import { requireRole } from './auth.js';
 import type { NextFunction, Request, Response } from 'express';
 import type { AuthedRequest } from './auth.js';
 import { db, insertId, logActivity } from './db.js';
-import { HttpError, handle, codeKey, nowIso, parse, zDate, zId } from './util.js';
-import { inWorkspace, outsideWorkspace, type Workspace } from './workspace-context.js';
+import { HttpError, handle, codeKey, dayKey, nowIso, parse, zDate, zId } from './util.js';
+import { aggregateScopes, currentWorkspace, inWorkspace, outsideWorkspace, type Workspace } from './workspace-context.js';
 
 const publicColumns = 'id,code,name,kind,status,timezone';
 
@@ -21,6 +21,15 @@ export async function selectWorkspace(req: Request, _res: Response, next: NextFu
     const user = (req as AuthedRequest).user;
     if (['/health','/access/workspaces','/auth/logout'].includes(req.path)) return next();
     const requested = req.get('x-ej-workspace');
+    const aggregate = aggregateScopes.find(w => String(w.id) === requested);
+    if (aggregate) {
+      if (user?.role !== 'ADMIN') throw new HttpError(403, 'No access here.');
+      if (req.path === '/auth/me' || req.path === '/auth/password') return next();
+      if (req.path.startsWith('/admin/workspaces')) return next();
+      const reports = ['/admin/overview','/admin/stats','/admin/trend','/admin/report','/admin/export','/admin/activity','/admin/backup','/admin/staff'];
+      if (req.method !== 'GET' || !(reports.includes(req.path) || /^\/admin\/staff\/\d+\/report$/.test(req.path))) throw new HttpError(409, 'Pick a workspace first.');
+      return inWorkspace(aggregate, next);
+    }
     let choices = await visibleWorkspaces(user);
     if (!user && req.path === '/auth/login') {
       // Staff have a single business login even when assigned to a different campus.
@@ -59,7 +68,7 @@ export async function assertOrderPrefix(workspace: number, prefix: string, suffi
 export const workspaceRouter = Router();
 workspaceRouter.use('/admin/workspaces', requireRole('ADMIN'));
 const campusFields = {
-  name: z.string().trim().min(2).max(80), code: z.string().trim().toUpperCase().regex(/^[A-Z][A-Z0-9]{1,11}$/),
+  name: z.string().trim().min(2).max(80), code: z.string().trim().toUpperCase().regex(/^[A-Z][A-Z0-9]{1,11}$/).refine(code => !aggregateScopes.some(s => s.code === code), 'Choose another campus code'),
   status: z.enum(['ACTIVE','PAUSED']).default('ACTIVE'), timezone: z.string().max(80).default('Asia/Kolkata').refine(tz => {
     try { new Intl.DateTimeFormat('en',{timeZone:tz}); return true; } catch { return false; }
   }, 'Choose a valid timezone'),
@@ -67,6 +76,15 @@ const campusFields = {
   contract_from: zDate.or(z.literal('')).default(''), contract_until: zDate.or(z.literal('')).default(''),
   monthly_value: z.number().nonnegative().max(1e12).nullable().default(null), notes: z.string().trim().max(2000).default(''),
 };
+workspaceRouter.get('/admin/workspaces', handle(async (_req, res) => {
+  const rows = await outsideWorkspace(() => db.all(`SELECT w.*,
+    (SELECT COUNT(*) FROM students s WHERE s.workspace_id=w.id AND s.kind!='WALKIN' AND s.left_at IS NULL) AS students,
+    (SELECT COUNT(*) FROM students s WHERE s.workspace_id=w.id AND s.kind!='WALKIN' AND s.left_at IS NULL AND s.claimable=1) AS unclaimed,
+    (SELECT COUNT(*) FROM orders o WHERE o.workspace_id=w.id AND o.day_key=? AND o.status!='CANCELLED') AS today_orders,
+    (SELECT COUNT(*) FROM staff_workspaces a WHERE a.workspace_id=w.id) AS staff_count
+    FROM workspaces w ORDER BY w.id`, [dayKey()]));
+  res.json({rows});
+}));
 const schema = z.object(campusFields);
 const datesValid = (b:{contract_from:string;contract_until:string}) => !b.contract_until || !b.contract_from || b.contract_until >= b.contract_from;
 
@@ -103,4 +121,11 @@ workspaceRouter.patch('/admin/workspaces/:id', handle(async (req,res) => {
     await inWorkspace(old,()=>logActivity((req as AuthedRequest).user.id,'WORKSPACE_UPDATED','workspace',id,b.name));
   });
   res.json({ok:true});
+}));
+
+workspaceRouter.get('/ops/customers', requireRole('STAFF','ADMIN'), handle(async (_req,res) => {
+  if (currentWorkspace().kind !== 'RETAIL') throw new HttpError(403, 'Choose the customers workspace.');
+  res.json({ rows: await db.all(`SELECT c.user_id,u.name,c.mobile,c.address,
+    (SELECT COUNT(*) FROM orders o WHERE o.student_id=c.user_id) AS orders
+    FROM customers c JOIN users u ON u.id=c.user_id ORDER BY u.name,c.user_id`) });
 }));

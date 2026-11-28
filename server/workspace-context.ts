@@ -7,6 +7,16 @@ const context = new AsyncLocalStorage<Workspace | null>();
 export const defaultCampus: Workspace = { id: 1, code: 'CAMPUS', name: 'Campus', kind: 'CAMPUS', status: 'ACTIVE', timezone: process.env.APP_TZ || 'Asia/Kolkata' };
 export const currentWorkspace = () => context.getStore() ?? defaultCampus;
 export const workspaceId = () => currentWorkspace().id;
+export const aggregateScopes = [
+  { ...defaultCampus, id: -1, code: 'ALL', name: 'All business' },
+  { ...defaultCampus, id: -2, code: 'CAMPUSES', name: 'All campuses' },
+];
+export function scopeFilter(id: number, column = 'workspace_id') {
+  if (id === -1) return '1=1';
+  if (id === -2) return column + " IN (SELECT id FROM workspaces WHERE kind='CAMPUS')";
+  if (!Number.isSafeInteger(id) || id < 1) throw new Error('Invalid workspace');
+  return column + ' = ' + id;
+}
 export const inWorkspace = <T>(workspace: Workspace, fn: () => T) => context.run(workspace, fn);
 export const outsideWorkspace = <T>(fn: () => T) => context.run(null, fn);
 
@@ -30,12 +40,12 @@ export function scopeReads(sql: string, schema: 'main' | 'public') {
   }
   if (!names.size) return sql;
   const id = Number(workspace.id);
-  if (!Number.isSafeInteger(id) || id <= 0) throw new Error('Invalid workspace');
+  const scoped = scopeFilter(id);
   const definitions = Array.from(names, table => {
     const physical = schema + '.' + table;
-    let filter = 'workspace_id = ' + id;
-    if (table === 'users') {
-      filter = "(role = 'STUDENT' AND workspace_id = " + id + ") OR role = 'ADMIN' OR (role = 'STAFF' AND id IN (SELECT user_id FROM staff_workspaces WHERE workspace_id = " + id + '))';
+    let filter = scoped;
+    if (table === 'users' && id !== -1) {
+      filter = "(role = 'STUDENT' AND " + scoped + ") OR role = 'ADMIN' OR (role = 'STAFF' AND id IN (SELECT user_id FROM staff_workspaces WHERE " + scoped + '))';
     }
     return table + ' AS (SELECT * FROM ' + physical + ' WHERE ' + filter + ')';
   }).join(', ');

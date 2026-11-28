@@ -121,7 +121,7 @@ function App() {
   let body;
   if (unreachable && !user) body = <Unreachable onRetry={checkSession} onSignOut={signOut} />;
   else if (user === undefined) body = <div className="boot"><Loading label="Opening Everjoy" /></div>;
-  else if (!user) body = <PublicApp onSignedIn={u => { selectWorkspace(''); window.location.hash = '/'; setUser(u); }} />;
+  else if (!user) body = <PublicApp onSignedIn={u => { selectWorkspace(''); if (u.role !== 'ADMIN' || !window.location.hash.startsWith('#/w/')) window.location.hash = '/'; setUser(u); }} />;
   else if (user.must_change_password) body = <div className="forced-wrap"><ChangePassword user={user} forced onDone={setUser} onSignOut={signOut} /></div>;
   else if (user.complete_profile) body = <CompleteProfile onDone={checkSession} onSignOut={signOut} />;
   else if (user.role === 'STUDENT') body = <StudentApp user={user} onSignOut={signOut} onUser={setUser} />;

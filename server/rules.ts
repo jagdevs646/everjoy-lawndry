@@ -395,7 +395,7 @@ async function nextOrderNo(f: OrderNoFormat) {
     let n = await nextCounter(name, f.start);
     if (n < f.start) { await db.run('UPDATE workspace_counters SET value = ? WHERE workspace_id = ? AND name = ?', [f.start, workspaceId(), name]); n = f.start; }
     const no = formatOrderNo(f, n, day);
-    if (!(await db.get('SELECT id FROM orders WHERE order_key = ?', [codeKey(no)]))) return no;
+    if (!(await outsideWorkspace(() => db.get('SELECT id FROM orders WHERE order_key = ?', [codeKey(no)])))) return no;
   }
   throw new HttpError(500, 'No free order no. was found. Ask the admin to change the order no. style.');
 }
@@ -405,7 +405,7 @@ export async function peekOrderNo(f: OrderNoFormat) {
   const day = dayKey();
   const row = await db.get<{ value: number }>('SELECT value FROM workspace_counters WHERE workspace_id = ? AND name = ?', [workspaceId(), orderCounter(f, day)]);
   let n = row ? Math.max(Number(row.value) + 1, f.start) : f.start;
-  for (let i = 0; i < 1000 && (await db.get('SELECT id FROM orders WHERE order_key = ?', [codeKey(formatOrderNo(f, n, day))])); i++) n++;
+  for (let i = 0; i < 1000 && (await outsideWorkspace(() => db.get('SELECT id FROM orders WHERE order_key = ?', [codeKey(formatOrderNo(f, n, day))]))); i++) n++;
   return { no: formatOrderNo(f, n, day), n };
 }
 
