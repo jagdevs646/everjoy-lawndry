@@ -1,4 +1,5 @@
 import { currentWorkspace, outsideWorkspace, workspaceId, scopeFilter } from '../workspace-context.js';
+import { assignStaff } from '../workspaces.js';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -169,13 +170,14 @@ router.post('/admin/staff', handle(async (req, res) => {
     mobile: zMobile.or(z.literal('')).default(''),
     password: zPassword(8),
     role: z.enum(['STAFF', 'ADMIN']).default('STAFF'),
+    workspaces:z.array(zId).min(1).max(500).optional(),
   }), req.body);
-  if (await db.get('SELECT 1 FROM users WHERE login_id = ?', [b.loginId])) throw new HttpError(409, 'This username is taken (it may be a student ID card no.).');
+  if (await outsideWorkspace(() => db.get('SELECT 1 FROM users WHERE login_id = ?', [b.loginId]))) throw new HttpError(409, 'This username is taken (it may be a student ID card no.).');
   const id = await db.tx(async () => {
     const id = await insertId(`INSERT INTO users (workspace_id, role, login_id, name, mobile, password_hash, must_change_password, created_at) VALUES (${workspaceId()}, ?,?,?,?,?,1,?)`,
       [b.role, b.loginId, b.name, b.mobile || null, bcrypt.hashSync(b.password, 10), nowIso()]);
     await logActivity(actor(req).id, 'STAFF_CREATED', 'user', b.loginId, `${b.name} · ${b.role}`);
-    if (b.role === 'STAFF') await db.run('INSERT INTO staff_workspaces(user_id,workspace_id) VALUES (?,?)', [id, workspaceId()]);
+    if (b.role === 'STAFF') await assignStaff(id,b.workspaces ?? [workspaceId()]);
     return id;
   });
   res.status(201).json({ id });

@@ -20,12 +20,12 @@ export async function selectWorkspace(req: Request, _res: Response, next: NextFu
   try {
     const user = (req as AuthedRequest).user;
     if (['/health','/access/workspaces','/auth/logout'].includes(req.path)) return next();
-    const requested = req.get('x-ej-workspace');
+    const requested = req.path === '/auth/me' ? undefined : req.get('x-ej-workspace');
     const aggregate = aggregateScopes.find(w => String(w.id) === requested);
     if (aggregate) {
       if (user?.role !== 'ADMIN') throw new HttpError(403, 'No access here.');
       if (req.path === '/auth/me' || req.path === '/auth/password') return next();
-      if (req.path.startsWith('/admin/workspaces')) return next();
+      if (req.path.startsWith('/admin/workspaces') || /^\/admin\/staff(?:\/\d+)?\/access$/.test(req.path)) return next();
       const reports = ['/admin/overview','/admin/stats','/admin/trend','/admin/report','/admin/export','/admin/activity','/admin/backup','/admin/staff'];
       if (req.method !== 'GET' || !(reports.includes(req.path) || /^\/admin\/staff\/\d+\/report$/.test(req.path))) throw new HttpError(409, 'Pick a workspace first.');
       return inWorkspace(aggregate, next);
@@ -45,7 +45,7 @@ export async function selectWorkspace(req: Request, _res: Response, next: NextFu
       if (challenge) choices = choices.filter(w => w.id === challenge.workspace_id);
     }
     const chosen = requested ? choices.find(w => String(w.id) === requested) : choices[0];
-    if (!chosen && user && req.path === '/auth/me' && !requested) return next();
+    if (!chosen && user && ['/auth/me','/auth/password'].includes(req.path) && !requested) return next();
     if (!chosen) throw new HttpError(403, user ? 'No access here. Ask the admin.' : 'Choose a university.');
     return inWorkspace(chosen, next);
   } catch (error) { next(error); }
@@ -128,4 +128,40 @@ workspaceRouter.get('/ops/customers', requireRole('STAFF','ADMIN'), handle(async
   res.json({ rows: await db.all(`SELECT c.user_id,u.name,c.mobile,c.address,
     (SELECT COUNT(*) FROM orders o WHERE o.student_id=c.user_id) AS orders
     FROM customers c JOIN users u ON u.id=c.user_id ORDER BY u.name,c.user_id`) });
+}));
+
+export async function workingLocations(user: AuthedRequest['user'] | undefined) {
+  const places = await visibleWorkspaces(user);
+  if (!user || user.role === 'STUDENT') return places;
+  return Promise.all(places.map(async w => {
+    const pending = await inWorkspace(w, () => db.get<{n:number}>(`SELECT
+      (SELECT COUNT(*) FROM students WHERE status='PENDING' OR pending_hostel_id IS NOT NULL) +
+      (SELECT COUNT(*) FROM complaints WHERE status!='RESOLVED') +
+      (SELECT COUNT(*) FROM orders WHERE status='READY') AS n`));
+    return {...w,pending:Number(pending?.n || 0)};
+  }));
+}
+
+workspaceRouter.get('/admin/staff/access', requireRole('ADMIN'), handle(async (_req,res) => {
+  res.json({rows:await db.all('SELECT user_id,workspace_id FROM staff_workspaces ORDER BY user_id,workspace_id')});
+}));
+
+export async function assignStaff(userId:number, ids:number[]) {
+  const selected = [...new Set(ids)];
+  if (!selected.length) throw new HttpError(400,'Choose at least one workspace.');
+  const places = await db.all<{id:number}>('SELECT id FROM workspaces');
+  if (selected.some(id=>!places.some(w=>w.id===id))) throw new HttpError(400,'Choose an existing workspace.');
+  await db.run('DELETE FROM staff_workspaces WHERE user_id=?',[userId]);
+  for (const id of selected) await db.run('INSERT INTO staff_workspaces(user_id,workspace_id) VALUES (?,?)',[userId,id]);
+}
+workspaceRouter.put('/admin/staff/:id/access', requireRole('ADMIN'), handle(async (req,res) => {
+  const id=parse(zId,req.params.id);
+  const body=parse(z.object({workspaces:z.array(zId).min(1).max(500)}),req.body);
+  await outsideWorkspace(()=>db.tx(async ()=>{
+    await db.lockRow('users',id);
+    if (!await db.get("SELECT id FROM users WHERE role='STAFF' AND id=?",[id])) throw new HttpError(404,'Staff account not found.');
+    await assignStaff(id,body.workspaces);
+    await db.run("INSERT INTO activity(workspace_id,actor_id,action,entity,entity_id,detail,created_at) VALUES (NULL,?,'STAFF_ACCESS_CHANGED','user',?,?,?)",[(req as AuthedRequest).user.id,String(id),body.workspaces.join(', '),nowIso()]);
+  }));
+  res.json({ok:true});
 }));

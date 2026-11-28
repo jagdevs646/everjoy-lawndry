@@ -140,7 +140,7 @@ function Office({user,onSignOut,onUser,onCounter,place,places,page,refresh}: Off
           {current.key === 'notices' && <Notices retail={retail} />}
           {current.key === 'stats' && <Stats />}
           {current.key === 'reports' && <Reports retail={retail} />}
-          {current.key === 'staff' && <Staff me={user} readOnly={aggregate} />}
+          {current.key === 'staff' && <Staff me={user} readOnly={aggregate} places={places} />}
           {current.key === 'settings' && <Settings retail={retail} />}
           {current.key === 'campuses' && <Campuses onChanged={()=>void refresh()}/>}
           {current.key === 'activity' && <Activity />}</>}
@@ -582,8 +582,11 @@ function Students({ open }: { open: Openers }) {
 
 type StaffRow = { id: number; name: string; login_id: string; mobile: string | null; role: 'STAFF' | 'ADMIN'; active: number; created_at: string; month_received: number; month_delivered: number; month_collected: number; last_active: string | null };
 
-function Staff({ me, readOnly }: { me: User; readOnly:boolean }) {
+function Staff({ me, readOnly, places }: { me: User; readOnly:boolean; places:Place[] }) {
   const list = useLoad(() => api<{ rows: StaffRow[] }>('/admin/staff'), []);
+  const access = useLoad(()=>api<{rows:{user_id:number;workspace_id:number}[]}>('/admin/staff/access'),[]);
+  const [editingAccess,setEditingAccess] = useState<StaffRow|null>(null);
+  const assigned=(id:number)=>access.data?.rows.filter(a=>a.user_id===id).map(a=>a.workspace_id) || [];
   const grid = useGrid('staff');
   const staffRows = list.data?.rows.slice(grid.offset, grid.offset + grid.size) ?? [];
   const [adding, setAdding] = useState(false);
@@ -613,7 +616,7 @@ function Staff({ me, readOnly }: { me: User; readOnly:boolean }) {
                 <tr key={s.id} className={s.active ? '' : 'off'}>
                   <td><b>{s.name}</b>{s.id === me.id && <small>You</small>}</td>
                   <td className="ord">{s.login_id}</td>
-                  <td>{s.role === 'ADMIN' ? 'Admin' : 'Counter staff'}{s.mobile ? <small>{s.mobile}</small> : null}</td>
+                  <td>{s.role === 'ADMIN' ? 'Admin' : 'Counter staff'}{s.mobile ? <small>{s.mobile}</small> : null}{s.role==='STAFF' && access.data && <small>{places.filter(w=>assigned(s.id).includes(w.id)).map(w=>w.name).join(', ') || 'No access yet'}</small>}</td>
                   <td className="num">{s.month_received}</td>
                   <td className="num">{s.month_delivered}</td>
                   <td className="num">{rupees(s.month_collected)}</td>
@@ -621,6 +624,7 @@ function Staff({ me, readOnly }: { me: User; readOnly:boolean }) {
                   <td><span className={`pill ${s.active ? 'acc-active' : 'acc-suspended'}`}>{s.active ? 'Active' : 'Switched off'}</span></td>
                   <td className="row-actions">
                     <Button size="sm" icon="chart" onClick={() => setWork(s)}>Work</Button>
+                    {s.role==='STAFF' && access.data && <Button size="sm" onClick={()=>setEditingAccess(s)}>Edit access</Button>}
                     {!readOnly && <Button size="sm" busy={busy} onClick={() => reset(s)}>Reset password</Button>}
                     {!readOnly && s.id !== me.id && <Button size="sm" tone={s.active ? 'danger' : 'quiet'} onClick={() => toggle(s)}>{s.active ? 'Switch off' : 'Switch on'}</Button>}
                   </td>
@@ -630,19 +634,33 @@ function Staff({ me, readOnly }: { me: User; readOnly:boolean }) {
           </table>
         </GridFrame>
       )}
-      {adding && <AddStaff close={() => setAdding(false)} onDone={() => { setAdding(false); void list.reload(); }} />}
+      {editingAccess && <AccessForm person={editingAccess} places={places} initial={assigned(editingAccess.id)} close={()=>setEditingAccess(null)} done={()=>{setEditingAccess(null);void access.reload();void list.reload();}}/>}
+      {adding && <AddStaff places={places} close={() => setAdding(false)} onDone={() => { setAdding(false); void list.reload(); void access.reload(); }} />}
       {importing && <ImportSheet type="staff" close={() => setImporting(false)} onDone={() => void list.reload()} />}
       {work && <StaffWork id={work.id} name={work.name} close={() => setWork(null)} />}
     </div>
   );
 }
 
-function AddStaff({ close, onDone }: { close: () => void; onDone: () => void }) {
+function WorkspaceChecks({places, ids, set}: {places:Place[]; ids:number[]; set:(ids:number[])=>void}) {
+  return <fieldset className="workspace-checks"><legend>Where can they work?</legend>{places.map(w=><label key={w.id}>
+    <input type="checkbox" checked={ids.includes(w.id)} onChange={e=>set(e.target.checked?[...ids,w.id]:ids.filter(id=>id!==w.id))}/>{w.name}
+  </label>)}</fieldset>;
+}
+function AccessForm({person,places,initial,close,done}:{person:StaffRow; places:Place[]; initial:number[]; close:()=>void; done:()=>void}) {
+  const [ids,setIds]=useState(initial); const {busy,error,submit}=useFormAction();
+  return <Sheet title={'Access for '+person.name} onClose={close}><form className="stack" onSubmit={async e=>{
+    e.preventDefault(); if(await submit(()=>api('/admin/staff/'+person.id+'/access',{method:'PUT',body:{workspaces:ids}}),'Access saved')) done();
+  }}><WorkspaceChecks places={places} ids={ids} set={setIds}/>{error && <ErrorNote error={error}/>}<Button type="submit" tone="primary" busy={busy} disabled={!ids.length}>Save access</Button></form></Sheet>;
+}
+
+function AddStaff({ close, onDone, places }: { places:Place[]; close: () => void; onDone: () => void }) {
+  const [ids,setIds]=useState([Number(selectedWorkspace()) || places[0].id]);
   const [f, setF] = useState({ name: '', loginId: '', mobile: '', password: '', role: 'STAFF' as 'STAFF' | 'ADMIN' });
   const { busy, error, submit } = useFormAction();
   const save = async (e: FormEvent) => {
     e.preventDefault();
-    if (await submit(() => api('/admin/staff', { body: f }), `Account created for ${f.name}`)) onDone();
+    if (await submit(() => api('/admin/staff', { body: {...f,...(f.role==='STAFF'?{workspaces:ids}:{})} }), `Account created for ${f.name}`)) onDone();
   };
   return (
     <Sheet title="Add staff" onClose={close} size="sm">
@@ -652,6 +670,7 @@ function AddStaff({ close, onDone }: { close: () => void; onDone: () => void }) 
         <Field label="Mobile (optional)"><input value={f.mobile} onChange={e => setF({ ...f, mobile: e.target.value })} inputMode="tel" /></Field>
         <Field label="First password" hint="At least 8 characters. They must change it on first sign-in."><input value={f.password} onChange={e => setF({ ...f, password: e.target.value })} required /></Field>
         <Segmented label="Role" value={f.role} onChange={role => setF({ ...f, role })} options={[{ value: 'STAFF', label: 'Counter staff' }, { value: 'ADMIN', label: 'Admin' }]} />
+        {f.role==='STAFF' && <WorkspaceChecks places={places} ids={ids} set={setIds}/>}
         {error && <ErrorNote error={error} />}
         <Button tone="primary" block busy={busy}>Create account</Button>
       </form>

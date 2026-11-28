@@ -1386,3 +1386,27 @@ describe('office scopes', () => {
     await staff.get('/api/ops/customers').expect(403);
   });
 });
+
+describe('staff assignments', () => {
+  it('applies one, several, no access and revocation to existing sessions', async () => {
+    const { db }=await import('../server/db.js');
+    const made=await post(admin,'/api/admin/staff',{name:'Matrix operator',loginId:'MATRIXOP',password:'password-123',workspaces:[2]});
+    expect(made.status,made.body.error).toBe(201);
+    const id=made.body.id;
+    const operator=await signIn('MATRIXOP','password-123');
+    await post(operator,'/api/auth/password',{current:'password-123',next:'changed-pass-123'});
+    const places=async()=> (await operator.get('/api/access/workspaces').expect(200)).body.rows.map((w:{id:number})=>w.id);
+    expect(await places()).toEqual([2]);
+    await operator.get('/api/ops/orders').set('x-ej-workspace','1').expect(403);
+    await admin.put('/api/admin/staff/'+id+'/access').set('x-ej','1').set('x-ej-workspace','-1').send({workspaces:[1,2]}).expect(200);
+    expect(await places()).toEqual([1,2]);
+    await operator.get('/api/ops/orders').set('x-ej-workspace','1').expect(200);
+    await admin.put('/api/admin/staff/'+id+'/access').set('x-ej','1').send({workspaces:[1]}).expect(200);
+    await operator.get('/api/ops/orders').set('x-ej-workspace','2').expect(403);
+    await admin.put('/api/admin/staff/'+id+'/access').set('x-ej','1').send({workspaces:[]}).expect(400);
+    await db.run('DELETE FROM staff_workspaces WHERE user_id=?',[id]);
+    expect(await places()).toEqual([]);
+    await operator.get('/api/auth/me').set('x-ej-workspace','2').expect(200);
+    await operator.get('/api/ops/orders').expect(403);
+  });
+});

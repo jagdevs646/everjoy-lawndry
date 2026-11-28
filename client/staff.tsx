@@ -15,22 +15,38 @@ type Summary = {
 
 export function StaffApp({ user, onSignOut, onUser, onAdmin }: { user: User; onSignOut: () => void; onUser: (u: User) => void; onAdmin?: () => void }) {
   const [location, setLocation] = useState(selectedWorkspace);
-  const places = useLoad(() => api<{rows: {id:number; name:string}[]}>('/access/workspaces'), []);
-  return <CounterWorkspace key={location} {...{user,onSignOut,onUser,onAdmin}} locationPicker={places.data && places.data.rows.length > 1 ? (
+  const places = useLoad(() => api<{rows: {id:number; name:string; kind:'RETAIL'|'CAMPUS'; pending:number}[]}>('/access/workspaces'), [], {every:15_000});
+  const rows = places.data?.rows;
+  const current = rows?.find(w => String(w.id) === location);
+  const choose = (id:number) => {
+    const next=String(id);
+    selectWorkspace(next);
+    setLocation(next);
+    window.location.hash='/';
+  };
+  useEffect(() => {
+    if (!rows || current) return;
+    if (rows.length===1) { selectWorkspace(String(rows[0].id)); setLocation(String(rows[0].id)); }
+    else if (location) { selectWorkspace(''); setLocation(''); }
+  }, [rows,current,location]);
+  if (!rows) return places.error ? <ErrorNote error={places.error} retry={places.reload}/> : <Loading/>;
+  if (!current) return <main className="sf-page workspace-chooser">
+    <Brand sub="Counter"/><h1>{rows.length?'Where are you working?':'No access yet'}</h1>
+    {!rows.length && <p>Ask the admin to assign you a workspace.</p>}
+    {rows.map(w=><Button key={w.id} block onClick={()=>choose(w.id)}>{w.name}{w.pending>0 && ' · '+w.pending+' pending'}</Button>)}
+    <Button onClick={onSignOut}>Sign out</Button>
+  </main>;
+  return <CounterWorkspace key={current.id} {...{user,onSignOut,onUser,onAdmin}} retail={current.kind==='RETAIL'} locationPicker={
     <label className="counter-location">Working at
-      <select value={location || places.data.rows[0].id} onChange={e => {
-        selectWorkspace(e.target.value);
-        setLocation(e.target.value);
-        window.location.hash = '/orders';
-      }}>
-        {places.data.rows.map(w => <option value={w.id} key={w.id}>{w.name}</option>)}
-      </select>
+      {rows.length===1 ? <b>{current.name}</b> : <select value={current.id} onChange={e=>choose(Number(e.target.value))}>
+        {rows.map(w=><option value={w.id} key={w.id}>{w.name}{w.pending>0?' · '+w.pending+' pending':''}</option>)}
+      </select>}
     </label>
-  ) : null} />;
+  }/>;
 }
 
-function CounterWorkspace({ user, onSignOut, onUser, onAdmin, locationPicker }: {
-  user: User; onSignOut: () => void; onUser: (u: User) => void; onAdmin?: () => void; locationPicker: React.ReactNode;
+function CounterWorkspace({ user, onSignOut, onUser, onAdmin, locationPicker, retail }: {
+  user: User; onSignOut: () => void; onUser: (u: User) => void; onAdmin?: () => void; locationPicker: React.ReactNode; retail:boolean;
 }) {
   const parts = useRoute();
   const page = ['pickup', 'orders', 'students', 'issues'].includes(parts[0]) ? parts[0] : 'counter';
@@ -47,6 +63,7 @@ function CounterWorkspace({ user, onSignOut, onUser, onAdmin, locationPicker }: 
     <div className="sf-shell">
       <header className="sf-top">
         <Brand sub="Counter" />
+        {locationPicker}
         {s && (
           <p className="sf-today" aria-label="Today at the counter">
             <span><b>{s.today.received}</b> in</span>
@@ -57,7 +74,6 @@ function CounterWorkspace({ user, onSignOut, onUser, onAdmin, locationPicker }: 
         <button className="sf-user" onClick={() => setMenu(true)} aria-label="Account menu"><span className="avatar">{user.name.split(' ').map(x => x[0]).slice(0, 2).join('')}</span></button>
       </header>
       <main className="sf-main">
-        {locationPicker}
         {page === 'counter' && <Counter settings={s?.settings} services={s?.services ?? []} onCreated={refresh} openOrder={setOrderId} openStudent={setStudentId} pending={s?.pending_students ?? 0} notices={s?.announcements ?? []} />}
         {page === 'pickup' && <Pickup settings={s?.settings} onDone={refresh} openOrder={setOrderId} isAdmin={isAdmin} />}
         {page === 'orders' && <Orders summary={s} onChanged={refresh} openOrder={setOrderId} />}
@@ -68,7 +84,7 @@ function CounterWorkspace({ user, onSignOut, onUser, onAdmin, locationPicker }: 
         <Tab to="" icon="plus" label="New order" on={page === 'counter'} />
         <Tab to="pickup" icon="scan" label="Pickup" on={page === 'pickup'} badge={s?.open.ready} />
         <Tab to="orders" icon="washer" label="Orders" on={page === 'orders'} badge={s?.open.late} alert />
-        <Tab to="students" icon="users" label="Students" on={page === 'students'} badge={(s?.pending_students ?? 0) + (s?.room_changes ?? 0)} />
+        <Tab to="students" icon="users" label={retail?"Customers":"Students"} on={page === 'students'} badge={(s?.pending_students ?? 0) + (s?.room_changes ?? 0)} />
         <Tab to="issues" icon="help" label="Issues" on={page === 'issues'} badge={s?.open_complaints} />
         {/* Computer only: today's numbers and the account, under the menu */}
         {s && (

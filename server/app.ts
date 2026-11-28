@@ -1,4 +1,4 @@
-import { selectWorkspace, visibleWorkspaces, workspaceRouter } from './workspaces.js';
+import { selectWorkspace, workingLocations, workspaceRouter } from './workspaces.js';
 import type { AuthedRequest } from './auth.js';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -50,7 +50,7 @@ export async function createApp({ demo = false } = {}) {
   // Signed-in requests also move orders along (washing / ready) on time, at most once a minute.
   if (process.env.NODE_ENV !== 'test') api.use((req, _res, next) => { if ((req as { user?: unknown }).user) maybeAutoAdvance(); next(); });
   api.use((_req, res, next) => { res.setHeader('Cache-Control', 'no-store'); next(); });
-  api.get('/access/workspaces', async (req, res) => { res.json({ rows: await visibleWorkspaces((req as AuthedRequest).user) }); });
+  api.get('/access/workspaces', async (req, res) => { res.json({ rows: await workingLocations((req as AuthedRequest).user) }); });
   api.get('/health', (_req, res) => res.json({ ok: true }));
   api.get('/files/:name', serveFile);
   api.use(workspaceRouter, publicRoutes, studentRoutes, opsRoutes, adminRoutes);

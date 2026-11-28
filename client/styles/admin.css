@@ -453,3 +453,6 @@ body.col-resizing { cursor: col-resize; user-select: none; }
 .office-scope-phone { display:none }
 .workspace-facts { display:flex; flex-wrap:wrap; gap:.4rem 1.1rem }
 @media(max-width:900px){.office-scope-phone { display:block; max-width:33%; margin-left:auto } .ad-top { flex-wrap:wrap } .scope-picker select {font-size:.85rem}}
+.workspace-checks { display:grid; gap:.6rem; border:1px solid #cfc6c1; border-radius:.5rem }
+.workspace-checks label { display:flex; align-items:center; gap:.6rem }
+.workspace-checks input { width:1.2rem; height:1.2rem }
